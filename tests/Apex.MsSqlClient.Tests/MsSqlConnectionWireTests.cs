@@ -784,10 +784,16 @@ public sealed class MsSqlConnectionWireTests
         request.CertificateExtensions.Add(names.Build());
         request.CertificateExtensions.Add(
           new X509BasicConstraintsExtension(false, false, 0, critical: true));
-        return request.CreateSelfSigned(
+        using var certificate = request.CreateSelfSigned(
           DateTimeOffset.UtcNow.AddMinutes(-5),
           DateTimeOffset.UtcNow.AddDays(1));
+        return CloneCertificate(certificate);
     }
+
+    private static X509Certificate2 CloneCertificate(X509Certificate2 certificate) =>
+      X509CertificateLoader.LoadPkcs12(
+        certificate.Export(X509ContentType.Pfx),
+        password: null);
 
     private static byte[] BuildIntResult(params int[] values)
     {

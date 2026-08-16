@@ -54,7 +54,7 @@ internal static class PgProxyConnector
     }
 
     private static EndPoint CreateTargetEndPoint(PgConnectOptions options) =>
-      options.Host.Length > 0 && options.Host[0] == '/'
+            Path.IsPathRooted(options.Host)
         ? new UnixDomainSocketEndPoint(
           Path.Combine(options.Host, $".s.PGSQL.{options.Port}"))
         : new DnsEndPoint(options.Host, options.Port);

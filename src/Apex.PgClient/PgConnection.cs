@@ -337,7 +337,14 @@ public sealed class PgConnection : ISqlConnection
         finally
         {
             await _scheduler.DisposeAsync().ConfigureAwait(false);
-            await _pipeWriter.CompleteAsync().ConfigureAwait(false);
+            try
+            {
+                await _pipeWriter.CompleteAsync().ConfigureAwait(false);
+            }
+            catch (Exception exception) when (IsFatalConnectionError(exception))
+            {
+            }
+
             await _reader.CompleteAsync().ConfigureAwait(false);
             await _stream.DisposeAsync().ConfigureAwait(false);
             _socket.Dispose();
@@ -1399,7 +1406,7 @@ public sealed class PgConnection : ISqlConnection
     }
 
     private static bool IsUnixSocket(PgConnectOptions options) =>
-        options.Host.Length > 0 && options.Host[0] == '/';
+        Path.IsPathRooted(options.Host);
 
     private static async ValueTask<byte> RequestSslAsync(
         Stream stream,
