@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace Apex.SqlClient;
@@ -5,15 +7,16 @@ namespace Apex.SqlClient;
 /// <summary>A typed SQL parameter value that avoids boxing common scalar values.</summary>
 public readonly struct SqlValue
 {
-    private readonly long _scalar;
-    private readonly decimal _decimal;
+    private readonly SqlValuePayload _payload;
     private readonly object? _reference;
 
-    private SqlValue(SqlValueKind kind, long scalar = 0, decimal decimalValue = 0, object? reference = null)
+    private SqlValue(
+        SqlValueKind kind,
+        SqlValuePayload payload = default,
+        object? reference = null)
     {
         Kind = kind;
-        _scalar = scalar;
-        _decimal = decimalValue;
+        _payload = payload;
         _reference = reference;
     }
 
@@ -52,6 +55,16 @@ public readonly struct SqlValue
 
     public T? Get<T>()
     {
+        if (IsNull)
+        {
+            return default;
+        }
+
+        if (TryGetKnownValue(out T knownValue))
+        {
+            return knownValue;
+        }
+
         var value = ToObject();
         if (value is null)
         {
@@ -66,52 +79,71 @@ public readonly struct SqlValue
 
     public T GetRequired<T>()
     {
+        if (IsNull)
+        {
+            throw new InvalidCastException("SQL value contains NULL.");
+        }
+
+        if (TryGetKnownValue(out T knownValue))
+        {
+            return knownValue;
+        }
+
         var value = ToObject();
+        if (value is null)
+        {
+            throw new InvalidCastException("SQL value contains NULL.");
+        }
+
         return value is T typed
           ? typed
           : throw new InvalidCastException(
-            value is null
-              ? "SQL value contains NULL."
-              : $"SQL value contains {value.GetType().FullName}, not {typeof(T).FullName}.");
+            $"SQL value contains {value.GetType().FullName}, not {typeof(T).FullName}.");
     }
 
     public object? ToObject() =>
       Kind switch
       {
           SqlValueKind.Null => null,
-          SqlValueKind.Boolean => _scalar != 0,
-          SqlValueKind.Int16 => (short)_scalar,
-          SqlValueKind.Int32 => (int)_scalar,
-          SqlValueKind.Int64 => _scalar,
-          SqlValueKind.Single => BitConverter.Int32BitsToSingle((int)_scalar),
-          SqlValueKind.Double => BitConverter.Int64BitsToDouble(_scalar),
-          SqlValueKind.Decimal => _decimal,
-          SqlValueKind.DateOnly => DateOnly.FromDayNumber((int)_scalar),
-          SqlValueKind.TimeOnly => new TimeOnly(_scalar),
-          SqlValueKind.DateTime => DateTime.FromBinary(_scalar),
+          SqlValueKind.Boolean => _payload.Scalar != 0,
+          SqlValueKind.Int16 => (short)_payload.Scalar,
+          SqlValueKind.Int32 => (int)_payload.Scalar,
+          SqlValueKind.Int64 => _payload.Scalar,
+          SqlValueKind.Single => BitConverter.Int32BitsToSingle((int)_payload.Scalar),
+          SqlValueKind.Double => BitConverter.Int64BitsToDouble(_payload.Scalar),
+          SqlValueKind.Decimal => _payload.Decimal,
+          SqlValueKind.Guid => _payload.Guid,
+          SqlValueKind.DateOnly => DateOnly.FromDayNumber((int)_payload.Scalar),
+          SqlValueKind.TimeOnly => new TimeOnly(_payload.Scalar),
+          SqlValueKind.DateTime => DateTime.FromBinary(_payload.Scalar),
+          SqlValueKind.DateTimeOffset => _payload.DateTimeOffset,
           _ => _reference,
       };
 
     public static implicit operator SqlValue(bool value) =>
-      new(SqlValueKind.Boolean, value ? 1 : 0);
+      new(SqlValueKind.Boolean, new SqlValuePayload(value ? 1 : 0));
 
     public static implicit operator SqlValue(short value) =>
-      new(SqlValueKind.Int16, value);
+      new(SqlValueKind.Int16, new SqlValuePayload(value));
 
     public static implicit operator SqlValue(int value) =>
-      new(SqlValueKind.Int32, value);
+      new(SqlValueKind.Int32, new SqlValuePayload(value));
 
     public static implicit operator SqlValue(long value) =>
-      new(SqlValueKind.Int64, value);
+      new(SqlValueKind.Int64, new SqlValuePayload(value));
 
     public static implicit operator SqlValue(float value) =>
-      new(SqlValueKind.Single, BitConverter.SingleToInt32Bits(value));
+      new(
+        SqlValueKind.Single,
+        new SqlValuePayload(BitConverter.SingleToInt32Bits(value)));
 
     public static implicit operator SqlValue(double value) =>
-      new(SqlValueKind.Double, BitConverter.DoubleToInt64Bits(value));
+      new(
+        SqlValueKind.Double,
+        new SqlValuePayload(BitConverter.DoubleToInt64Bits(value)));
 
     public static implicit operator SqlValue(decimal value) =>
-      new(SqlValueKind.Decimal, decimalValue: value);
+      new(SqlValueKind.Decimal, new SqlValuePayload(value));
 
     public static implicit operator SqlValue(string value) =>
       new(SqlValueKind.String, reference: value);
@@ -123,25 +155,126 @@ public readonly struct SqlValue
       new(SqlValueKind.ReadOnlyMemory, reference: value);
 
     public static implicit operator SqlValue(Guid value) =>
-      new(SqlValueKind.Guid, reference: value);
+      new(SqlValueKind.Guid, new SqlValuePayload(value));
 
     public static implicit operator SqlValue(DateOnly value) =>
-      new(SqlValueKind.DateOnly, value.DayNumber);
+      new(SqlValueKind.DateOnly, new SqlValuePayload(value.DayNumber));
 
     public static implicit operator SqlValue(TimeOnly value) =>
-      new(SqlValueKind.TimeOnly, value.Ticks);
+      new(SqlValueKind.TimeOnly, new SqlValuePayload(value.Ticks));
 
     public static implicit operator SqlValue(DateTime value) =>
-      new(SqlValueKind.DateTime, value.ToBinary());
+      new(SqlValueKind.DateTime, new SqlValuePayload(value.ToBinary()));
 
     public static implicit operator SqlValue(DateTimeOffset value) =>
-      new(SqlValueKind.DateTimeOffset, reference: value);
+      new(SqlValueKind.DateTimeOffset, new SqlValuePayload(value));
 
     public static implicit operator SqlValue(JsonDocument value) =>
       new(SqlValueKind.JsonDocument, reference: value);
 
     public static implicit operator SqlValue(JsonElement value) =>
       new(SqlValueKind.JsonElement, reference: value);
+
+    private bool TryGetKnownValue<T>(out T value)
+    {
+        switch (Kind)
+        {
+            case SqlValueKind.Boolean when typeof(T) == typeof(bool):
+                value = Reinterpret<bool, T>(_payload.Scalar != 0);
+                return true;
+            case SqlValueKind.Int16 when typeof(T) == typeof(short):
+                value = Reinterpret<short, T>((short)_payload.Scalar);
+                return true;
+            case SqlValueKind.Int32 when typeof(T) == typeof(int):
+                value = Reinterpret<int, T>((int)_payload.Scalar);
+                return true;
+            case SqlValueKind.Int64 when typeof(T) == typeof(long):
+                value = Reinterpret<long, T>(_payload.Scalar);
+                return true;
+            case SqlValueKind.Single when typeof(T) == typeof(float):
+                value = Reinterpret<float, T>(
+                  BitConverter.Int32BitsToSingle((int)_payload.Scalar));
+                return true;
+            case SqlValueKind.Double when typeof(T) == typeof(double):
+                value = Reinterpret<double, T>(
+                  BitConverter.Int64BitsToDouble(_payload.Scalar));
+                return true;
+            case SqlValueKind.Decimal when typeof(T) == typeof(decimal):
+                value = Reinterpret<decimal, T>(_payload.Decimal);
+                return true;
+            case SqlValueKind.Guid when typeof(T) == typeof(Guid):
+                value = Reinterpret<Guid, T>(_payload.Guid);
+                return true;
+            case SqlValueKind.DateOnly when typeof(T) == typeof(DateOnly):
+                value = Reinterpret<DateOnly, T>(
+                  DateOnly.FromDayNumber((int)_payload.Scalar));
+                return true;
+            case SqlValueKind.TimeOnly when typeof(T) == typeof(TimeOnly):
+                value = Reinterpret<TimeOnly, T>(new TimeOnly(_payload.Scalar));
+                return true;
+            case SqlValueKind.DateTime when typeof(T) == typeof(DateTime):
+                value = Reinterpret<DateTime, T>(
+                  DateTime.FromBinary(_payload.Scalar));
+                return true;
+            case SqlValueKind.DateTimeOffset when typeof(T) == typeof(DateTimeOffset):
+                value = Reinterpret<DateTimeOffset, T>(_payload.DateTimeOffset);
+                return true;
+            default:
+                if (_reference is T reference)
+                {
+                    value = reference;
+                    return true;
+                }
+
+                value = default!;
+                return false;
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static TTo Reinterpret<TFrom, TTo>(TFrom value)
+      where TFrom : struct =>
+      Unsafe.As<TFrom, TTo>(ref value);
+
+    [StructLayout(LayoutKind.Explicit)]
+    private readonly struct SqlValuePayload
+    {
+        [FieldOffset(0)]
+        public readonly long Scalar;
+
+        [FieldOffset(0)]
+        public readonly decimal Decimal;
+
+        [FieldOffset(0)]
+        public readonly Guid Guid;
+
+        [FieldOffset(0)]
+        public readonly DateTimeOffset DateTimeOffset;
+
+        public SqlValuePayload(long value)
+        {
+            this = default;
+            Scalar = value;
+        }
+
+        public SqlValuePayload(decimal value)
+        {
+            this = default;
+            Decimal = value;
+        }
+
+        public SqlValuePayload(Guid value)
+        {
+            this = default;
+            Guid = value;
+        }
+
+        public SqlValuePayload(DateTimeOffset value)
+        {
+            this = default;
+            DateTimeOffset = value;
+        }
+    }
 }
 
 public enum SqlValueKind : byte
