@@ -265,7 +265,9 @@ public sealed class MsSqlFedAuthWireTests
           new SslServerAuthenticationOptions
           {
               ServerCertificate = certificate,
-              EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+              // TLS 1.3 may emit post-handshake records after this synthetic server
+              // switches the TDS handshake wrapper to raw transport.
+              EnabledSslProtocols = SslProtocols.Tls12,
           });
         handshake.SwitchToRaw();
 
