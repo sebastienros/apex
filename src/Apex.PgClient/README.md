@@ -29,6 +29,19 @@ SqlRowSet rows = await pool.QueryAsync(
     SqlParameters.Create(42));
 ```
 
+Use a pipeline pool when each physical connection should accept multiple
+concurrent operations:
+
+```csharp
+await using PgPipelinePool pool = await PgPipelinePool.CreateAsync(
+    PgConnectOptions.FromEnvironment() with { PipeliningLimit = 64 },
+    new SqlPipelinePoolOptions { ConnectionCount = Environment.ProcessorCount });
+await using ISqlPreparedStatement statement = await pool.PrepareAsync(
+    "SELECT id, message FROM fortune");
+
+SqlRowSet rows = await statement.QueryAsync();
+```
+
 ## Supported features
 
 - Simple and extended query protocols with ordered automatic pipelining.

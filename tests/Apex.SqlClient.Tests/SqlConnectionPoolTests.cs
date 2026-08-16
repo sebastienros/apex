@@ -7,6 +7,88 @@ namespace Apex.SqlClient.Tests;
 public sealed class SqlConnectionPoolTests
 {
     [TestMethod]
+    public async Task PipelinePoolDistributesOperationsAndPreparesEveryConnection()
+    {
+        List<FakeConnection> created = [];
+        await using var pool = await SqlPipelinePool.CreateAsync(
+            new SqlPipelinePoolOptions { ConnectionCount = 2 },
+            _ =>
+            {
+                FakeConnection connection = new();
+                created.Add(connection);
+                return ValueTask.FromResult<ISqlConnection>(connection);
+            },
+            CancellationToken.None);
+
+        await pool.QueryAsync("SELECT 1");
+        await pool.QueryAsync("SELECT 2");
+        await pool.QueryAsync("SELECT 3");
+
+        Assert.AreEqual(2, created[0].QueryCount);
+        Assert.AreEqual(1, created[1].QueryCount);
+
+        await using var statement = await pool.PrepareAsync("SELECT value");
+        await statement.CollectAsync(0, static (_, _) => { });
+        await statement.CollectAsync(0, static (_, _) => { });
+        await statement.CollectAsync(0, static (_, _) => { });
+
+        Assert.AreEqual(2, created[0].PreparedStatement!.CollectCount);
+        Assert.AreEqual(1, created[1].PreparedStatement!.CollectCount);
+        Assert.AreEqual(0, created[0].PreparedStatement!.QueryCount);
+        Assert.AreEqual(0, created[1].PreparedStatement!.QueryCount);
+    }
+
+    [TestMethod]
+    public async Task PipelinePoolCleansUpPartialCreationFailure()
+    {
+        List<FakeConnection> created = [];
+        var attempt = 0;
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            () => SqlPipelinePool.CreateAsync(
+                new SqlPipelinePoolOptions { ConnectionCount = 3 },
+                _ =>
+                {
+                    if (Interlocked.Increment(ref attempt) == 2)
+                    {
+                        return ValueTask.FromException<ISqlConnection>(
+                            new InvalidOperationException("Connection failed."));
+                    }
+
+                    FakeConnection connection = new();
+                    created.Add(connection);
+                    return ValueTask.FromResult<ISqlConnection>(connection);
+                },
+                CancellationToken.None).AsTask());
+
+        Assert.HasCount(2, created);
+        Assert.IsTrue(created.All(static connection => connection.DisposeCount == 1));
+    }
+
+    [TestMethod]
+    public async Task PipelinePoolDisposesPreparedStatementsBeforeConnections()
+    {
+        List<FakeConnection> created = [];
+        var pool = await SqlPipelinePool.CreateAsync(
+            new SqlPipelinePoolOptions { ConnectionCount = 2 },
+            _ =>
+            {
+                FakeConnection connection = new();
+                created.Add(connection);
+                return ValueTask.FromResult<ISqlConnection>(connection);
+            },
+            CancellationToken.None);
+        var statement = await pool.PrepareAsync("SELECT value");
+
+        await pool.DisposeAsync();
+        await statement.DisposeAsync();
+
+        Assert.IsTrue(created.All(static connection =>
+            connection.PreparedStatement!.DisposeCount == 1));
+        Assert.IsTrue(created.All(static connection => connection.DisposeCount == 1));
+    }
+
+    [TestMethod]
     public async Task ReusesConnectionsAndTracksPhysicalSize()
     {
         List<FakeConnection> created = [];
@@ -314,6 +396,8 @@ public sealed class SqlConnectionPoolTests
 
         internal int DisposeCount { get; private set; }
 
+        internal int QueryCount { get; private set; }
+
         internal FakePreparedStatement? PreparedStatement { get; private set; }
 
         internal TaskCompletionSource QueryStarted { get; } =
@@ -331,6 +415,7 @@ public sealed class SqlConnectionPoolTests
             string sql,
             CancellationToken cancellationToken = default)
         {
+            QueryCount++;
             QueryStarted.TrySetResult();
             if (_queryRelease is not null)
             {
@@ -409,14 +494,33 @@ public sealed class SqlConnectionPoolTests
 
     private sealed class FakePreparedStatement(string sql) : ISqlPreparedStatement
     {
+        internal int CollectCount { get; private set; }
+
+        internal int QueryCount { get; private set; }
+
+        internal int DisposeCount { get; private set; }
+
         internal int StreamCount { get; private set; }
 
         public string Sql { get; } = sql;
 
         public ValueTask<SqlRowSet> QueryAsync(
             SqlParameters parameters = default,
-            CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult(SqlRowSet.Empty);
+            CancellationToken cancellationToken = default)
+        {
+            QueryCount++;
+            return ValueTask.FromResult(SqlRowSet.Empty);
+        }
+
+        public ValueTask<TState> CollectAsync<TState>(
+            TState state,
+            Action<TState, SqlRow> collector,
+            SqlParameters parameters = default,
+            CancellationToken cancellationToken = default)
+        {
+            CollectCount++;
+            return ValueTask.FromResult(state);
+        }
 
         public ValueTask<SqlCommandResult> ExecuteAsync(
             SqlParameters parameters = default,
@@ -445,7 +549,11 @@ public sealed class SqlConnectionPoolTests
             CancellationToken cancellationToken = default) =>
             StreamRows();
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
 
         private async IAsyncEnumerable<SqlRow> StreamRows()
         {

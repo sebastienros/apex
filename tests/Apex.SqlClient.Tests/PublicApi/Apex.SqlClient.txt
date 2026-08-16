@@ -40,6 +40,10 @@ interface Apex.SqlClient.ISqlCursor : System.IAsyncDisposable
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] ReadAsync(Int32, System.Threading.CancellationToken)
   Property: Boolean HasMore
   Property: System.Collections.Generic.IReadOnlyList`1[Apex.SqlClient.SqlColumn] Columns
+interface Apex.SqlClient.ISqlPipelinePool : Apex.SqlClient.ISqlClient, System.IAsyncDisposable
+  Method: Int32 get_Size()
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlPreparedStatement] PrepareAsync(System.String, System.Threading.CancellationToken)
+  Property: Int32 Size
 interface Apex.SqlClient.ISqlPool : Apex.SqlClient.ISqlClient, System.IAsyncDisposable
   Method: Int32 get_Size()
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlConnection] GetConnectionAsync(System.Threading.CancellationToken)
@@ -237,6 +241,18 @@ struct Apex.SqlClient.SqlParameters : System.Collections.Generic.IEnumerable`1[A
   Property: Apex.SqlClient.SqlParameters Empty
   Property: Apex.SqlClient.SqlValue Item [Int32]
   Property: Int32 Count
+class Apex.SqlClient.SqlPipelinePoolOptions : System.IEquatable`1[Apex.SqlClient.SqlPipelinePoolOptions]
+  Constructor: Void .ctor()
+  Method: Apex.SqlClient.SqlPipelinePoolOptions <Clone>$()
+  Method: Boolean Equals(Apex.SqlClient.SqlPipelinePoolOptions)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean op_Equality(Apex.SqlClient.SqlPipelinePoolOptions, Apex.SqlClient.SqlPipelinePoolOptions)
+  Method: Boolean op_Inequality(Apex.SqlClient.SqlPipelinePoolOptions, Apex.SqlClient.SqlPipelinePoolOptions)
+  Method: Int32 GetHashCode()
+  Method: Int32 get_ConnectionCount()
+  Method: System.String ToString()
+  Method: Void set_ConnectionCount(Int32)
+  Property: Int32 ConnectionCount
 class Apex.SqlClient.SqlPoolOptions : System.IEquatable`1[Apex.SqlClient.SqlPoolOptions]
   Constructor: Void .ctor()
   Method: Apex.SqlClient.SqlPoolOptions <Clone>$()

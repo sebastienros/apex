@@ -459,6 +459,18 @@ class Apex.PgClient.PgPath : System.IEquatable`1[Apex.PgClient.PgPath]
   Method: Void set_Points(System.Collections.Generic.IReadOnlyList`1[Apex.PgClient.PgPoint])
   Property: Boolean Closed
   Property: System.Collections.Generic.IReadOnlyList`1[Apex.PgClient.PgPoint] Points
+class Apex.PgClient.PgPipelinePool : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlPipelinePool, System.IAsyncDisposable
+  Method: Int32 get_Size()
+  Method: System.Collections.Generic.IAsyncEnumerable`1[Apex.SqlClient.SqlRow] StreamAsync(System.String, Apex.SqlClient.SqlParameters, Int32, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask`1[Apex.PgClient.PgPipelinePool] CreateAsync(Apex.PgClient.PgConnectOptions, Apex.SqlClient.SqlPipelinePoolOptions, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.PgClient.PgPipelinePool] CreateAsync(System.String, Apex.SqlClient.SqlPipelinePoolOptions, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlPreparedStatement] PrepareAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, System.Threading.CancellationToken)
+  Property: Int32 Size
 struct Apex.PgClient.PgPoint : System.IEquatable`1[Apex.PgClient.PgPoint]
   Constructor: Void .ctor(Double, Double)
   Method: Boolean Equals(Apex.PgClient.PgPoint)

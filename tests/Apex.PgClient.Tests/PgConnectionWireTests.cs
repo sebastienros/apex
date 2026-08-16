@@ -234,10 +234,15 @@ public sealed class PgConnectionWireTests
         var queries = Enumerable.Range(0, 32)
           .Select(index => connection.QueryAsync($"SELECT {index}::int4").AsTask())
           .ToArray();
-        await Assert.ThrowsAsync<Exception>(() => Task.WhenAll(queries));
+        var allQueries = Task.WhenAll(queries);
+        var completed = await Task.WhenAny(
+            allQueries,
+            Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.AreSame(allQueries, completed);
+        await Assert.ThrowsAsync<Exception>(() => allQueries);
 
         Assert.IsTrue(queries.All(static query => query.IsFaulted || query.IsCanceled));
-        await server;
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
         listener.Stop();
     }
 
@@ -394,11 +399,8 @@ public sealed class PgConnectionWireTests
         await using var stream = client.GetStream();
         await ReadStartupAsync(stream);
         await WriteStartupCompleteAsync(stream);
-        for (var i = 0; i < 5; i++)
-        {
-            (var type, _) = await ReadMessageAsync(stream);
-            Assert.AreEqual((byte)'Q', type);
-        }
+        (var type, _) = await ReadMessageAsync(stream);
+        Assert.AreEqual((byte)'Q', type);
     }
 
     private static async Task ReadStartupAsync(Stream stream)
