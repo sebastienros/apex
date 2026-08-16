@@ -3,6 +3,9 @@ using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Numerics;
+using System.Text;
+using System.Text.Json;
+using System.Transactions;
 using Apex.SqlClient;
 using Apex.SqlClient.SpecificationTests;
 using Testcontainers.PostgreSql;
@@ -73,6 +76,160 @@ public sealed class PgConnectionIntegrationTests
         var count = await connection.QueryAsync(
             "SELECT COUNT(*)::int8 AS count FROM values_to_rollback");
         Assert.AreEqual(0L, count[0].Get<long>("count"));
+    }
+
+    [TestMethod]
+    public async Task SupportsTypedParametersBatchesTransactionsCopyAndTypeReload()
+    {
+        var container = _container ??
+            throw new InvalidOperationException("The PostgreSQL container is not running.");
+        PgConnectOptions options = new()
+        {
+            Host = container.Hostname,
+            Port = container.GetMappedPublicPort(5432),
+            Database = "db",
+            Username = "user",
+            Password = "pass",
+        };
+
+        await using var connection = await PgClient.ConnectAsync(options);
+            using JsonDocument json = JsonDocument.Parse("""{"name":"Apex"}""");
+            var ids = new[] { Guid.NewGuid(), Guid.NewGuid() };
+            var timestamps = new[]
+            {
+                DateTimeOffset.Parse("2026-08-16T12:00:00Z", CultureInfo.InvariantCulture),
+            };
+            var typed = await connection.QueryTypedAsync(
+                """
+                SELECT $1::jsonb ->> 'name' AS name,
+                       $2::uuid[] AS ids,
+                       $3::timestamptz[] AS timestamps,
+                       $4::jsonb IS NULL AS is_null
+                """,
+                PgParameters.Create(
+                    PgParameter.Create(PgType.Jsonb, json),
+                    PgParameter.Create(PgType.UuidArray, ids),
+                    PgParameter.Create(PgType.TimestampTzArray, timestamps),
+                    new PgParameter(PgType.Jsonb, SqlValue.Null)));
+            Assert.AreEqual("Apex", typed[0].Get<string>("name"));
+            CollectionAssert.AreEqual(ids, typed[0].GetArray<Guid>("ids"));
+            Assert.IsTrue(typed[0].Get<bool>("is_null"));
+
+            PgBatch batch = new();
+            batch.Add(
+                "SELECT $1::int4 AS value",
+                PgParameters.Create(PgParameter.Create(PgType.Integer, 42)));
+            batch.Add(
+                "SELECT $1::jsonb ->> 'name' AS name",
+                PgParameters.Create(PgParameter.Create(PgType.Jsonb, json)));
+            var batchResults = await connection.ExecuteBatchAsync(batch);
+            Assert.AreEqual(2, batchResults.Count);
+            Assert.AreEqual(42, batchResults.Current[0].Get<int>("value"));
+            Assert.IsTrue(await batchResults.NextResultAsync());
+            Assert.AreEqual("Apex", batchResults.Current[0].Get<string>("name"));
+
+            PgBatch failingBatch = new();
+            failingBatch.Add("SELECT 1");
+            failingBatch.Add("SELECT missing_column");
+            var batchException = await Assert.ThrowsExactlyAsync<PgBatchException>(
+                () => connection.ExecuteBatchAsync(failingBatch).AsTask());
+            Assert.AreEqual(1, batchException.CommandIndex);
+            Assert.AreEqual(PgErrorCodes.UndefinedColumn, batchException.ServerError.SqlState);
+            Assert.AreEqual(1, (await connection.QueryAsync("SELECT 1"))[0].Get<int>(0));
+
+            await connection.ExecuteAsync("CREATE TEMP TABLE transaction_values (value int)");
+            await using (var transaction = await connection.BeginPgTransactionAsync(
+                new PgTransactionOptions
+                {
+                    IsolationLevel = PgIsolationLevel.Serializable,
+                }))
+            {
+                await connection.ExecuteAsync("INSERT INTO transaction_values VALUES (1)");
+                await transaction.CreateSavepointAsync("before_second");
+                await connection.ExecuteAsync("INSERT INTO transaction_values VALUES (2)");
+                await transaction.RollbackToSavepointAsync("before_second");
+                await transaction.ReleaseSavepointAsync("before_second");
+                await transaction.CommitAsync();
+            }
+
+            Assert.AreEqual(
+                1L,
+                (await connection.QueryAsync(
+                    "SELECT count(*)::int8 AS count FROM transaction_values"))[0].Get<long>("count"));
+
+            await connection.ExecuteAsync(
+                """
+                CREATE TEMP TABLE copied_values (
+                    id int4,
+                    data jsonb,
+                    external_id uuid,
+                    created_at timestamptz)
+                """);
+            await using (var importer = await connection.BeginBinaryImportAsync(
+                "COPY copied_values (id, data, external_id, created_at) FROM STDIN (FORMAT BINARY)"))
+            {
+                await importer.StartRowAsync();
+                await importer.WriteAsync(PgParameter.Create(PgType.Integer, 1));
+                await importer.WriteAsync(PgParameter.Create(PgType.Jsonb, json));
+                await importer.WriteAsync(PgParameter.Create(PgType.Uuid, ids[0]));
+                await importer.WriteAsync(PgParameter.Create(PgType.TimestampTz, timestamps[0]));
+                await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+                    () => connection.QueryAsync("SELECT 1").AsTask());
+                await importer.CompleteAsync();
+            }
+
+            Assert.AreEqual(
+                "Apex",
+                (await connection.QueryAsync(
+                    "SELECT data ->> 'name' AS name FROM copied_values"))[0].Get<string>("name"));
+            await using (var importer = await connection.BeginBinaryImportAsync(
+                "COPY copied_values (id, data, external_id, created_at) FROM STDIN (FORMAT BINARY)"))
+            {
+                await importer.StartRowAsync();
+            }
+
+            Assert.AreEqual(1, (await connection.QueryAsync("SELECT 1"))[0].Get<int>(0));
+
+            await connection.ExecuteAsync(
+                "CREATE TYPE apex_test_mood AS ENUM ('happy', 'sad')");
+            await connection.ReloadTypesAsync();
+            Assert.IsTrue(
+                connection.TypeRegistry.TryGetType(
+                    "public.apex_test_mood",
+                    out var moodType));
+            connection.TypeRegistry.Register<string>(
+                moodType,
+                Encoding.UTF8.GetBytes,
+                value => Encoding.UTF8.GetString(value.Span));
+            var mood = await connection.QueryTypedAsync(
+                "SELECT $1::apex_test_mood AS mood",
+                PgParameters.Create(PgParameter.Create(moodType, "happy")));
+            Assert.AreEqual("happy", mood[0].Get<string>("mood"));
+
+            await connection.ExecuteAsync("CREATE TEMP TABLE ambient_values (value int)");
+            using (TransactionScope scope = new(TransactionScopeAsyncFlowOption.Enabled))
+            {
+                await connection.EnlistTransactionAsync(Transaction.Current!);
+                await connection.ExecuteAsync("INSERT INTO ambient_values VALUES (1)");
+                scope.Complete();
+            }
+            using (TransactionScope scope = new(TransactionScopeAsyncFlowOption.Enabled))
+            {
+                await connection.EnlistTransactionAsync(Transaction.Current!);
+                await connection.ExecuteAsync("INSERT INTO ambient_values VALUES (2)");
+            }
+
+            Assert.AreEqual(
+            1L,
+            (await connection.QueryAsync(
+                "SELECT count(*)::int8 AS count FROM ambient_values"))[0].Get<long>("count"));
+
+            await Assert.ThrowsExactlyAsync<InvalidDataException>(
+                () => connection.BeginBinaryImportAsync(
+                    "COPY copied_values (id, data, external_id, created_at) FROM STDIN (FORMAT TEXT)")
+                  .AsTask());
+            await Assert.ThrowsAsync<Exception>(
+                () => connection.QueryAsync("SELECT 1").AsTask());
     }
 
     [TestMethod]
