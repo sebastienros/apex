@@ -12,6 +12,7 @@ namespace Apex.MsSqlClient;
 public sealed class MsSqlConnection : ISqlConnection
 {
     private readonly MsSqlConnectOptions _options;
+    private readonly TdsFedAuthLogin? _fedAuth;
     private readonly Socket _socket;
     private readonly Stream _stream;
     private readonly TdsPacketReader _reader;
@@ -32,9 +33,11 @@ public sealed class MsSqlConnection : ISqlConnection
         Socket socket,
         Stream stream,
         bool secure,
-        Version? preLoginVersion)
+        Version? preLoginVersion,
+        TdsFedAuthLogin? fedAuth)
     {
         _options = options;
+        _fedAuth = fedAuth;
         _socket = socket;
         _stream = stream;
         _reader = new TdsPacketReader(stream);
@@ -90,8 +93,10 @@ public sealed class MsSqlConnection : ISqlConnection
         var current = options;
         for (var redirect = 0; redirect <= 3; redirect++)
         {
-            var connection =
-              await ConnectPhysicalAsync(current, timeout.Token).ConfigureAwait(false);
+            (var resolved, var accessToken) =
+              await ResolveCredentialAsync(current, timeout.Token).ConfigureAwait(false);
+            var connection = await ConnectPhysicalAsync(resolved, accessToken, timeout.Token)
+              .ConfigureAwait(false);
             try
             {
                 var routing =
@@ -628,6 +633,7 @@ public sealed class MsSqlConnection : ISqlConnection
 
     private static async ValueTask<MsSqlConnection> ConnectPhysicalAsync(
         MsSqlConnectOptions options,
+        string? accessToken,
         CancellationToken cancellationToken)
     {
         Socket socket = new(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp)
@@ -657,6 +663,7 @@ public sealed class MsSqlConnection : ISqlConnection
                 ? TdsEncryptionLevel.NotSupported
                 : TdsEncryptionLevel.On,
               options.PacketSize,
+              requestFederatedAuthentication: accessToken is not null,
               cancellationToken).ConfigureAwait(false);
 
             if (options.EncryptionMode != MsSqlEncryptionMode.Strict)
@@ -697,7 +704,8 @@ public sealed class MsSqlConnection : ISqlConnection
               socket,
               stream,
               secure,
-              preLogin.ServerVersion);
+              preLogin.ServerVersion,
+              CreateFedAuthLogin(accessToken, secure, preLogin));
         }
         catch
         {
@@ -706,17 +714,84 @@ public sealed class MsSqlConnection : ISqlConnection
         }
     }
 
+    private static async ValueTask<(MsSqlConnectOptions Options, string? AccessToken)>
+      ResolveCredentialAsync(
+        MsSqlConnectOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (options.AuthenticationProvider is null)
+        {
+            return (options, null);
+        }
+
+        var credential = await options.AuthenticationProvider(cancellationToken)
+          .ConfigureAwait(false) ??
+          throw new InvalidOperationException(
+            "The SQL Server authentication provider returned no credential.");
+        var bearer = credential.Method == SqlAuthenticationMethod.BearerToken;
+        var resolved = options with
+        {
+            Username = credential.Username ?? options.Username,
+            Password = bearer ? string.Empty : credential.Secret,
+        };
+        if (!bearer)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(resolved.Username);
+            return (resolved, null);
+        }
+
+        if (resolved.EncryptionMode is not (MsSqlEncryptionMode.Require or
+            MsSqlEncryptionMode.Strict))
+        {
+            throw new AuthenticationException(
+              "SQL Server bearer token authentication requires full-session encryption; " +
+              "use Encrypt=true or Encrypt=strict.");
+        }
+
+        if (resolved.TrustServerCertificate)
+        {
+            throw new AuthenticationException(
+              "SQL Server bearer token authentication requires server certificate validation; " +
+              "TrustServerCertificate must be false.");
+        }
+
+        return (resolved, credential.Secret);
+    }
+
+    private static TdsFedAuthLogin? CreateFedAuthLogin(
+        string? accessToken,
+        bool secure,
+        TdsPreLoginResponse preLogin)
+    {
+        if (accessToken is null)
+        {
+            return null;
+        }
+
+        if (!secure)
+        {
+            throw new AuthenticationException(
+              "SQL Server bearer token authentication requires an encrypted connection.");
+        }
+
+        return new TdsFedAuthLogin(
+          accessToken,
+          preLogin.FederatedAuthenticationRequired,
+          preLogin.Nonce);
+    }
+
     private static async ValueTask<TdsPreLoginResponse> ExchangePreLoginAsync(
         Stream stream,
         TdsEncryptionLevel requestedLevel,
         int packetSize,
+        bool requestFederatedAuthentication,
         CancellationToken cancellationToken)
     {
         using TdsPacketWriter writer = new(stream, packetSize);
         TdsPacketReader reader = new(stream);
         await writer.WriteMessageAsync(
           TdsMessageType.PreLogin,
-          TdsPreLogin.Encode(requestedLevel),
+          TdsPreLogin.Encode(requestedLevel, requestFederatedAuthentication),
           cancellationToken).ConfigureAwait(false);
         var response =
           await reader.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
@@ -777,10 +852,12 @@ public sealed class MsSqlConnection : ISqlConnection
     {
         await _writer.WriteMessageAsync(
           TdsMessageType.Login7,
-          TdsLogin7.Encode(_options),
+          TdsLogin7.Encode(_options, _fedAuth),
           cancellationToken).ConfigureAwait(false);
         List<MsSqlInfo> errors = [];
         var loginAcknowledged = false;
+        var fedAuthAcknowledged = false;
+        var fedAuthTokenSent = false;
         MsSqlRoutingInfo? routing = null;
         var final = false;
         while (!final)
@@ -794,9 +871,12 @@ public sealed class MsSqlConnection : ISqlConnection
             }
 
             TdsTokenReader tokens = new(message.Payload);
+            var fedAuthInfoRequested = false;
+            var tokenCount = 0;
             while (tokens.HasRemaining)
             {
                 var token = tokens.ReadTokenType();
+                tokenCount++;
                 switch (token)
                 {
                     case TdsTokenType.LoginAck:
@@ -819,8 +899,18 @@ public sealed class MsSqlConnection : ISqlConnection
                     case TdsTokenType.Error:
                         errors.Add(tokens.ReadMessage());
                         break;
+                    case TdsTokenType.FedAuthInfo:
+                        _ = tokens.ReadFedAuthInfo();
+                        fedAuthInfoRequested = true;
+                        break;
                     case TdsTokenType.FeatureExtAck:
-                        tokens.SkipFeatureExtAck();
+                        var acknowledgement = tokens.ReadFeatureExtAck();
+                        if (acknowledgement.FedAuthAcknowledged)
+                        {
+                            ValidateFedAuthAcknowledgement(acknowledgement);
+                            fedAuthAcknowledged = true;
+                        }
+
                         break;
                     case TdsTokenType.Done:
                     case TdsTokenType.DoneProc:
@@ -837,6 +927,36 @@ public sealed class MsSqlConnection : ISqlConnection
                           $"SQL Server login token 0x{token:X2} is not supported.");
                 }
             }
+
+            if (!fedAuthInfoRequested)
+            {
+                continue;
+            }
+
+            if (tokenCount != 1)
+            {
+                throw new InvalidDataException(
+                  "SQL Server sent FEDAUTHINFO with other tokens in the same message.");
+            }
+
+            if (_fedAuth is not { } fedAuth)
+            {
+                throw new AuthenticationException(
+                  "SQL Server requested a federated authentication token, but the connection " +
+                  "does not use bearer token authentication.");
+            }
+
+            if (fedAuthTokenSent)
+            {
+                throw new InvalidDataException(
+                  "SQL Server requested a federated authentication token more than once.");
+            }
+
+            fedAuthTokenSent = true;
+            await _writer.WriteMessageAsync(
+              TdsMessageType.FedAuthToken,
+              TdsFedAuth.EncodeTokenMessage(fedAuth),
+              cancellationToken).ConfigureAwait(false);
         }
 
         if (errors.Count > 0)
@@ -850,7 +970,28 @@ public sealed class MsSqlConnection : ISqlConnection
               "SQL Server completed LOGIN7 without a LOGINACK token.");
         }
 
+        if (_fedAuth is not null && routing is null && !fedAuthAcknowledged)
+        {
+            throw new AuthenticationException(
+              "SQL Server did not acknowledge the FEDAUTH feature extension.");
+        }
+
         return routing;
+    }
+
+    private void ValidateFedAuthAcknowledgement(TdsFeatureExtAck acknowledgement)
+    {
+        if (_fedAuth is null)
+        {
+            throw new InvalidDataException(
+              "SQL Server acknowledged the FEDAUTH feature that was never requested.");
+        }
+
+        if (acknowledgement.FedAuthDataLength != 0)
+        {
+            throw new InvalidDataException(
+              "SQL Server acknowledged the FEDAUTH feature with unexpected data.");
+        }
     }
 
     private async ValueTask<SqlRowSet> ExecuteQueryCoreAsync(

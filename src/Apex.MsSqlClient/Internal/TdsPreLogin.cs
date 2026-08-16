@@ -13,19 +13,27 @@ internal enum TdsEncryptionLevel : byte
 internal readonly record struct TdsPreLoginResponse(
     Version? ServerVersion,
     TdsEncryptionLevel EncryptionLevel,
-    bool MarsSupported);
+    bool MarsSupported,
+    bool FederatedAuthenticationRequired = false,
+    ReadOnlyMemory<byte> Nonce = default);
 
 internal static class TdsPreLogin
 {
+    internal const int NonceLength = 32;
     private const byte VersionOption = 0x00;
     private const byte EncryptionOption = 0x01;
     private const byte MarsOption = 0x04;
+    private const byte FedAuthRequiredOption = 0x06;
+    private const byte NonceOption = 0x07;
     private const byte Terminator = 0xFF;
 
-    internal static byte[] Encode(TdsEncryptionLevel encryptionLevel)
+    internal static byte[] Encode(
+        TdsEncryptionLevel encryptionLevel,
+        bool requestFederatedAuthentication = false)
     {
-        const int tableLength = 3 * 5 + 1;
-        var payload = new byte[tableLength + 8];
+        var optionCount = requestFederatedAuthentication ? 4 : 3;
+        var tableLength = optionCount * 5 + 1;
+        var payload = new byte[tableLength + (requestFederatedAuthentication ? 9 : 8)];
         var table = 0;
         var data = tableLength;
         WriteOption(payload, ref table, VersionOption, data, 6);
@@ -38,7 +46,14 @@ internal static class TdsPreLogin
         payload[data++] = (byte)encryptionLevel;
 
         WriteOption(payload, ref table, MarsOption, data, 1);
-        payload[data] = 0;
+        payload[data++] = 0;
+
+        if (requestFederatedAuthentication)
+        {
+            WriteOption(payload, ref table, FedAuthRequiredOption, data, 1);
+            payload[data] = 1;
+        }
+
         payload[table] = Terminator;
         return payload;
     }
@@ -48,6 +63,8 @@ internal static class TdsPreLogin
         Version? version = null;
         TdsEncryptionLevel? encryption = null;
         var mars = false;
+        var federatedAuthenticationRequired = false;
+        ReadOnlyMemory<byte> nonce = default;
         var position = 0;
         while (true)
         {
@@ -82,6 +99,18 @@ internal static class TdsPreLogin
                 case MarsOption when length == 1:
                     mars = value[0] != 0;
                     break;
+                case FedAuthRequiredOption:
+                    federatedAuthenticationRequired = length == 1 && value[0] <= 1
+                      ? value[0] == 1
+                      : throw new InvalidDataException(
+                        "SQL Server PRELOGIN response contains an invalid FEDAUTHREQUIRED option.");
+                    break;
+                case NonceOption:
+                    nonce = length == NonceLength
+                      ? value.ToArray()
+                      : throw new InvalidDataException(
+                        $"SQL Server PRELOGIN NONCEOPT option has length {length}; expected {NonceLength}.");
+                    break;
             }
         }
 
@@ -89,7 +118,9 @@ internal static class TdsPreLogin
           version,
           encryption ?? throw new InvalidDataException(
             "SQL Server PRELOGIN response omitted the ENCRYPTION option."),
-          mars);
+          mars,
+          federatedAuthenticationRequired,
+          nonce);
     }
 
     private static void WriteOption(

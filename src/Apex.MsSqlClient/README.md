@@ -49,8 +49,33 @@ Certificate validation is enabled by default. `TrustServerCertificate` is an
 explicit opt-out for controlled environments. A TLS host name, client
 certificates, revocation policy, and custom validation callback can be supplied.
 
-Only SQL authentication is currently supported. Integrated/Windows
-authentication, Microsoft Entra ID, and access tokens are not supported.
+Only SQL authentication and federated access tokens are currently supported.
+Integrated/Windows authentication is not supported.
+
+## Authentication
+
+`AuthenticationProvider` is resolved once per physical connection, including
+after each routing redirect, so rotated secrets and short-lived tokens are
+refreshed automatically.
+
+```csharp
+MsSqlConnectOptions options = new()
+{
+    Host = "contoso.database.windows.net",
+    Database = "app",
+    AuthenticationProvider = async cancellationToken => new SqlAuthenticationCredential(
+        await GetAccessTokenAsync(cancellationToken),
+        SqlAuthenticationMethod.BearerToken),
+};
+```
+
+A `BearerToken` credential authenticates with the TDS federated authentication
+Security Token library: `FEDAUTHREQUIRED` is advertised in `PRELOGIN`, the token
+is carried in the `LOGIN7` `FEDAUTH` feature extension, and a `FEDAUTHINFO`
+request is answered with a federated authentication token message. Bearer
+credentials require `Encrypt=true` or `Encrypt=strict` with
+`TrustServerCertificate=false`. A `Password` credential keeps the standard SQL
+authentication login unchanged.
 
 ## Transactions and cancellation
 

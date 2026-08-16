@@ -2,11 +2,29 @@
   "version": 2,
   "dependencies": {
     "net10.0": {
-      "Microsoft.DotNet.ILCompiler": {
+      "Azure.Core": {
         "type": "Direct",
-        "requested": "[10.0.10, )",
-        "resolved": "10.0.10",
-        "contentHash": "tnG8ntt/Bk6odvHREnGLMo3PEiihy5iSlIFVp0JbIo00GKtNRt2k73eKZbPqR5yaJNIa3z8R86YLwbxfqpb17g=="
+        "requested": "[1.61.0, )",
+        "resolved": "1.61.0",
+        "contentHash": "sns4J9zz7NCpfNYz9rMIly5/TjDkNsTnPAr4nNr0BUBzn6tn6RNOEHOKb7A7DhJj/dEFMSevp3Ye36cUiNmsfg==",
+        "dependencies": {
+          "Microsoft.Bcl.AsyncInterfaces": "10.0.9",
+          "Microsoft.Extensions.Configuration.Abstractions": "10.0.9",
+          "Microsoft.Extensions.Hosting.Abstractions": "10.0.9",
+          "Microsoft.Identity.Client": "4.84.2",
+          "Microsoft.Identity.Client.Extensions.Msal": "4.84.2",
+          "System.ClientModel": "1.15.0",
+          "System.Memory.Data": "10.0.9"
+        }
+      },
+      "Azure.Identity": {
+        "type": "Direct",
+        "requested": "[1.21.0, )",
+        "resolved": "1.21.0",
+        "contentHash": "GeFv8sGwRKvDKwI2WFy8r0mhmlxEVZg24Sit2NogTjiSO8RVjllWM65OT6e1sKjOvG8V74y7hAbaELUUPjZQSw==",
+        "dependencies": {
+          "Azure.Core": "1.53.0"
+        }
       },
       "Microsoft.NET.ILLink.Tasks": {
         "type": "Direct",
@@ -174,87 +192,11 @@
           "System.IO.Hashing": "[10.0.11, )"
         }
       },
-      "apex.sqlclient.azureidentity": {
-        "type": "Project",
-        "dependencies": {
-          "Apex.MsSqlClient": "[0.1.0-preview.1, )",
-          "Apex.MySqlClient": "[0.1.0-preview.1, )",
-          "Apex.PgClient": "[0.1.0-preview.1, )",
-          "Azure.Core": "[1.61.0, )",
-          "Azure.Identity": "[1.21.0, )"
-        }
-      },
-      "Azure.Core": {
-        "type": "CentralTransitive",
-        "requested": "[1.61.0, )",
-        "resolved": "1.61.0",
-        "contentHash": "sns4J9zz7NCpfNYz9rMIly5/TjDkNsTnPAr4nNr0BUBzn6tn6RNOEHOKb7A7DhJj/dEFMSevp3Ye36cUiNmsfg==",
-        "dependencies": {
-          "Microsoft.Bcl.AsyncInterfaces": "10.0.9",
-          "Microsoft.Extensions.Configuration.Abstractions": "10.0.9",
-          "Microsoft.Extensions.Hosting.Abstractions": "10.0.9",
-          "Microsoft.Identity.Client": "4.84.2",
-          "Microsoft.Identity.Client.Extensions.Msal": "4.84.2",
-          "System.ClientModel": "1.15.0",
-          "System.Memory.Data": "10.0.9"
-        }
-      },
-      "Azure.Identity": {
-        "type": "CentralTransitive",
-        "requested": "[1.21.0, )",
-        "resolved": "1.21.0",
-        "contentHash": "GeFv8sGwRKvDKwI2WFy8r0mhmlxEVZg24Sit2NogTjiSO8RVjllWM65OT6e1sKjOvG8V74y7hAbaELUUPjZQSw==",
-        "dependencies": {
-          "Azure.Core": "1.53.0"
-        }
-      },
       "System.IO.Hashing": {
         "type": "CentralTransitive",
         "requested": "[10.0.11, )",
         "resolved": "10.0.11",
         "contentHash": "OzKDcIRkeNJeC8qAsbn8yJXnfTLP1dtkWILe+T56Gf/z+IkAASi7sMqLqJQat08j5z/mRN5xVtoAwbkMNMoBUQ=="
-      }
-    },
-    "net10.0/linux-x64": {
-      "Microsoft.DotNet.ILCompiler": {
-        "type": "Direct",
-        "requested": "[10.0.10, )",
-        "resolved": "10.0.10",
-        "contentHash": "tnG8ntt/Bk6odvHREnGLMo3PEiihy5iSlIFVp0JbIo00GKtNRt2k73eKZbPqR5yaJNIa3z8R86YLwbxfqpb17g==",
-        "dependencies": {
-          "runtime.linux-x64.Microsoft.DotNet.ILCompiler": "10.0.10"
-        }
-      },
-      "runtime.linux-x64.Microsoft.DotNet.ILCompiler": {
-        "type": "Transitive",
-        "resolved": "10.0.10",
-        "contentHash": "WRjSRBfv6A6UjgjO8EQuLe9xqdICpkQx1hACUziCw4B2uGL+2jVhkFLq/G7rxRr3MGvqLo9B+nNdfIJ/5CYN7A=="
-      },
-      "System.Security.Cryptography.ProtectedData": {
-        "type": "Transitive",
-        "resolved": "4.5.0",
-        "contentHash": "wLBKzFnDCxP12VL9ANydSYhk59fC4cvOr9ypYQLPnAj48NQIhqnjdD2yhP8yEKyBJEjERWS9DisKL7rX5eU25Q=="
-      }
-    },
-    "net10.0/osx-arm64": {
-      "Microsoft.DotNet.ILCompiler": {
-        "type": "Direct",
-        "requested": "[10.0.10, )",
-        "resolved": "10.0.10",
-        "contentHash": "tnG8ntt/Bk6odvHREnGLMo3PEiihy5iSlIFVp0JbIo00GKtNRt2k73eKZbPqR5yaJNIa3z8R86YLwbxfqpb17g==",
-        "dependencies": {
-          "runtime.osx-arm64.Microsoft.DotNet.ILCompiler": "10.0.10"
-        }
-      },
-      "runtime.osx-arm64.Microsoft.DotNet.ILCompiler": {
-        "type": "Transitive",
-        "resolved": "10.0.10",
-        "contentHash": "cY7edFqVviQMiSvPodJeLZhF6k56grh0QsvcR+2foAUgO0xXsMsVBQiHcZkeiIbhr+SPIklq90OZiJ7JVrc+Dg=="
-      },
-      "System.Security.Cryptography.ProtectedData": {
-        "type": "Transitive",
-        "resolved": "4.5.0",
-        "contentHash": "wLBKzFnDCxP12VL9ANydSYhk59fC4cvOr9ypYQLPnAj48NQIhqnjdD2yhP8yEKyBJEjERWS9DisKL7rX5eU25Q=="
       }
     }
   }

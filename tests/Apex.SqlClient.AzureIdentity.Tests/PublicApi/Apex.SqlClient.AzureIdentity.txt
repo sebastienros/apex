@@ -1,0 +1,22 @@
+class Apex.SqlClient.AzureIdentity.AzureIdentityExtensions
+  Method: Apex.MsSqlClient.MsSqlConnectOptions UseAzureIdentity(Apex.MsSqlClient.MsSqlConnectOptions, Azure.Core.TokenCredential, Apex.SqlClient.AzureIdentity.AzureIdentityOptions)
+  Method: Apex.MySqlClient.MySqlConnectOptions UseAzureIdentity(Apex.MySqlClient.MySqlConnectOptions, Azure.Core.TokenCredential, Apex.SqlClient.AzureIdentity.AzureIdentityOptions)
+  Method: Apex.PgClient.PgConnectOptions UseAzureIdentity(Apex.PgClient.PgConnectOptions, Azure.Core.TokenCredential, Apex.SqlClient.AzureIdentity.AzureIdentityOptions)
+class Apex.SqlClient.AzureIdentity.AzureIdentityOptions : System.IEquatable`1[Apex.SqlClient.AzureIdentity.AzureIdentityOptions]
+  Constructor: Void .ctor()
+  Method: Apex.SqlClient.AzureIdentity.AzureIdentityOptions <Clone>$()
+  Method: Boolean Equals(Apex.SqlClient.AzureIdentity.AzureIdentityOptions)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean op_Equality(Apex.SqlClient.AzureIdentity.AzureIdentityOptions, Apex.SqlClient.AzureIdentity.AzureIdentityOptions)
+  Method: Boolean op_Inequality(Apex.SqlClient.AzureIdentity.AzureIdentityOptions, Apex.SqlClient.AzureIdentity.AzureIdentityOptions)
+  Method: Int32 GetHashCode()
+  Method: System.String ToString()
+  Method: System.String get_DatabaseScope()
+  Method: System.String get_ManagementScope()
+  Method: System.String get_Username()
+  Method: Void set_DatabaseScope(System.String)
+  Method: Void set_ManagementScope(System.String)
+  Method: Void set_Username(System.String)
+  Property: System.String DatabaseScope
+  Property: System.String ManagementScope
+  Property: System.String Username

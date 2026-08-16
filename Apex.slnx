@@ -5,12 +5,14 @@
     <Project Path="benchmarks/Apex.PipeliningApplication/Apex.PipeliningApplication.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/Apex.SqlClient.AzureIdentity/Apex.SqlClient.AzureIdentity.csproj" />
     <Project Path="src/Apex.MsSqlClient/Apex.MsSqlClient.csproj" />
     <Project Path="src/Apex.MySqlClient/Apex.MySqlClient.csproj" />
     <Project Path="src/Apex.PgClient/Apex.PgClient.csproj" />
     <Project Path="src/Apex.SqlClient/Apex.SqlClient.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/Apex.SqlClient.AzureIdentity.Tests/Apex.SqlClient.AzureIdentity.Tests.csproj" />
     <Project Path="tests/Apex.AotSmoke/Apex.AotSmoke.csproj" />
     <Project Path="tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" />
     <Project Path="tests/Apex.MsSqlClient.IntegrationTests/Apex.MsSqlClient.IntegrationTests.csproj" />

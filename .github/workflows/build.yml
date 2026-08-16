@@ -26,3 +26,4 @@ jobs:
           dotnet test --project tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj --configuration Release
           dotnet test --project tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj --configuration Release
           dotnet test --project tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj --configuration Release
+          dotnet test --project tests/Apex.SqlClient.AzureIdentity.Tests/Apex.SqlClient.AzureIdentity.Tests.csproj --configuration Release
