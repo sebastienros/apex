@@ -1,0 +1,58 @@
+name: Database Tests
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: 1
+  APEX_PG_CONNECTION_STRING: postgresql://apex:Password12!@127.0.0.1:5432/apex?sslmode=disable
+  APEX_MYSQL_CONNECTION_STRING: Server=127.0.0.1;Port=3306;Database=apex;User ID=apex;Password=Password12!;SslMode=Disabled;AllowPublicKeyRetrieval=true
+  APEX_MSSQL_CONNECTION_STRING: Server=127.0.0.1,1433;Database=master;User ID=sa;Password=Password12!;Encrypt=True;TrustServerCertificate=True
+
+jobs:
+  databases:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: apex
+          POSTGRES_USER: apex
+          POSTGRES_PASSWORD: Password12!
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: apex
+          MYSQL_USER: apex
+          MYSQL_PASSWORD: Password12!
+          MYSQL_ROOT_PASSWORD: Password12!
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: Password12!
+        ports:
+          - 1433:1433
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - name: Test database services
+        run: dotnet test --project tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj --configuration Release

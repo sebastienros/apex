@@ -1,0 +1,131 @@
+class Apex.MsSqlClient.MsSqlClient
+  Method: System.Threading.Tasks.ValueTask`1[Apex.MsSqlClient.MsSqlConnection] ConnectAsync(Apex.MsSqlClient.MsSqlConnectOptions, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.MsSqlClient.MsSqlConnection] ConnectAsync(System.String, System.Threading.CancellationToken)
+class Apex.MsSqlClient.MsSqlConnectOptions : Apex.SqlClient.SqlConnectOptions, System.IEquatable`1[Apex.MsSqlClient.MsSqlConnectOptions], System.IEquatable`1[Apex.SqlClient.SqlConnectOptions]
+  Constructor: Void .ctor()
+  Method: Apex.MsSqlClient.MsSqlConnectOptions <Clone>$()
+  Method: Apex.MsSqlClient.MsSqlConnectOptions Parse(System.String)
+  Method: Apex.MsSqlClient.MsSqlEncryptionMode get_EncryptionMode()
+  Method: Boolean Equals(Apex.MsSqlClient.MsSqlConnectOptions)
+  Method: Boolean Equals(Apex.SqlClient.SqlConnectOptions)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean get_TrustServerCertificate()
+  Method: Boolean op_Equality(Apex.MsSqlClient.MsSqlConnectOptions, Apex.MsSqlClient.MsSqlConnectOptions)
+  Method: Boolean op_Inequality(Apex.MsSqlClient.MsSqlConnectOptions, Apex.MsSqlClient.MsSqlConnectOptions)
+  Method: Int32 GetHashCode()
+  Method: Int32 get_PacketSize()
+  Method: Int32 get_StringCacheCapacity()
+  Method: Int32 get_StringCacheMaximumByteLength()
+  Method: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] get_ClientCertificates()
+  Method: System.Net.Security.RemoteCertificateValidationCallback get_CertificateValidationCallback()
+  Method: System.Security.Cryptography.X509Certificates.X509RevocationMode get_CertificateRevocationCheckMode()
+  Method: System.String ToString()
+  Method: System.String get_ApplicationName()
+  Method: System.String get_ClientInterfaceName()
+  Method: System.String get_TlsHostName()
+  Method: System.String get_WorkstationId()
+  Method: Void set_ApplicationName(System.String)
+  Method: Void set_CertificateRevocationCheckMode(System.Security.Cryptography.X509Certificates.X509RevocationMode)
+  Method: Void set_CertificateValidationCallback(System.Net.Security.RemoteCertificateValidationCallback)
+  Method: Void set_ClientCertificates(System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2])
+  Method: Void set_ClientInterfaceName(System.String)
+  Method: Void set_EncryptionMode(Apex.MsSqlClient.MsSqlEncryptionMode)
+  Method: Void set_PacketSize(Int32)
+  Method: Void set_StringCacheCapacity(Int32)
+  Method: Void set_StringCacheMaximumByteLength(Int32)
+  Method: Void set_TlsHostName(System.String)
+  Method: Void set_TrustServerCertificate(Boolean)
+  Method: Void set_WorkstationId(System.String)
+  Property: Apex.MsSqlClient.MsSqlEncryptionMode EncryptionMode
+  Property: Boolean TrustServerCertificate
+  Property: Int32 PacketSize
+  Property: Int32 StringCacheCapacity
+  Property: Int32 StringCacheMaximumByteLength
+  Property: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] ClientCertificates
+  Property: System.Net.Security.RemoteCertificateValidationCallback CertificateValidationCallback
+  Property: System.Security.Cryptography.X509Certificates.X509RevocationMode CertificateRevocationCheckMode
+  Property: System.String ApplicationName
+  Property: System.String ClientInterfaceName
+  Property: System.String TlsHostName
+  Property: System.String WorkstationId
+class Apex.MsSqlClient.MsSqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+  Event: System.Action`1[Apex.MsSqlClient.MsSqlInfo] InfoMessage
+  Method: Apex.SqlClient.DatabaseMetadata get_DatabaseMetadata()
+  Method: Boolean get_IsSecure()
+  Method: System.Collections.Generic.IAsyncEnumerable`1[Apex.SqlClient.SqlRow] StreamAsync(System.String, Apex.SqlClient.SqlParameters, Int32, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask CancelRequestAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlPreparedStatement] PrepareAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlRowReader] ExecuteReaderAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlTransaction] BeginTransactionAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, System.Threading.CancellationToken)
+  Method: Void add_InfoMessage(System.Action`1[Apex.MsSqlClient.MsSqlInfo])
+  Method: Void remove_InfoMessage(System.Action`1[Apex.MsSqlClient.MsSqlInfo])
+  Property: Apex.SqlClient.DatabaseMetadata DatabaseMetadata
+  Property: Boolean IsSecure
+enum Apex.MsSqlClient.MsSqlEncryptionMode : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MsSqlClient.MsSqlEncryptionMode Disable
+  Field: Apex.MsSqlClient.MsSqlEncryptionMode Optional
+  Field: Apex.MsSqlClient.MsSqlEncryptionMode Require
+  Field: Apex.MsSqlClient.MsSqlEncryptionMode Strict
+  Field: Int32 value__
+class Apex.MsSqlClient.MsSqlException : Apex.SqlClient.SqlClientException, System.Runtime.Serialization.ISerializable
+  Method: Byte get_Severity()
+  Method: Byte get_State()
+  Method: Int32 get_LineNumber()
+  Method: Int32 get_Number()
+  Method: System.Collections.Generic.IReadOnlyList`1[Apex.MsSqlClient.MsSqlInfo] get_Errors()
+  Method: System.String get_ProcedureName()
+  Method: System.String get_ServerName()
+  Property: Byte Severity
+  Property: Byte State
+  Property: Int32 LineNumber
+  Property: Int32 Number
+  Property: System.Collections.Generic.IReadOnlyList`1[Apex.MsSqlClient.MsSqlInfo] Errors
+  Property: System.String ProcedureName
+  Property: System.String ServerName
+class Apex.MsSqlClient.MsSqlInfo : System.IEquatable`1[Apex.MsSqlClient.MsSqlInfo]
+  Constructor: Void .ctor(Int32, Byte, Byte, System.String, System.String, System.String, Int32)
+  Method: Apex.MsSqlClient.MsSqlInfo <Clone>$()
+  Method: Boolean Equals(Apex.MsSqlClient.MsSqlInfo)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean op_Equality(Apex.MsSqlClient.MsSqlInfo, Apex.MsSqlClient.MsSqlInfo)
+  Method: Boolean op_Inequality(Apex.MsSqlClient.MsSqlInfo, Apex.MsSqlClient.MsSqlInfo)
+  Method: Byte get_Severity()
+  Method: Byte get_State()
+  Method: Int32 GetHashCode()
+  Method: Int32 get_LineNumber()
+  Method: Int32 get_Number()
+  Method: System.String ToString()
+  Method: System.String get_Message()
+  Method: System.String get_ProcedureName()
+  Method: System.String get_ServerName()
+  Method: Void Deconstruct(Int32 ByRef, Byte ByRef, Byte ByRef, System.String ByRef, System.String ByRef, System.String ByRef, Int32 ByRef)
+  Method: Void set_LineNumber(Int32)
+  Method: Void set_Message(System.String)
+  Method: Void set_Number(Int32)
+  Method: Void set_ProcedureName(System.String)
+  Method: Void set_ServerName(System.String)
+  Method: Void set_Severity(Byte)
+  Method: Void set_State(Byte)
+  Property: Byte Severity
+  Property: Byte State
+  Property: Int32 LineNumber
+  Property: Int32 Number
+  Property: System.String Message
+  Property: System.String ProcedureName
+  Property: System.String ServerName
+class Apex.MsSqlClient.MsSqlPool : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlPool, System.IAsyncDisposable
+  Method: Apex.MsSqlClient.MsSqlPool Create(Apex.MsSqlClient.MsSqlConnectOptions, Apex.SqlClient.SqlPoolOptions)
+  Method: Int32 get_Size()
+  Method: System.Collections.Generic.IAsyncEnumerable`1[Apex.SqlClient.SqlRow] StreamAsync(System.String, Apex.SqlClient.SqlParameters, Int32, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlConnection] GetConnectionAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, System.Threading.CancellationToken)
+  Property: Int32 Size

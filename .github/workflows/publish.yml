@@ -1,0 +1,35 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - v*
+
+jobs:
+  test:
+    uses: ./.github/workflows/tests.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - name: Test
+        run: |
+          dotnet test --project tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj --configuration Release
+          dotnet test --project tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj --configuration Release
+          dotnet test --project tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj --configuration Release
+          dotnet test --project tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj --configuration Release
+      - name: Pack
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          dotnet pack Apex.slnx --configuration Release --output artifacts -p:Version="$VERSION" -p:ContinuousIntegrationBuild=true
+      - name: Push
+        run: dotnet nuget push "artifacts/*.nupkg" --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate

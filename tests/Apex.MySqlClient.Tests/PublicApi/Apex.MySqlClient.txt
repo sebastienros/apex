@@ -1,0 +1,333 @@
+enum Apex.MySqlClient.MySqlAuthenticationPlugin : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MySqlClient.MySqlAuthenticationPlugin CachingSha2Password
+  Field: Apex.MySqlClient.MySqlAuthenticationPlugin ClearPassword
+  Field: Apex.MySqlClient.MySqlAuthenticationPlugin Default
+  Field: Apex.MySqlClient.MySqlAuthenticationPlugin NativePassword
+  Field: Apex.MySqlClient.MySqlAuthenticationPlugin Sha256Password
+  Field: Int32 value__
+class Apex.MySqlClient.MySqlBatchException : Apex.SqlClient.SqlClientException, System.Runtime.Serialization.ISerializable
+  Method: Int32 get_FailedIndex()
+  Method: System.Collections.Generic.IReadOnlyList`1[Apex.SqlClient.SqlCommandResult] get_SuccessfulResults()
+  Property: Int32 FailedIndex
+  Property: System.Collections.Generic.IReadOnlyList`1[Apex.SqlClient.SqlCommandResult] SuccessfulResults
+class Apex.MySqlClient.MySqlClient
+  Method: System.Threading.Tasks.ValueTask`1[Apex.MySqlClient.MySqlConnection] ConnectAsync(Apex.MySqlClient.MySqlConnectOptions, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.MySqlClient.MySqlConnection] ConnectAsync(System.String, System.Threading.CancellationToken)
+enum Apex.MySqlClient.MySqlColumnFlags : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MySqlClient.MySqlColumnFlags AutoIncrement
+  Field: Apex.MySqlClient.MySqlColumnFlags Binary
+  Field: Apex.MySqlClient.MySqlColumnFlags Blob
+  Field: Apex.MySqlClient.MySqlColumnFlags Enum
+  Field: Apex.MySqlClient.MySqlColumnFlags MultipleKey
+  Field: Apex.MySqlClient.MySqlColumnFlags NoDefaultValue
+  Field: Apex.MySqlClient.MySqlColumnFlags None
+  Field: Apex.MySqlClient.MySqlColumnFlags NotNull
+  Field: Apex.MySqlClient.MySqlColumnFlags Numeric
+  Field: Apex.MySqlClient.MySqlColumnFlags OnUpdateNow
+  Field: Apex.MySqlClient.MySqlColumnFlags PrimaryKey
+  Field: Apex.MySqlClient.MySqlColumnFlags Set
+  Field: Apex.MySqlClient.MySqlColumnFlags Timestamp
+  Field: Apex.MySqlClient.MySqlColumnFlags UniqueKey
+  Field: Apex.MySqlClient.MySqlColumnFlags Unsigned
+  Field: Apex.MySqlClient.MySqlColumnFlags ZeroFill
+  Field: UInt16 value__
+class Apex.MySqlClient.MySqlColumnMetadata : System.IEquatable`1[Apex.MySqlClient.MySqlColumnMetadata]
+  Constructor: Void .ctor(System.String, System.String, System.String, System.String, System.String, Apex.MySqlClient.MySqlType, Apex.MySqlClient.MySqlColumnFlags, Int32, UInt32, Byte)
+  Method: Apex.MySqlClient.MySqlColumnFlags get_Flags()
+  Method: Apex.MySqlClient.MySqlColumnMetadata <Clone>$()
+  Method: Apex.MySqlClient.MySqlColumnMetadata FromColumn(Apex.SqlClient.SqlColumn)
+  Method: Apex.MySqlClient.MySqlType get_Type()
+  Method: Boolean Equals(Apex.MySqlClient.MySqlColumnMetadata)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean get_IsBinary()
+  Method: Boolean get_IsUnsigned()
+  Method: Boolean op_Equality(Apex.MySqlClient.MySqlColumnMetadata, Apex.MySqlClient.MySqlColumnMetadata)
+  Method: Boolean op_Inequality(Apex.MySqlClient.MySqlColumnMetadata, Apex.MySqlClient.MySqlColumnMetadata)
+  Method: Byte get_Decimals()
+  Method: Int32 GetHashCode()
+  Method: Int32 get_CharacterSet()
+  Method: System.String ToString()
+  Method: System.String get_Name()
+  Method: System.String get_OriginalName()
+  Method: System.String get_OriginalTable()
+  Method: System.String get_Schema()
+  Method: System.String get_Table()
+  Method: UInt32 get_ColumnLength()
+  Method: Void Deconstruct(System.String ByRef, System.String ByRef, System.String ByRef, System.String ByRef, System.String ByRef, Apex.MySqlClient.MySqlType ByRef, Apex.MySqlClient.MySqlColumnFlags ByRef, Int32 ByRef, UInt32 ByRef, Byte ByRef)
+  Method: Void set_CharacterSet(Int32)
+  Method: Void set_ColumnLength(UInt32)
+  Method: Void set_Decimals(Byte)
+  Method: Void set_Flags(Apex.MySqlClient.MySqlColumnFlags)
+  Method: Void set_Name(System.String)
+  Method: Void set_OriginalName(System.String)
+  Method: Void set_OriginalTable(System.String)
+  Method: Void set_Schema(System.String)
+  Method: Void set_Table(System.String)
+  Method: Void set_Type(Apex.MySqlClient.MySqlType)
+  Property: Apex.MySqlClient.MySqlColumnFlags Flags
+  Property: Apex.MySqlClient.MySqlType Type
+  Property: Boolean IsBinary
+  Property: Boolean IsUnsigned
+  Property: Byte Decimals
+  Property: Int32 CharacterSet
+  Property: System.String Name
+  Property: System.String OriginalName
+  Property: System.String OriginalTable
+  Property: System.String Schema
+  Property: System.String Table
+  Property: UInt32 ColumnLength
+struct Apex.MySqlClient.MySqlCommandInfo : System.IEquatable`1[Apex.MySqlClient.MySqlCommandInfo]
+  Constructor: Void .ctor(Int64, UInt64, Apex.MySqlClient.MySqlServerStatus, Int32, System.String)
+  Method: Apex.MySqlClient.MySqlServerStatus get_Status()
+  Method: Boolean Equals(Apex.MySqlClient.MySqlCommandInfo)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean op_Equality(Apex.MySqlClient.MySqlCommandInfo, Apex.MySqlClient.MySqlCommandInfo)
+  Method: Boolean op_Inequality(Apex.MySqlClient.MySqlCommandInfo, Apex.MySqlClient.MySqlCommandInfo)
+  Method: Int32 GetHashCode()
+  Method: Int32 get_WarningCount()
+  Method: Int64 get_AffectedRows()
+  Method: System.String ToString()
+  Method: System.String get_Info()
+  Method: UInt64 get_LastInsertId()
+  Method: Void Deconstruct(Int64 ByRef, UInt64 ByRef, Apex.MySqlClient.MySqlServerStatus ByRef, Int32 ByRef, System.String ByRef)
+  Method: Void set_AffectedRows(Int64)
+  Method: Void set_Info(System.String)
+  Method: Void set_LastInsertId(UInt64)
+  Method: Void set_Status(Apex.MySqlClient.MySqlServerStatus)
+  Method: Void set_WarningCount(Int32)
+  Property: Apex.MySqlClient.MySqlServerStatus Status
+  Property: Int32 WarningCount
+  Property: Int64 AffectedRows
+  Property: System.String Info
+  Property: UInt64 LastInsertId
+class Apex.MySqlClient.MySqlConnectOptions : Apex.SqlClient.SqlConnectOptions, System.IEquatable`1[Apex.MySqlClient.MySqlConnectOptions], System.IEquatable`1[Apex.SqlClient.SqlConnectOptions]
+  Constructor: Void .ctor()
+  Method: Apex.MySqlClient.MySqlAuthenticationPlugin get_AuthenticationPlugin()
+  Method: Apex.MySqlClient.MySqlConnectOptions <Clone>$()
+  Method: Apex.MySqlClient.MySqlConnectOptions FromEnvironment()
+  Method: Apex.MySqlClient.MySqlConnectOptions Parse(System.String)
+  Method: Apex.MySqlClient.MySqlQueryCancellation get_QueryCancellation()
+  Method: Apex.MySqlClient.MySqlSslMode get_SslMode()
+  Method: Apex.MySqlClient.MySqlZeroDateBehavior get_ZeroDateBehavior()
+  Method: Boolean Equals(Apex.MySqlClient.MySqlConnectOptions)
+  Method: Boolean Equals(Apex.SqlClient.SqlConnectOptions)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean get_AllowCleartextPassword()
+  Method: Boolean get_AllowLoadLocalInfile()
+  Method: Boolean get_AllowMultiStatements()
+  Method: Boolean get_AllowPublicKeyRetrieval()
+  Method: Boolean get_UseAffectedRows()
+  Method: Boolean op_Equality(Apex.MySqlClient.MySqlConnectOptions, Apex.MySqlClient.MySqlConnectOptions)
+  Method: Boolean op_Inequality(Apex.MySqlClient.MySqlConnectOptions, Apex.MySqlClient.MySqlConnectOptions)
+  Method: Byte get_Collation()
+  Method: Int32 GetHashCode()
+  Method: Int32 get_PipeliningLimit()
+  Method: Int32 get_StringCacheCapacity()
+  Method: Int32 get_StringCacheMaximumByteLength()
+  Method: System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String] get_ConnectionAttributes()
+  Method: System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String] get_SessionVariables()
+  Method: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] get_ClientCertificates()
+  Method: System.Net.Security.RemoteCertificateValidationCallback get_CertificateValidationCallback()
+  Method: System.Security.Cryptography.X509Certificates.X509RevocationMode get_CertificateRevocationCheckMode()
+  Method: System.String ToString()
+  Method: System.String get_ServerRsaPublicKey()
+  Method: Void set_AllowCleartextPassword(Boolean)
+  Method: Void set_AllowLoadLocalInfile(Boolean)
+  Method: Void set_AllowMultiStatements(Boolean)
+  Method: Void set_AllowPublicKeyRetrieval(Boolean)
+  Method: Void set_AuthenticationPlugin(Apex.MySqlClient.MySqlAuthenticationPlugin)
+  Method: Void set_CertificateRevocationCheckMode(System.Security.Cryptography.X509Certificates.X509RevocationMode)
+  Method: Void set_CertificateValidationCallback(System.Net.Security.RemoteCertificateValidationCallback)
+  Method: Void set_ClientCertificates(System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2])
+  Method: Void set_Collation(Byte)
+  Method: Void set_ConnectionAttributes(System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String])
+  Method: Void set_PipeliningLimit(Int32)
+  Method: Void set_QueryCancellation(Apex.MySqlClient.MySqlQueryCancellation)
+  Method: Void set_ServerRsaPublicKey(System.String)
+  Method: Void set_SessionVariables(System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String])
+  Method: Void set_SslMode(Apex.MySqlClient.MySqlSslMode)
+  Method: Void set_StringCacheCapacity(Int32)
+  Method: Void set_StringCacheMaximumByteLength(Int32)
+  Method: Void set_UseAffectedRows(Boolean)
+  Method: Void set_ZeroDateBehavior(Apex.MySqlClient.MySqlZeroDateBehavior)
+  Property: Apex.MySqlClient.MySqlAuthenticationPlugin AuthenticationPlugin
+  Property: Apex.MySqlClient.MySqlQueryCancellation QueryCancellation
+  Property: Apex.MySqlClient.MySqlSslMode SslMode
+  Property: Apex.MySqlClient.MySqlZeroDateBehavior ZeroDateBehavior
+  Property: Boolean AllowCleartextPassword
+  Property: Boolean AllowLoadLocalInfile
+  Property: Boolean AllowMultiStatements
+  Property: Boolean AllowPublicKeyRetrieval
+  Property: Boolean UseAffectedRows
+  Property: Byte Collation
+  Property: Int32 PipeliningLimit
+  Property: Int32 StringCacheCapacity
+  Property: Int32 StringCacheMaximumByteLength
+  Property: System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String] ConnectionAttributes
+  Property: System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String] SessionVariables
+  Property: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] ClientCertificates
+  Property: System.Net.Security.RemoteCertificateValidationCallback CertificateValidationCallback
+  Property: System.Security.Cryptography.X509Certificates.X509RevocationMode CertificateRevocationCheckMode
+  Property: System.String ServerRsaPublicKey
+class Apex.MySqlClient.MySqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+  Method: Apex.MySqlClient.MySqlCommandInfo get_LastCommandInfo()
+  Method: Apex.MySqlClient.MySqlServerStatus get_ServerStatus()
+  Method: Apex.MySqlClient.MySqlServerVersion get_ServerVersion()
+  Method: Apex.SqlClient.DatabaseMetadata get_DatabaseMetadata()
+  Method: Boolean get_InTransaction()
+  Method: Boolean get_IsSecure()
+  Method: System.Collections.Generic.IAsyncEnumerable`1[Apex.SqlClient.SqlRow] StreamAsync(System.String, Apex.SqlClient.SqlParameters, Int32, System.Threading.CancellationToken)
+  Method: System.Collections.Generic.IReadOnlyList`1[Apex.MySqlClient.MySqlColumnMetadata] get_LastColumns()
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask PingAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask ResetAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlPreparedStatement] PrepareAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlRowReader] ExecuteReaderAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlTransaction] BeginTransactionAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, System.Threading.CancellationToken)
+  Method: UInt32 get_ConnectionId()
+  Property: Apex.MySqlClient.MySqlCommandInfo LastCommandInfo
+  Property: Apex.MySqlClient.MySqlServerStatus ServerStatus
+  Property: Apex.MySqlClient.MySqlServerVersion ServerVersion
+  Property: Apex.SqlClient.DatabaseMetadata DatabaseMetadata
+  Property: Boolean InTransaction
+  Property: Boolean IsSecure
+  Property: System.Collections.Generic.IReadOnlyList`1[Apex.MySqlClient.MySqlColumnMetadata] LastColumns
+  Property: UInt32 ConnectionId
+struct Apex.MySqlClient.MySqlDecimal : System.IEquatable`1[Apex.MySqlClient.MySqlDecimal]
+  Method: Apex.MySqlClient.MySqlDecimal Create(System.Numerics.BigInteger, Int32)
+  Method: Apex.MySqlClient.MySqlDecimal Parse(System.String)
+  Method: Apex.SqlClient.SqlValue op_Implicit(Apex.MySqlClient.MySqlDecimal)
+  Method: Boolean Equals(Apex.MySqlClient.MySqlDecimal)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean op_Equality(Apex.MySqlClient.MySqlDecimal, Apex.MySqlClient.MySqlDecimal)
+  Method: Boolean op_Inequality(Apex.MySqlClient.MySqlDecimal, Apex.MySqlClient.MySqlDecimal)
+  Method: Int32 GetHashCode()
+  Method: Int32 get_Scale()
+  Method: System.Decimal ToDecimal()
+  Method: System.Numerics.BigInteger get_UnscaledValue()
+  Method: System.String ToString()
+  Property: Int32 Scale
+  Property: System.Numerics.BigInteger UnscaledValue
+class Apex.MySqlClient.MySqlException : Apex.SqlClient.SqlClientException, System.Runtime.Serialization.ISerializable
+  Method: Boolean get_IsFatal()
+  Method: Boolean get_IsInterrupted()
+  Method: Int32 get_ErrorNumber()
+  Method: System.String get_SqlState()
+  Property: Boolean IsFatal
+  Property: Boolean IsInterrupted
+  Property: Int32 ErrorNumber
+  Property: System.String SqlState
+class Apex.MySqlClient.MySqlPool : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlPool, System.IAsyncDisposable
+  Method: Apex.MySqlClient.MySqlPool Create(Apex.MySqlClient.MySqlConnectOptions, Apex.SqlClient.SqlPoolOptions)
+  Method: Apex.MySqlClient.MySqlPool Create(System.String, Apex.SqlClient.SqlPoolOptions)
+  Method: Int32 get_Size()
+  Method: System.Collections.Generic.IAsyncEnumerable`1[Apex.SqlClient.SqlRow] StreamAsync(System.String, Apex.SqlClient.SqlParameters, Int32, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlConnection] GetConnectionAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, System.Threading.CancellationToken)
+  Property: Int32 Size
+enum Apex.MySqlClient.MySqlQueryCancellation : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MySqlClient.MySqlQueryCancellation CloseConnection
+  Field: Apex.MySqlClient.MySqlQueryCancellation Disabled
+  Field: Apex.MySqlClient.MySqlQueryCancellation KillQuery
+  Field: Int32 value__
+enum Apex.MySqlClient.MySqlServerStatus : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MySqlClient.MySqlServerStatus AutoCommit
+  Field: Apex.MySqlClient.MySqlServerStatus CursorExists
+  Field: Apex.MySqlClient.MySqlServerStatus DatabaseDropped
+  Field: Apex.MySqlClient.MySqlServerStatus InReadOnlyTransaction
+  Field: Apex.MySqlClient.MySqlServerStatus InTransaction
+  Field: Apex.MySqlClient.MySqlServerStatus LastRowSent
+  Field: Apex.MySqlClient.MySqlServerStatus MetadataChanged
+  Field: Apex.MySqlClient.MySqlServerStatus MoreResultsExist
+  Field: Apex.MySqlClient.MySqlServerStatus NoBackslashEscapes
+  Field: Apex.MySqlClient.MySqlServerStatus NoGoodIndexUsed
+  Field: Apex.MySqlClient.MySqlServerStatus NoIndexUsed
+  Field: Apex.MySqlClient.MySqlServerStatus None
+  Field: Apex.MySqlClient.MySqlServerStatus PreparedStatementOutParameters
+  Field: Apex.MySqlClient.MySqlServerStatus QueryWasSlow
+  Field: Apex.MySqlClient.MySqlServerStatus SessionStateChanged
+  Field: UInt16 value__
+struct Apex.MySqlClient.MySqlServerVersion : System.IEquatable`1[Apex.MySqlClient.MySqlServerVersion]
+  Constructor: Void .ctor(System.String, Int32, Int32, Int32, Boolean)
+  Method: Boolean Equals(Apex.MySqlClient.MySqlServerVersion)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean get_IsMariaDb()
+  Method: Boolean op_Equality(Apex.MySqlClient.MySqlServerVersion, Apex.MySqlClient.MySqlServerVersion)
+  Method: Boolean op_Inequality(Apex.MySqlClient.MySqlServerVersion, Apex.MySqlClient.MySqlServerVersion)
+  Method: Int32 GetHashCode()
+  Method: Int32 get_Major()
+  Method: Int32 get_Micro()
+  Method: Int32 get_Minor()
+  Method: System.String ToString()
+  Method: System.String get_FullVersion()
+  Method: System.String get_ProductName()
+  Method: Void Deconstruct(System.String ByRef, Int32 ByRef, Int32 ByRef, Int32 ByRef, Boolean ByRef)
+  Method: Void set_FullVersion(System.String)
+  Method: Void set_IsMariaDb(Boolean)
+  Method: Void set_Major(Int32)
+  Method: Void set_Micro(Int32)
+  Method: Void set_Minor(Int32)
+  Property: Boolean IsMariaDb
+  Property: Int32 Major
+  Property: Int32 Micro
+  Property: Int32 Minor
+  Property: System.String FullVersion
+  Property: System.String ProductName
+enum Apex.MySqlClient.MySqlSslMode : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MySqlClient.MySqlSslMode Disabled
+  Field: Apex.MySqlClient.MySqlSslMode Preferred
+  Field: Apex.MySqlClient.MySqlSslMode Required
+  Field: Apex.MySqlClient.MySqlSslMode VerifyCa
+  Field: Apex.MySqlClient.MySqlSslMode VerifyIdentity
+  Field: Int32 value__
+enum Apex.MySqlClient.MySqlType : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MySqlClient.MySqlType Bit
+  Field: Apex.MySqlClient.MySqlType Blob
+  Field: Apex.MySqlClient.MySqlType Date
+  Field: Apex.MySqlClient.MySqlType DateTime
+  Field: Apex.MySqlClient.MySqlType DateTime2
+  Field: Apex.MySqlClient.MySqlType Decimal
+  Field: Apex.MySqlClient.MySqlType Double
+  Field: Apex.MySqlClient.MySqlType Enum
+  Field: Apex.MySqlClient.MySqlType Float
+  Field: Apex.MySqlClient.MySqlType Geometry
+  Field: Apex.MySqlClient.MySqlType Int24
+  Field: Apex.MySqlClient.MySqlType Json
+  Field: Apex.MySqlClient.MySqlType Long
+  Field: Apex.MySqlClient.MySqlType LongBlob
+  Field: Apex.MySqlClient.MySqlType LongLong
+  Field: Apex.MySqlClient.MySqlType MediumBlob
+  Field: Apex.MySqlClient.MySqlType NewDate
+  Field: Apex.MySqlClient.MySqlType NewDecimal
+  Field: Apex.MySqlClient.MySqlType Null
+  Field: Apex.MySqlClient.MySqlType Set
+  Field: Apex.MySqlClient.MySqlType Short
+  Field: Apex.MySqlClient.MySqlType String
+  Field: Apex.MySqlClient.MySqlType Time
+  Field: Apex.MySqlClient.MySqlType Time2
+  Field: Apex.MySqlClient.MySqlType Timestamp
+  Field: Apex.MySqlClient.MySqlType Timestamp2
+  Field: Apex.MySqlClient.MySqlType Tiny
+  Field: Apex.MySqlClient.MySqlType TinyBlob
+  Field: Apex.MySqlClient.MySqlType VarChar
+  Field: Apex.MySqlClient.MySqlType VarString
+  Field: Apex.MySqlClient.MySqlType Vector
+  Field: Apex.MySqlClient.MySqlType Year
+  Field: Byte value__
+class Apex.MySqlClient.MySqlUnsupportedTypeException : Apex.SqlClient.SqlClientException, System.Runtime.Serialization.ISerializable
+  Constructor: Void .ctor(Apex.MySqlClient.MySqlType)
+  Method: Apex.MySqlClient.MySqlType get_Type()
+  Property: Apex.MySqlClient.MySqlType Type
+enum Apex.MySqlClient.MySqlZeroDateBehavior : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.MySqlClient.MySqlZeroDateBehavior Error
+  Field: Apex.MySqlClient.MySqlZeroDateBehavior MinValue
+  Field: Apex.MySqlClient.MySqlZeroDateBehavior Null
+  Field: Int32 value__

@@ -1,0 +1,22 @@
+name: Close Stale Issues
+
+on:
+  schedule:
+    - cron: '30 1 * * *'
+
+jobs:
+  close-stale-prs-issues:
+    if: github.repository == 'sebastienros/apex'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/stale@v11
+        with:
+          stale-issue-message: >
+            This is an automated message. Stale issues are closed when there
+            has been no activity for 15 days. Add a comment to keep this issue open.
+          stale-issue-label: stale
+          days-before-pr-stale: -1
+          days-before-issue-stale: 15
+          days-before-issue-close: 7
+          only-issue-labels: needs author feedback
+          operations-per-run: 20

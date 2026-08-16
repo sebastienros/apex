@@ -1,0 +1,9 @@
+<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Apex.MsSqlClient">
+  <defs><linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#7C3AED"/><stop offset="0.55" stop-color="#4F46E5"/><stop offset="1" stop-color="#2563EB"/></linearGradient><linearGradient id="gloss" x1="0" y1="0" x2="0" y2="512" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/><stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/></linearGradient><filter id="soft" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#1E1B4B" flood-opacity="0.35"/></filter></defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/><rect width="512" height="512" rx="112" fill="url(#gloss)"/>
+  <g filter="url(#soft)" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round" fill="none"><ellipse cx="256" cy="158" rx="112" ry="52" stroke-width="28"/><path d="M144 158V344C144 382 194 406 256 406C318 406 368 382 368 344V158" stroke-width="28"/><path d="M144 252C144 288 194 310 256 310C318 310 368 288 368 252" stroke-width="24"/></g>
+  <g fill="none" stroke="#FCA5A5" stroke-linecap="round" stroke-linejoin="round" filter="url(#soft)">
+    <path d="M116 322L194 238L252 292L326 212L398 268" stroke-width="17" stroke-opacity="0.88"/>
+    <path d="M132 346L200 278L254 326L330 254L382 294" stroke-width="7" stroke-opacity="0.5"/>
+  </g>
+</svg>

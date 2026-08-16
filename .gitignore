@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+artifacts/
+BenchmarkDotNet.Artifacts/
+TestResults/
+*.user
+*.suo
+.DS_Store
+.playwright-cli/
