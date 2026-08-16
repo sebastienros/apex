@@ -13,14 +13,11 @@ namespace Apex.PgClient.Internal;
 internal sealed class PgRowDecoder : ISqlRowDecoder
 {
     private readonly Utf8StringCache _strings;
-    private readonly PgTypeRegistry _typeRegistry;
 
     internal PgRowDecoder(
         int stringCacheCapacity,
-        int stringCacheMaximumByteLength,
-        PgTypeRegistry? typeRegistry = null)
+        int stringCacheMaximumByteLength)
     {
-        _typeRegistry = typeRegistry ?? new PgTypeRegistry();
         _strings = new Utf8StringCache(
           stringCacheCapacity,
           stringCacheMaximumByteLength);
@@ -65,21 +62,10 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
               DecodeInt32Value(column.Format, field.Value.Span)),
             20 => BoxedScalarCache.Box(
               DecodeInt64Value(column.Format, field.Value.Span)),
-            _ => DecodeProviderValue(column, field.Value),
+            _ => column.Format == SqlDataFormat.Binary
+              ? PgBinaryCodec.Decode(column.TypeId, field.Value)
+              : PgTextCodec.Decode(column.TypeId, field.Value),
         };
-    }
-
-    private object DecodeProviderValue(SqlColumn column, ReadOnlyMemory<byte> value)
-    {
-        if (column.Format == SqlDataFormat.Binary &&
-            _typeRegistry.TryDecode(column.TypeId, value, out var decoded))
-        {
-            return decoded;
-        }
-
-        return column.Format == SqlDataFormat.Binary
-          ? PgBinaryCodec.Decode(column.TypeId, value)
-          : PgTextCodec.Decode(column.TypeId, value);
     }
 
     public bool DecodeBoolean(
@@ -241,23 +227,11 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         int ordinal,
         SqlColumn column)
     {
-        var field = GetField(row, ordinal);
-        if (column.Format == SqlDataFormat.Binary &&
-            _typeRegistry.CanDecode(column.TypeId, typeof(string)))
-        {
-            if (field.IsNull)
-            {
-                return null;
-            }
-
-            _typeRegistry.TryDecode(column.TypeId, field.Value, out var decoded);
-            return decoded as string ??
-                throw new InvalidCastException(
-                    $"PostgreSQL type OID {column.TypeId} does not decode as System.String.");
-        }
-
         EnsureStringType(column, typeof(string));
-        return field.IsNull ? null : _strings.GetString(field.Value.Span);
+        var field = GetField(row, ordinal);
+        return field.IsNull
+          ? null
+          : _strings.GetString(field.Value.Span);
     }
 
     public byte[]? DecodeBytes(
@@ -465,20 +439,6 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         SqlColumn column,
         bool copyReadOnlyMemory)
     {
-        var registeredField = GetField(row, ordinal);
-        if (!registeredField.IsNull &&
-            column.Format == SqlDataFormat.Binary &&
-            _typeRegistry.TryDecode(
-                column.TypeId,
-                registeredField.Value,
-                out var registeredValue))
-        {
-            return registeredValue is T typed
-              ? typed
-              : throw new InvalidCastException(
-                  $"PostgreSQL type OID {column.TypeId} decodes as {registeredValue.GetType().FullName}, not {typeof(T).FullName}.");
-        }
-
         if (typeof(T) == typeof(string))
         {
             var value = DecodeString(row, ordinal, column);

@@ -89,31 +89,6 @@ public class PostgreSqlBenchmarks
     }
 
     [Benchmark]
-    public async Task<int> ApexTypedQueryAsync()
-    {
-        SqlRowSet rows = await _apex.QueryTypedAsync(
-            "SELECT $1",
-            PgParameters.Create(PgParameter.Create(PgType.Integer, 42)));
-        return rows[0].Get<int>(0);
-    }
-
-    [Benchmark]
-    public async Task<int> ApexTwoCommandBatchAsync()
-    {
-        PgBatch batch = new();
-        batch.Add(
-            "SELECT $1",
-            PgParameters.Create(PgParameter.Create(PgType.Integer, 20)));
-        batch.Add(
-            "SELECT $1",
-            PgParameters.Create(PgParameter.Create(PgType.Integer, 22)));
-        PgBatchReader results = await _apex.ExecuteBatchAsync(batch);
-        var sum = results.Current[0].Get<int>(0);
-        await results.NextResultAsync();
-        return sum + results.Current[0].Get<int>(0);
-    }
-
-    [Benchmark]
     public async Task<int> NpgsqlStream100RowsAsync()
     {
         await using NpgsqlDataReader reader = await _npgsqlRowsPrepared.ExecuteReaderAsync();

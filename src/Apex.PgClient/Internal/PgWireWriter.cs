@@ -11,12 +11,10 @@ internal sealed class PgWireWriter
 {
     private static readonly Encoding s_utf8 = new UTF8Encoding(false, true);
     private readonly PipeWriter _writer;
-    private readonly PgTypeRegistry _typeRegistry;
 
-    public PgWireWriter(PipeWriter writer, PgTypeRegistry typeRegistry)
+    public PgWireWriter(PipeWriter writer)
     {
         _writer = writer;
-        _typeRegistry = typeRegistry;
     }
 
     public ValueTask<FlushResult> WriteStartupAsync(
@@ -113,36 +111,6 @@ internal sealed class PgWireWriter
         await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async ValueTask WriteExtendedQueryAsync(
-        string sql,
-        PgParameters parameters,
-        CancellationToken cancellationToken)
-    {
-        WriteTypedParse(sql, parameters);
-        WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public async ValueTask WriteBatchAsync(
-        PgBatch batch,
-        CancellationToken cancellationToken)
-    {
-        for (var i = 0; i < batch.Count; i++)
-        {
-            var command = batch[i];
-            WriteTypedParse(command.Sql, command.Parameters);
-            WriteBindDescribeExecute(
-                string.Empty,
-                string.Empty,
-                command.Parameters,
-                fetchSize: 0,
-                sync: false);
-        }
-
-        WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
     public async ValueTask WritePrepareAsync(
         string name,
         string sql,
@@ -179,30 +147,6 @@ internal sealed class PgWireWriter
 
     public async ValueTask FlushAsync(CancellationToken cancellationToken)
     {
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public async ValueTask WriteCopyDataAsync(
-        ReadOnlyMemory<byte> payload,
-        CancellationToken cancellationToken)
-    {
-        WriteTyped((byte)'d', payload.Span);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public async ValueTask WriteCopyDoneAsync(CancellationToken cancellationToken)
-    {
-        WriteTyped((byte)'c', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
-    }
-
-    public async ValueTask WriteCopyFailAsync(
-        string message,
-        CancellationToken cancellationToken)
-    {
-        ArrayBufferWriter<byte> payload = new();
-        payload.WriteCString(message);
-        WriteTyped((byte)'f', payload.WrittenSpan);
         await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -340,77 +284,6 @@ internal sealed class PgWireWriter
         }
         WriteExecute(portalName, fetchSize);
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-    }
-
-    private void WriteBindDescribeExecute(
-        string portalName,
-        string statementName,
-        PgParameters parameters,
-        int fetchSize,
-        bool describePortal = true,
-        bool sync = true)
-    {
-        ArrayBufferWriter<byte> bind = new();
-        bind.WriteCString(portalName);
-        bind.WriteCString(statementName);
-        bind.WriteInt16(checked((short)parameters.Count));
-        var payloads = new byte[]?[parameters.Count];
-        for (var i = 0; i < parameters.Count; i++)
-        {
-            var parameter = parameters[i];
-            var format = PgParameterEncoder.ResolveFormat(parameter, _typeRegistry);
-            bind.WriteInt16(format == PgParameterFormat.Binary ? (short)1 : (short)0);
-            if (!parameter.Value.IsNull)
-            {
-                payloads[i] = PgParameterEncoder.Encode(parameter, format, _typeRegistry);
-            }
-        }
-
-        bind.WriteInt16(checked((short)parameters.Count));
-        for (var i = 0; i < payloads.Length; i++)
-        {
-            var payload = payloads[i];
-            if (payload is null)
-            {
-                bind.WriteInt32(-1);
-                continue;
-            }
-
-            bind.WriteInt32(payload.Length);
-            bind.Write(payload);
-        }
-
-        bind.WriteInt16(1);
-        bind.WriteInt16(1);
-        WriteTyped((byte)'B', bind.WrittenSpan);
-
-        if (describePortal)
-        {
-            ArrayBufferWriter<byte> describe = new();
-            describe.WriteByte((byte)'P');
-            describe.WriteCString(portalName);
-            WriteTyped((byte)'D', describe.WrittenSpan);
-        }
-
-        WriteExecute(portalName, fetchSize);
-        if (sync)
-        {
-            WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-        }
-    }
-
-    private void WriteTypedParse(string sql, PgParameters parameters)
-    {
-        ArrayBufferWriter<byte> parse = new();
-        parse.WriteByte(0);
-        parse.WriteCString(sql);
-        parse.WriteInt16(checked((short)parameters.Count));
-        for (var i = 0; i < parameters.Count; i++)
-        {
-            parse.WriteInt32(unchecked((int)parameters[i].Type.Oid));
-        }
-
-        WriteTyped((byte)'P', parse.WrittenSpan);
     }
 
     private void WriteDescribeStatement(string statementName)

@@ -50,8 +50,6 @@ public sealed record PgConnectOptions : SqlConnectOptions
             ["extra_float_digits"] = "2",
         };
 
-    public PgTypeRegistry? TypeRegistry { get; init; }
-
     public static PgConnectOptions FromEnvironment()
     {
         PgConnectOptions options = new();

@@ -62,64 +62,6 @@ while (await cursor.ReadAsync(64) is { Count: > 0 } page)
 }
 ```
 
-## Explicit types and batches
-
-Use `PgParameters` when PostgreSQL needs an explicit parameter type, including
-typed `NULL`, JSONB, and arrays:
-
-```csharp
-using JsonDocument document = JsonDocument.Parse("""{"name":"Apex"}""");
-SqlRowSet rows = await connection.QueryTypedAsync(
-    "SELECT $1::jsonb ->> 'name', $2::uuid[]",
-    PgParameters.Create(
-        PgParameter.Create(PgType.Jsonb, document),
-        PgParameter.Create(PgType.UuidArray, ids)));
-```
-
-`PgBatch` sends all commands through one extended-protocol synchronization
-point and buffers the ordered results:
-
-```csharp
-PgBatch batch = new();
-batch.Add("INSERT INTO events (data) VALUES ($1)",
-    PgParameters.Create(PgParameter.Create(PgType.Jsonb, document)));
-batch.Add("SELECT count(*)::int8 FROM events");
-
-PgBatchReader results = await connection.ExecuteBatchAsync(batch);
-await results.NextResultAsync();
-long count = results.Current[0].Get<long>(0);
-```
-
-## Transactions and binary COPY
-
-Provider-specific transaction options include isolation, read-only and
-deferrable modes. `PgTransaction` also exposes savepoints. Connections can be
-explicitly enlisted in a `System.Transactions.Transaction` with
-`EnlistTransactionAsync`.
-
-```csharp
-await using PgTransaction transaction = await connection.BeginPgTransactionAsync(
-    new PgTransactionOptions { IsolationLevel = PgIsolationLevel.Serializable });
-await transaction.CreateSavepointAsync("before_update");
-```
-
-Binary COPY uses the same typed parameter codecs:
-
-```csharp
-await using PgBinaryImporter importer = await connection.BeginBinaryImportAsync(
-    "COPY events (id, data) FROM STDIN (FORMAT BINARY)");
-await importer.StartRowAsync();
-await importer.WriteAsync(PgParameter.Create(PgType.Uuid, id));
-await importer.WriteAsync(PgParameter.Create(PgType.Jsonb, document));
-await importer.CompleteAsync();
-```
-
-## Custom PostgreSQL types
-
-Call `ReloadTypesAsync` after creating extensions or custom types, then register
-a binary codec in the connection's `TypeRegistry`. A registry can also be
-provided through `PgConnectOptions.TypeRegistry` and shared by a pool.
-
 ## Notifications
 
 ```csharp
