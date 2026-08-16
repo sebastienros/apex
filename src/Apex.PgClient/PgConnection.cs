@@ -1399,7 +1399,7 @@ public sealed class PgConnection : ISqlConnection
     }
 
     private static bool IsUnixSocket(PgConnectOptions options) =>
-        options.Host.Length > 0 && options.Host[0] == '/';
+        Path.IsPathRooted(options.Host);
 
     private static async ValueTask<byte> RequestSslAsync(
         Stream stream,
