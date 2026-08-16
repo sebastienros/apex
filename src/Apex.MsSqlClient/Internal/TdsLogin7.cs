@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Security.Cryptography;
 using System.Text;
@@ -8,28 +9,41 @@ internal static class TdsLogin7
 {
     private const int FixedLength = 94;
     private const int MaximumFieldCharacters = 128;
+    private const int MaximumLoginLength = (128 * 1024) - 1;
 
-    internal static byte[] Encode(MsSqlConnectOptions options)
+    internal static byte[] Encode(MsSqlConnectOptions options, TdsFedAuthLogin? fedAuth = null)
     {
         var hostName = options.WorkstationId ?? Environment.MachineName;
+        var userName = fedAuth is null ? options.Username : string.Empty;
+        var password = fedAuth is null ? options.Password : string.Empty;
         ValidateField(hostName, nameof(options.WorkstationId));
-        ValidateField(options.Username, nameof(options.Username));
-        ValidateField(options.Password, nameof(options.Password));
+        ValidateField(userName, nameof(options.Username));
+        ValidateField(password, nameof(options.Password));
         ValidateField(options.ApplicationName, nameof(options.ApplicationName));
         ValidateField(options.Host, nameof(options.Host));
         ValidateField(options.ClientInterfaceName, nameof(options.ClientInterfaceName));
         ValidateField(options.Database, nameof(options.Database));
 
+        var featureExtension = EncodeFeatureExtension(fedAuth);
         var dataLength = checked(
           (hostName.Length +
-           options.Username.Length +
-           options.Password.Length +
+           userName.Length +
+           password.Length +
            options.ApplicationName.Length +
            options.Host.Length +
            options.ClientInterfaceName.Length +
            options.Database.Length) * 2 +
-          11);
-        var login = new byte[checked(FixedLength + dataLength)];
+          sizeof(int) +
+          featureExtension.Length);
+        var loginLength = checked(FixedLength + dataLength);
+        if (loginLength > MaximumLoginLength)
+        {
+            throw new ArgumentOutOfRangeException(
+              nameof(options),
+              $"A LOGIN7 message is limited to {MaximumLoginLength} bytes.");
+        }
+
+        var login = new byte[loginLength];
         BinaryPrimitives.WriteInt32LittleEndian(login, login.Length);
         BinaryPrimitives.WriteUInt32BigEndian(login.AsSpan(4), 0x04000074);
         BinaryPrimitives.WriteInt32LittleEndian(login.AsSpan(8), options.PacketSize);
@@ -40,8 +54,8 @@ internal static class TdsLogin7
 
         var data = FixedLength;
         WriteField(login, 36, ref data, hostName, obfuscate: false);
-        WriteField(login, 40, ref data, options.Username, obfuscate: false);
-        WriteField(login, 44, ref data, options.Password, obfuscate: true);
+        WriteField(login, 40, ref data, userName, obfuscate: false);
+        WriteField(login, 44, ref data, password, obfuscate: true);
         WriteField(login, 48, ref data, options.ApplicationName, obfuscate: false);
         WriteField(login, 52, ref data, options.Host, obfuscate: false);
         WriteExtensionPointer(login, 56, ref data, out var featureExtensionOffset);
@@ -56,11 +70,7 @@ internal static class TdsLogin7
         BinaryPrimitives.WriteInt32LittleEndian(
           login.AsSpan(featureExtensionOffset),
           data);
-        login[data++] = 0x0D;
-        BinaryPrimitives.WriteInt32LittleEndian(login.AsSpan(data), 1);
-        data += 4;
-        login[data++] = 1;
-        login[data] = byte.MaxValue;
+        featureExtension.CopyTo(login.AsSpan(data));
         return login;
     }
 
@@ -74,6 +84,21 @@ internal static class TdsLogin7
         }
 
         return bytes;
+    }
+
+    private static byte[] EncodeFeatureExtension(TdsFedAuthLogin? fedAuth)
+    {
+        ArrayBufferWriter<byte> writer = new(16);
+        if (fedAuth is { } login)
+        {
+            writer.Write(TdsFedAuth.EncodeLoginFeature(login));
+        }
+
+        writer.WriteByte(TdsFeatureId.JsonSupport);
+        writer.WriteInt32LittleEndian(1);
+        writer.WriteByte(1);
+        writer.WriteByte(TdsFeatureId.Terminator);
+        return writer.WrittenSpan.ToArray();
     }
 
     private static void WriteField(

@@ -15,12 +15,16 @@ for .NET; it does not implement ADO.NET or wrap another runtime database driver.
 | `Apex.PgClient` | PostgreSQL | [PostgreSQL](src/Apex.PgClient/README.md) |
 | `Apex.MySqlClient` | MySQL and MariaDB | [MySQL and MariaDB](src/Apex.MySqlClient/README.md) |
 | `Apex.MsSqlClient` | Microsoft SQL Server | [Microsoft SQL Server](src/Apex.MsSqlClient/README.md) |
+| `Apex.SqlClient.AzureIdentity` | Microsoft Entra authentication for all drivers | [Azure Identity](src/Apex.SqlClient.AzureIdentity/README.md) |
 
 ## Install
 
 ```bash
 dotnet add package Apex.PgClient
 # or: Apex.MySqlClient / Apex.MsSqlClient
+
+# Optional Microsoft Entra authentication:
+dotnet add package Apex.SqlClient.AzureIdentity
 ```
 
 ## Common API
@@ -78,6 +82,37 @@ await foreach (SqlRow row in pool.StreamAsync(
 `StreamAsync` returns rows that remain valid after enumeration advances.
 `ExecuteReaderAsync` is the lower-allocation alternative; its current row is
 borrowed and must not be retained after the next `ReadAsync`.
+
+## Microsoft Entra authentication
+
+Reuse one `TokenCredential` and the same `UseAzureIdentity` pattern with every
+driver:
+
+```csharp
+using Apex.MsSqlClient;
+using Apex.MySqlClient;
+using Apex.PgClient;
+using Apex.SqlClient.AzureIdentity;
+using Azure.Identity;
+
+var credential = new DefaultAzureCredential();
+
+var postgres = new PgConnectOptions
+    { Host = "example.postgres.database.azure.com", Database = "app" }
+    .UseAzureIdentity(credential);
+var mysql = new MySqlConnectOptions
+    { Host = "example.mysql.database.azure.com", Database = "app" }
+    .UseAzureIdentity(credential);
+var sqlServer = new MsSqlConnectOptions
+    { Host = "example.database.windows.net", Database = "app" }
+    .UseAzureIdentity(credential);
+```
+
+Apex enables the required verified TLS settings and refreshes tokens when a pool
+opens new physical connections. PostgreSQL and MySQL usernames are inferred from
+the token by default. See the
+[Azure Identity package documentation](src/Apex.SqlClient.AzureIdentity/README.md)
+for explicit usernames and sovereign-cloud scopes.
 
 ## Build and test
 

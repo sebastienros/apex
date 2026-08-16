@@ -4,6 +4,7 @@
     <ProjectReference Include="..\..\src\Apex.MsSqlClient\Apex.MsSqlClient.csproj" />
     <ProjectReference Include="..\..\src\Apex.MySqlClient\Apex.MySqlClient.csproj" />
     <ProjectReference Include="..\..\src\Apex.PgClient\Apex.PgClient.csproj" />
+    <ProjectReference Include="..\..\src\Apex.SqlClient.AzureIdentity\Apex.SqlClient.AzureIdentity.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

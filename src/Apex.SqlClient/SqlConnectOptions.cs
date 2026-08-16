@@ -10,6 +10,8 @@ public abstract record SqlConnectOptions
 
     public string Password { get; init; } = string.Empty;
 
+    public SqlAuthenticationProvider? AuthenticationProvider { get; init; }
+
     public string Database { get; init; } = string.Empty;
 
     public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(30);

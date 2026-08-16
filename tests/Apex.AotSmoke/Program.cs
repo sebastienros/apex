@@ -1,8 +1,10 @@
 using System.Text.Json;
+using Apex.SqlClient.AzureIdentity;
 using Apex.MsSqlClient;
 using Apex.MySqlClient;
 using Apex.PgClient;
 using Apex.SqlClient;
+using Azure.Identity;
 
 PgConnectOptions pgOptions = PgConnectOptions.Parse(
   "host=localhost port=5432 user=user dbname=db sslmode=disable");
@@ -16,6 +18,9 @@ MySqlConnectOptions mySqlOptions = new()
 MsSqlConnectOptions msSqlOptions = MsSqlConnectOptions.Parse(
   "Server=tcp:localhost,1433;Database=db;User ID=user;Encrypt=Strict;" +
   "TrustServerCertificate=false;Application Name=aot-smoke");
+var azureOptions = pgOptions.UseAzureIdentity(
+  new DefaultAzureCredential(),
+  new AzureIdentityOptions { Username = "aot-smoke" });
 Func<PgConnectOptions, CancellationToken, ValueTask<PgConnection>> pgConnect =
   PgClient.ConnectAsync;
 Func<MySqlConnectOptions, CancellationToken, ValueTask<MySqlConnection>> mySqlConnect =
@@ -53,6 +58,7 @@ Console.WriteLine(
 GC.KeepAlive(pgConnect);
 GC.KeepAlive(mySqlConnect);
 GC.KeepAlive(msSqlConnect);
+GC.KeepAlive(azureOptions.AuthenticationProvider);
 
 if (Environment.GetEnvironmentVariable("APEX_AOT_MYSQL_CONNECTION_STRING") is { Length: > 0 } connectionString)
 {

@@ -14,6 +14,10 @@ internal readonly record struct TdsLoginAckInfo(
 
 internal readonly record struct MsSqlRoutingInfo(string Host, int Port);
 
+internal readonly record struct TdsFeatureExtAck(
+    bool FedAuthAcknowledged,
+    int FedAuthDataLength);
+
 internal readonly record struct TdsEnvironmentChangeInfo(
     string? Database = null,
     int? PacketSize = null,
@@ -256,13 +260,17 @@ internal sealed class TdsTokenReader
         _position += 4;
     }
 
-    internal void SkipFeatureExtAck()
+    internal void SkipFeatureExtAck() => _ = ReadFeatureExtAck();
+
+    internal TdsFeatureExtAck ReadFeatureExtAck()
     {
         var reader = CreatePayloadReader();
+        var fedAuthAcknowledged = false;
+        var fedAuthDataLength = 0;
         while (true)
         {
             var feature = reader.ReadByte();
-            if (feature == byte.MaxValue)
+            if (feature == TdsFeatureId.Terminator)
             {
                 break;
             }
@@ -275,9 +283,29 @@ internal sealed class TdsTokenReader
             }
 
             reader.Skip((int)length);
+            if (feature == TdsFeatureId.FedAuth)
+            {
+                fedAuthAcknowledged = true;
+                fedAuthDataLength = (int)length;
+            }
         }
 
         Commit(reader);
+        return new TdsFeatureExtAck(fedAuthAcknowledged, fedAuthDataLength);
+    }
+
+    internal TdsFedAuthInfo ReadFedAuthInfo()
+    {
+        var outer = CreatePayloadReader();
+        var length = outer.ReadUInt32LittleEndian();
+        if (length > int.MaxValue)
+        {
+            throw new InvalidDataException("SQL Server FEDAUTHINFO token is too large.");
+        }
+
+        var body = outer.ReadSpan((int)length);
+        Commit(outer);
+        return TdsFedAuth.ParseInfo(body);
     }
 
     internal TdsReturnValue ReadReturnValue()

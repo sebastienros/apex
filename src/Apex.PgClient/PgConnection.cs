@@ -26,6 +26,7 @@ public sealed class PgConnection : ISqlConnection
     private readonly PgWireWriter _writer;
     private readonly PgRowDecoder _rowDecoder;
     private readonly byte[]? _channelBindingData;
+    private readonly SqlAuthenticationMethod _authenticationMethod;
     private readonly BoundedOrderedCommandScheduler _scheduler;
     private readonly object _statementCacheGate = new();
     private readonly LruCache<string, string>? _statementCache;
@@ -43,13 +44,15 @@ public sealed class PgConnection : ISqlConnection
         Socket socket,
         Stream stream,
         bool secure,
-        byte[]? channelBindingData)
+        byte[]? channelBindingData,
+        SqlAuthenticationMethod authenticationMethod)
     {
         _options = options;
         _socket = socket;
         _stream = stream;
         IsSecure = secure;
         _channelBindingData = channelBindingData;
+        _authenticationMethod = authenticationMethod;
         _pipeReader = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
         _pipeWriter = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
         _reader = new PgWireReader(_pipeReader);
@@ -90,11 +93,32 @@ public sealed class PgConnection : ISqlConnection
         CancellationToken cancellationToken)
     {
         ValidateOptions(options);
+        using CancellationTokenSource timeout =
+          CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(options.ConnectTimeout);
+        var authenticationMethod = SqlAuthenticationMethod.Password;
+        if (options.AuthenticationProvider is not null)
+        {
+            var credential = await options.AuthenticationProvider(timeout.Token).ConfigureAwait(false);
+            options = options with
+            {
+                Username = credential.Username ?? options.Username,
+                Password = credential.Secret,
+            };
+            authenticationMethod = credential.Method;
+            ArgumentException.ThrowIfNullOrWhiteSpace(options.Username);
+        }
+
+        if (authenticationMethod == SqlAuthenticationMethod.BearerToken &&
+            options.SslMode is not (PgSslMode.VerifyCa or PgSslMode.VerifyFull))
+        {
+            throw new AuthenticationException(
+                "PostgreSQL bearer token authentication requires verified TLS.");
+        }
+
         var socket = CreateSocket(options);
         try
         {
-            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(options.ConnectTimeout);
             Stream stream = await PgProxyConnector.ConnectAsync(socket, options, timeout.Token)
               .ConfigureAwait(false);
             var secure = false;
@@ -130,7 +154,13 @@ public sealed class PgConnection : ISqlConnection
                 }
             }
 
-            PgConnection connection = new(options, socket, stream, secure, channelBindingData);
+            PgConnection connection = new(
+                options,
+                socket,
+                stream,
+                secure,
+                channelBindingData,
+                authenticationMethod);
             try
             {
                 await connection.InitializeAsync(timeout.Token).ConfigureAwait(false);
@@ -383,6 +413,7 @@ public sealed class PgConnection : ISqlConnection
                                 .ConfigureAwait(false);
                             break;
                         case 5:
+                            RejectBearerPasswordHashing();
                             RejectNonBindingAuthentication();
                             if (authentication.Remaining != 4)
                             {
@@ -396,6 +427,7 @@ public sealed class PgConnection : ISqlConnection
                             await _writer.WritePasswordAsync(md5, cancellationToken).ConfigureAwait(false);
                             break;
                         case 10:
+                            RejectBearerPasswordHashing();
                             var mechanism = SelectSaslMechanism(ref authentication);
                             scram = new PgScramClient(
                               _options.Username,
@@ -456,6 +488,15 @@ public sealed class PgConnection : ISqlConnection
                     throw new InvalidDataException(
                         $"Unexpected PostgreSQL startup message '{(char)message.Type}'.");
             }
+        }
+    }
+
+    private void RejectBearerPasswordHashing()
+    {
+        if (_authenticationMethod == SqlAuthenticationMethod.BearerToken)
+        {
+            throw new AuthenticationException(
+                "PostgreSQL bearer tokens require cleartext password authentication over TLS.");
         }
     }
 

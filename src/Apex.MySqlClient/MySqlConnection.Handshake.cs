@@ -14,13 +14,41 @@ public sealed partial class MySqlConnection
         CancellationToken cancellationToken)
     {
         ValidateOptions(options);
+        using CancellationTokenSource timeout =
+          CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(options.ConnectTimeout);
+        var authenticationMethod = SqlAuthenticationMethod.Password;
+        if (options.AuthenticationProvider is not null)
+        {
+            var credential = await options.AuthenticationProvider(timeout.Token).ConfigureAwait(false);
+            options = options with
+            {
+                Username = credential.Username ?? options.Username,
+                Password = credential.Secret,
+            };
+            authenticationMethod = credential.Method;
+            ArgumentException.ThrowIfNullOrWhiteSpace(options.Username);
+            if (credential.Method == SqlAuthenticationMethod.BearerToken)
+            {
+                if (options.AuthenticationPlugin != MySqlAuthenticationPlugin.ClearPassword ||
+                    !options.AllowCleartextPassword)
+                {
+                    throw new AuthenticationException(
+                        "MySQL bearer token authentication requires mysql_clear_password.");
+                }
+
+                if (options.SslMode is not (MySqlSslMode.VerifyCa or MySqlSslMode.VerifyIdentity))
+                {
+                    throw new AuthenticationException(
+                        "MySQL bearer token authentication requires verified TLS.");
+                }
+            }
+        }
+
         var socket = CreateSocket(options);
         Stream? stream = null;
         try
         {
-            using CancellationTokenSource timeout =
-              CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(options.ConnectTimeout);
             if (IsUnixSocket(options))
             {
                 await socket.ConnectAsync(new UnixDomainSocketEndPoint(options.Host), timeout.Token)
@@ -94,7 +122,13 @@ public sealed partial class MySqlConnection
                 }
             }
 
-            MySqlConnection connection = new(options, socket, stream, upgrade, capabilities);
+            MySqlConnection connection = new(
+                options,
+                socket,
+                stream,
+                upgrade,
+                capabilities,
+                authenticationMethod);
             stream = null;
             try
             {
@@ -469,16 +503,25 @@ public sealed partial class MySqlConnection
           _ => ValidatePlugin(serverPlugin),
       };
 
-    private string ValidatePlugin(string plugin) =>
-      plugin switch
-      {
-          MySqlProtocol.NativePasswordPlugin or
-          MySqlProtocol.CachingSha2PasswordPlugin or
-          MySqlProtocol.Sha256PasswordPlugin => plugin,
-          MySqlProtocol.ClearPasswordPlugin => ValidateCleartext(),
-          _ => throw new NotSupportedException(
-          $"MySQL authentication plugin '{plugin}' is not supported."),
-      };
+    private string ValidatePlugin(string plugin)
+    {
+        if (_authenticationMethod == SqlAuthenticationMethod.BearerToken &&
+            plugin != MySqlProtocol.ClearPasswordPlugin)
+        {
+            throw new AuthenticationException(
+              "MySQL bearer tokens require mysql_clear_password authentication.");
+        }
+
+        return plugin switch
+        {
+            MySqlProtocol.NativePasswordPlugin or
+            MySqlProtocol.CachingSha2PasswordPlugin or
+            MySqlProtocol.Sha256PasswordPlugin => plugin,
+            MySqlProtocol.ClearPasswordPlugin => ValidateCleartext(),
+            _ => throw new NotSupportedException(
+              $"MySQL authentication plugin '{plugin}' is not supported."),
+        };
+    }
 
     private string ValidateCleartext() =>
       _options.AllowCleartextPassword && IsSecure

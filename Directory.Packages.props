@@ -7,6 +7,8 @@
 
   <ItemGroup>
     <GlobalPackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.301" PrivateAssets="all" />
+    <PackageVersion Include="Azure.Core" Version="1.61.0" />
+    <PackageVersion Include="Azure.Identity" Version="1.21.0" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.0.2" />
     <PackageVersion Include="MySqlConnector" Version="2.6.1" />

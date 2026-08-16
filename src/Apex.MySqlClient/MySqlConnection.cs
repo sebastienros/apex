@@ -28,6 +28,7 @@ public sealed partial class MySqlConnection : ISqlConnection
     private readonly object _statementCacheGate = new();
     private readonly LruCache<string, MySqlStatement>? _statementCache;
     private readonly MySqlCapabilities _capabilities;
+    private readonly SqlAuthenticationMethod _authenticationMethod;
     private MySqlServerStatus _status = MySqlServerStatus.AutoCommit;
     private MySqlCommandInfo _lastCommandInfo = MySqlCommandInfo.Empty;
     private IReadOnlyList<MySqlColumnMetadata> _lastColumns = Array.Empty<MySqlColumnMetadata>();
@@ -42,13 +43,15 @@ public sealed partial class MySqlConnection : ISqlConnection
         Socket socket,
         Stream stream,
         bool secure,
-        MySqlCapabilities capabilities)
+        MySqlCapabilities capabilities,
+        SqlAuthenticationMethod authenticationMethod)
     {
         _options = options;
         _socket = socket;
         _stream = stream;
         IsSecure = secure;
         _capabilities = capabilities;
+        _authenticationMethod = authenticationMethod;
         _pipeReader = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
         _pipeWriter = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
         _reader = new MySqlPacketReader(_pipeReader);

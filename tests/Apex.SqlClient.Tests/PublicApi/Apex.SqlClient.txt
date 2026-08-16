@@ -100,6 +100,25 @@ interface Apex.SqlClient.ISqlTransaction : System.IAsyncDisposable
   Method: System.Threading.Tasks.ValueTask CommitAsync(System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask RollbackAsync(System.Threading.CancellationToken)
   Property: Boolean IsCompleted
+class Apex.SqlClient.SqlAuthenticationCredential
+  Constructor: Void .ctor(System.String, Apex.SqlClient.SqlAuthenticationMethod, System.String, System.Nullable`1[System.DateTimeOffset])
+  Method: Apex.SqlClient.SqlAuthenticationMethod get_Method()
+  Method: System.Nullable`1[System.DateTimeOffset] get_ExpiresOn()
+  Method: System.String get_Secret()
+  Method: System.String get_Username()
+  Property: Apex.SqlClient.SqlAuthenticationMethod Method
+  Property: System.Nullable`1[System.DateTimeOffset] ExpiresOn
+  Property: System.String Secret
+  Property: System.String Username
+enum Apex.SqlClient.SqlAuthenticationMethod : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.SqlClient.SqlAuthenticationMethod BearerToken
+  Field: Apex.SqlClient.SqlAuthenticationMethod Password
+  Field: Int32 value__
+class Apex.SqlClient.SqlAuthenticationProvider : System.MulticastDelegate, System.ICloneable, System.Runtime.Serialization.ISerializable
+  Constructor: Void .ctor(System.Object, IntPtr)
+  Method: System.IAsyncResult BeginInvoke(System.Threading.CancellationToken, System.AsyncCallback, System.Object)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlAuthenticationCredential] EndInvoke(System.IAsyncResult)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlAuthenticationCredential] Invoke(System.Threading.CancellationToken)
 class Apex.SqlClient.SqlClientException : System.Exception, System.Runtime.Serialization.ISerializable
   Constructor: Void .ctor(System.String)
   Constructor: Void .ctor(System.String, System.Exception)
@@ -159,6 +178,7 @@ struct Apex.SqlClient.SqlCommandResult : System.IEquatable`1[Apex.SqlClient.SqlC
   Property: System.String CommandTag
   Property: UInt32 StatusFlags
 class Apex.SqlClient.SqlConnectOptions : System.IEquatable`1[Apex.SqlClient.SqlConnectOptions]
+  Method: Apex.SqlClient.SqlAuthenticationProvider get_AuthenticationProvider()
   Method: Apex.SqlClient.SqlConnectOptions <Clone>$()
   Method: Boolean Equals(Apex.SqlClient.SqlConnectOptions)
   Method: Boolean Equals(System.Object)
@@ -177,6 +197,7 @@ class Apex.SqlClient.SqlConnectOptions : System.IEquatable`1[Apex.SqlClient.SqlC
   Method: System.String get_Username()
   Method: System.TimeSpan get_ConnectTimeout()
   Method: System.TimeSpan get_ReconnectInterval()
+  Method: Void set_AuthenticationProvider(Apex.SqlClient.SqlAuthenticationProvider)
   Method: Void set_CachePreparedStatements(Boolean)
   Method: Void set_ConnectTimeout(System.TimeSpan)
   Method: Void set_Database(System.String)
@@ -188,6 +209,7 @@ class Apex.SqlClient.SqlConnectOptions : System.IEquatable`1[Apex.SqlClient.SqlC
   Method: Void set_ReconnectAttempts(Int32)
   Method: Void set_ReconnectInterval(System.TimeSpan)
   Method: Void set_Username(System.String)
+  Property: Apex.SqlClient.SqlAuthenticationProvider AuthenticationProvider
   Property: Boolean CachePreparedStatements
   Property: Int32 Port
   Property: Int32 PreparedStatementCacheSize

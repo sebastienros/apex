@@ -6,8 +6,23 @@ internal static class TdsMessageType
     internal const byte Rpc = 0x03;
     internal const byte TabularResult = 0x04;
     internal const byte Attention = 0x06;
+    internal const byte FedAuthToken = 0x08;
     internal const byte Login7 = 0x10;
     internal const byte PreLogin = 0x12;
+}
+
+internal static class TdsFeatureId
+{
+    internal const byte FedAuth = 0x02;
+    internal const byte JsonSupport = 0x0D;
+    internal const byte Terminator = 0xFF;
+}
+
+internal static class TdsFedAuthLibrary
+{
+    internal const byte LiveIdCompactToken = 0x00;
+    internal const byte SecurityToken = 0x01;
+    internal const byte Adal = 0x02;
 }
 
 internal static class TdsProcedureId
