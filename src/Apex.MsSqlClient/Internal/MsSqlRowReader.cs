@@ -23,7 +23,11 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     private MsSqlConnection.AttentionState? _attention;
     private IReadOnlyList<TdsColumn> _tdsColumns = Array.Empty<TdsColumn>();
     private IReadOnlyList<SqlColumn> _columns = Array.Empty<SqlColumn>();
+    private SqlColumnOrdinalMap? _ordinals;
     private int _resultSetGeneration;
+    private int _resultCount;
+    private int _currentResultIndex;
+    private bool _hasCurrentResult;
     private Exception? _error;
     private bool _cancelBeforeAttention;
     private bool _hasCurrent;
@@ -98,6 +102,21 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     public int FieldCount => _columns.Count;
 
     internal int ResultSetGeneration => _resultSetGeneration;
+
+    internal int CurrentResultIndex => _currentResultIndex;
+
+    internal SqlRow CurrentRow
+    {
+        get
+        {
+            EnsureCurrent();
+            return new SqlRow(
+                _columns,
+                _ordinals!,
+                _connection.RowDecoder,
+                _current.WrittenMemory);
+        }
+    }
 
     public ValueTask<bool> ReadAsync(CancellationToken cancellationToken = default)
     {
@@ -412,6 +431,9 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             _columns = _tdsColumns
                               .Select(static column => column.Column)
                               .ToArray();
+                            _ordinals = SqlColumnOrdinalMapCache.GetOrAdd(_columns);
+                            _currentResultIndex = _resultCount;
+                            _hasCurrentResult = true;
                             _resultSetGeneration++;
                             break;
                         case TdsTokenType.Row:
@@ -450,6 +472,18 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                         case TdsTokenType.DoneInProc:
                             var done = await tokens.ReadDoneAsync().ConfigureAwait(false);
                             final |= (done.Status & TdsDoneStatus.More) == 0;
+                            if (_hasCurrentResult)
+                            {
+                                _resultCount++;
+                                _hasCurrentResult = false;
+                            }
+                            else if ((done.Status & TdsDoneStatus.Count) != 0 ||
+                                     (_resultCount == 0 &&
+                                      (done.Status & TdsDoneStatus.More) == 0))
+                            {
+                                _resultCount++;
+                            }
+
                             _tdsColumns = Array.Empty<TdsColumn>();
                             if ((done.Status & TdsDoneStatus.Attention) != 0)
                             {

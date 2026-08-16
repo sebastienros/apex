@@ -9,9 +9,7 @@ public readonly struct SqlRow
     private readonly IReadOnlyList<SqlColumn> _columns;
     private readonly SqlColumnOrdinalMap _ordinals;
     private readonly ISqlRowDecoder _decoder;
-    private readonly SqlRowPage? _page;
-    private readonly int _offset;
-    private readonly int _length;
+    private readonly ReadOnlyMemory<byte> _memory;
 
     internal SqlRow(
         IReadOnlyList<SqlColumn> columns,
@@ -23,9 +21,19 @@ public readonly struct SqlRow
         _columns = columns;
         _ordinals = ordinals;
         _decoder = page.Decoder;
-        _page = page;
-        _offset = offset;
-        _length = length;
+        _memory = page.Data.AsMemory(offset, length);
+    }
+
+    internal SqlRow(
+        IReadOnlyList<SqlColumn> columns,
+        SqlColumnOrdinalMap ordinals,
+        ISqlRowDecoder decoder,
+        ReadOnlyMemory<byte> memory)
+    {
+        _columns = columns;
+        _ordinals = ordinals;
+        _decoder = decoder;
+        _memory = memory;
     }
 
     public int Count => _decoder.GetFieldCount(RowMemory);
@@ -160,6 +168,5 @@ public readonly struct SqlRow
         return false;
     }
 
-    private ReadOnlyMemory<byte> RowMemory =>
-      _page!.Data.AsMemory(_offset, _length);
+    private ReadOnlyMemory<byte> RowMemory => _memory;
 }

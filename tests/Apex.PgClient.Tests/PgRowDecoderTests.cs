@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Numerics;
+using System.Runtime.InteropServices;
 using System.Text;
 using Apex.PgClient.Internal;
 using Apex.SqlClient;
@@ -96,6 +97,46 @@ public sealed class PgRowDecoderTests
             CreateRow("12.34"u8),
             0,
             Column(1700, SqlDataFormat.Text)));
+    }
+
+    [TestMethod]
+    public void ReturnsStringPayloadAsBytesWithoutStringDecoding()
+    {
+        PgRowDecoder decoder = new(16, 64);
+        var expected = "Fortune favors the fast."u8.ToArray();
+
+        CollectionAssert.AreEqual(
+            expected,
+            decoder.DecodeBytes(
+                CreateRow(expected),
+                0,
+                Column(25, SqlDataFormat.Text)));
+    }
+
+    [TestMethod]
+    public void ReturnsStringPayloadAsCachedReadOnlyMemory()
+    {
+        PgRowDecoder decoder = new(16, 64);
+        var expected = "Fortune favors the fast."u8.ToArray();
+        var row = CreateRow(expected);
+
+        var first = decoder.DecodeReadOnlyMemory(
+            row,
+            0,
+            Column(25, SqlDataFormat.Text));
+        var second = decoder.DecodeReadOnlyMemory(
+            row,
+            0,
+            Column(25, SqlDataFormat.Text));
+        var third = decoder.DecodeReadOnlyMemory(
+            row,
+            0,
+            Column(25, SqlDataFormat.Text));
+
+        Assert.IsTrue(first.Span.SequenceEqual(expected));
+        Assert.IsTrue(MemoryMarshal.TryGetArray(second, out var secondSegment));
+        Assert.IsTrue(MemoryMarshal.TryGetArray(third, out var thirdSegment));
+        Assert.AreSame(secondSegment.Array, thirdSegment.Array);
     }
 
     [TestMethod]

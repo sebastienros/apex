@@ -668,6 +668,13 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                 CancellationToken cancellationToken = default) =>
               _inner.QueryAsync(parameters, cancellationToken);
 
+            public ValueTask<TState> CollectAsync<TState>(
+                TState state,
+                Action<TState, SqlRow> collector,
+                SqlParameters parameters = default,
+                CancellationToken cancellationToken = default) =>
+              _inner.CollectAsync(state, collector, parameters, cancellationToken);
+
             public ValueTask<SqlCommandResult> ExecuteAsync(
                 SqlParameters parameters = default,
                 CancellationToken cancellationToken = default) =>

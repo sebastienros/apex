@@ -77,7 +77,7 @@ public sealed class PgConnectionWireTests
     }
 
     [TestMethod]
-    public async Task PreparesExecutesAndClosesStatement()
+    public async Task PreparesCollectsAndClosesStatement()
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
@@ -95,8 +95,12 @@ public sealed class PgConnectionWireTests
         await using var statement =
           await connection.PrepareAsync("SELECT $1::int4 AS id");
 
-        var rows = await statement.QueryAsync(SqlParameters.Create(7));
-        Assert.AreEqual(7, rows[0].Get<int>("id"));
+        List<int> values = [];
+        await statement.CollectAsync(
+            values,
+            static (result, row) => result.Add(row.Get<int>("id")),
+            SqlParameters.Create(7));
+        Assert.AreEqual(7, values[0]);
 
         try
         {
@@ -230,10 +234,15 @@ public sealed class PgConnectionWireTests
         var queries = Enumerable.Range(0, 32)
           .Select(index => connection.QueryAsync($"SELECT {index}::int4").AsTask())
           .ToArray();
-        await Assert.ThrowsAsync<Exception>(() => Task.WhenAll(queries));
+        var allQueries = Task.WhenAll(queries);
+        var completed = await Task.WhenAny(
+            allQueries,
+            Task.Delay(TimeSpan.FromSeconds(5)));
+        Assert.AreSame(allQueries, completed);
+        await Assert.ThrowsAsync<Exception>(() => allQueries);
 
         Assert.IsTrue(queries.All(static query => query.IsFaulted || query.IsCanceled));
-        await server;
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
         listener.Stop();
     }
 
@@ -390,11 +399,8 @@ public sealed class PgConnectionWireTests
         await using var stream = client.GetStream();
         await ReadStartupAsync(stream);
         await WriteStartupCompleteAsync(stream);
-        for (var i = 0; i < 5; i++)
-        {
-            (var type, _) = await ReadMessageAsync(stream);
-            Assert.AreEqual((byte)'Q', type);
-        }
+        (var type, _) = await ReadMessageAsync(stream);
+        Assert.AreEqual((byte)'Q', type);
     }
 
     private static async Task ReadStartupAsync(Stream stream)

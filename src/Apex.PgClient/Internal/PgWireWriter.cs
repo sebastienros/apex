@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Buffers.Binary;
-using System.IO.Pipelines;
 using System.Security.Cryptography;
 using System.Text;
 using Apex.SqlClient;
@@ -10,16 +9,17 @@ namespace Apex.PgClient.Internal;
 internal sealed class PgWireWriter
 {
     private static readonly Encoding s_utf8 = new UTF8Encoding(false, true);
-    private readonly PipeWriter _writer;
+    private readonly Stream _stream;
+    private readonly ArrayBufferWriter<byte> _writer = new(16 * 1024);
     private readonly PgTypeRegistry _typeRegistry;
 
-    public PgWireWriter(PipeWriter writer, PgTypeRegistry typeRegistry)
+    public PgWireWriter(Stream stream, PgTypeRegistry typeRegistry)
     {
-        _writer = writer;
+        _stream = stream;
         _typeRegistry = typeRegistry;
     }
 
-    public ValueTask<FlushResult> WriteStartupAsync(
+    public ValueTask WriteStartupAsync(
         PgConnectOptions options,
         CancellationToken cancellationToken)
     {
@@ -39,7 +39,7 @@ internal sealed class PgWireWriter
         return WriteUntypedAsync(payload.WrittenMemory, cancellationToken);
     }
 
-    public ValueTask<FlushResult> WritePasswordAsync(
+    public ValueTask WritePasswordAsync(
         string password,
         CancellationToken cancellationToken)
     {
@@ -48,7 +48,7 @@ internal sealed class PgWireWriter
         return WriteTypedAsync((byte)'p', payload.WrittenMemory, cancellationToken);
     }
 
-    public ValueTask<FlushResult> WriteSaslInitialAsync(
+    public ValueTask WriteSaslInitialAsync(
         string mechanism,
         string message,
         CancellationToken cancellationToken)
@@ -61,7 +61,7 @@ internal sealed class PgWireWriter
         return WriteTypedAsync((byte)'p', payload.WrittenMemory, cancellationToken);
     }
 
-    public ValueTask<FlushResult> WriteSaslResponseAsync(
+    public ValueTask WriteSaslResponseAsync(
         string message,
         CancellationToken cancellationToken)
     {
@@ -70,7 +70,7 @@ internal sealed class PgWireWriter
         return WriteTypedAsync((byte)'p', payload.WrittenMemory, cancellationToken);
     }
 
-    public async ValueTask<FlushResult> WriteQueryAsync(
+    public async ValueTask WriteQueryAsync(
         string sql,
         CancellationToken cancellationToken)
     {
@@ -84,7 +84,7 @@ internal sealed class PgWireWriter
         var written = s_utf8.GetBytes(sql, message[5..]);
         message[5 + written] = 0;
         _writer.Advance(totalLength);
-        return await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteExtendedQueryAsync(
@@ -99,7 +99,7 @@ internal sealed class PgWireWriter
               portalName: string.Empty,
               statementName: string.Empty,
               fetchSize: 0);
-            await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -110,7 +110,7 @@ internal sealed class PgWireWriter
         WriteTyped((byte)'P', parse.WrittenSpan);
 
         WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteExtendedQueryAsync(
@@ -120,7 +120,7 @@ internal sealed class PgWireWriter
     {
         WriteTypedParse(sql, parameters);
         WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteBatchAsync(
@@ -140,7 +140,7 @@ internal sealed class PgWireWriter
         }
 
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WritePrepareAsync(
@@ -155,7 +155,7 @@ internal sealed class PgWireWriter
         WriteTyped((byte)'P', parse.WrittenSpan);
         WriteDescribeStatement(name);
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WritePreparedQueryAsync(
@@ -165,21 +165,41 @@ internal sealed class PgWireWriter
         bool describePortal = true,
         bool flush = true)
     {
-        WriteBindDescribeExecute(
-          string.Empty,
-          name,
-          parameters,
-          0,
-          describePortal);
+        if (parameters.Count == 0)
+        {
+            WriteBindDescribeExecuteNoParameters(
+                string.Empty,
+                name,
+                fetchSize: 0,
+                describePortal);
+        }
+        else
+        {
+            WriteBindDescribeExecute(
+                string.Empty,
+                name,
+                parameters,
+                fetchSize: 0,
+                describePortal);
+        }
+
         if (flush)
         {
-            await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
     public async ValueTask FlushAsync(CancellationToken cancellationToken)
     {
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (_writer.WrittenCount == 0)
+        {
+            return;
+        }
+
+        await _stream.WriteAsync(
+            _writer.WrittenMemory,
+            cancellationToken).ConfigureAwait(false);
+        _writer.Clear();
     }
 
     public async ValueTask WriteCopyDataAsync(
@@ -187,13 +207,13 @@ internal sealed class PgWireWriter
         CancellationToken cancellationToken)
     {
         WriteTyped((byte)'d', payload.Span);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteCopyDoneAsync(CancellationToken cancellationToken)
     {
         WriteTyped((byte)'c', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteCopyFailAsync(
@@ -203,7 +223,7 @@ internal sealed class PgWireWriter
         ArrayBufferWriter<byte> payload = new();
         payload.WriteCString(message);
         WriteTyped((byte)'f', payload.WrittenSpan);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteOpenPortalAsync(
@@ -214,7 +234,7 @@ internal sealed class PgWireWriter
         CancellationToken cancellationToken)
     {
         WriteBindDescribeExecute(portalName, statementName, parameters, fetchSize);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteExecutePortalAsync(
@@ -224,7 +244,7 @@ internal sealed class PgWireWriter
     {
         WriteExecute(portalName, fetchSize);
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteClosePortalAsync(
@@ -236,7 +256,7 @@ internal sealed class PgWireWriter
         close.WriteCString(portalName);
         WriteTyped((byte)'C', close.WrittenSpan);
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async ValueTask WriteCloseStatementAsync(
@@ -248,10 +268,10 @@ internal sealed class PgWireWriter
         close.WriteCString(name);
         WriteTyped((byte)'C', close.WrittenSpan);
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
-        await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public ValueTask<FlushResult> WriteTerminateAsync(CancellationToken cancellationToken) =>
+    public ValueTask WriteTerminateAsync(CancellationToken cancellationToken) =>
         WriteTypedAsync((byte)'X', ReadOnlyMemory<byte>.Empty, cancellationToken);
 
     public static string Md5Password(string password, string username, ReadOnlySpan<byte> salt)
@@ -271,7 +291,7 @@ internal sealed class PgWireWriter
         return "md5" + Convert.ToHexStringLower(secondHash);
     }
 
-    private async ValueTask<FlushResult> WriteUntypedAsync(
+    private async ValueTask WriteUntypedAsync(
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken)
     {
@@ -279,16 +299,16 @@ internal sealed class PgWireWriter
         BinaryPrimitives.WriteInt32BigEndian(length, checked(payload.Length + sizeof(int)));
         _writer.Advance(sizeof(int));
         _writer.Write(payload.Span);
-        return await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private async ValueTask<FlushResult> WriteTypedAsync(
+    private async ValueTask WriteTypedAsync(
         byte type,
         ReadOnlyMemory<byte> payload,
         CancellationToken cancellationToken)
     {
         WriteTyped(type, payload.Span);
-        return await _writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private void WriteTyped(byte type, ReadOnlySpan<byte> payload)
@@ -443,7 +463,8 @@ internal sealed class PgWireWriter
     private void WriteBindDescribeExecuteNoParameters(
         string portalName,
         string statementName,
-        int fetchSize)
+        int fetchSize,
+        bool describePortal = true)
     {
         var portalLength = s_utf8.GetByteCount(portalName);
         var statementLength = s_utf8.GetByteCount(statementName);
@@ -469,12 +490,15 @@ internal sealed class PgWireWriter
         BinaryPrimitives.WriteInt16BigEndian(bind[position..], 1);
         WriteTyped((byte)'B', bind);
 
-        Span<byte> describe = stackalloc byte[1 + portalLength + 1];
-        describe[0] = (byte)'P';
-        position = 1;
-        position += s_utf8.GetBytes(portalName, describe[position..]);
-        describe[position] = 0;
-        WriteTyped((byte)'D', describe);
+        if (describePortal)
+        {
+            Span<byte> describe = stackalloc byte[1 + portalLength + 1];
+            describe[0] = (byte)'P';
+            position = 1;
+            position += s_utf8.GetBytes(portalName, describe[position..]);
+            describe[position] = 0;
+            WriteTyped((byte)'D', describe);
+        }
 
         Span<byte> execute = stackalloc byte[portalLength + 1 + sizeof(int)];
         position = s_utf8.GetBytes(portalName, execute);

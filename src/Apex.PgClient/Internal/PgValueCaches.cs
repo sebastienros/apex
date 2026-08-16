@@ -72,6 +72,73 @@ internal sealed class Utf8StringCache
     }
 }
 
+internal sealed class Utf8BytesCache
+{
+    private readonly int _maximumByteLength;
+    private Table? _table;
+
+    internal Utf8BytesCache(int capacity, int maximumByteLength)
+    {
+        if (capacity <= 0 || maximumByteLength <= 0)
+        {
+            return;
+        }
+
+        var normalizedCapacity = 1;
+        while (normalizedCapacity < capacity)
+        {
+            normalizedCapacity <<= 1;
+        }
+
+        _table = new Table(normalizedCapacity);
+        _maximumByteLength = maximumByteLength;
+    }
+
+    internal ReadOnlyMemory<byte> GetBytes(ReadOnlySpan<byte> value)
+    {
+        var table = Volatile.Read(ref _table);
+        if (table is null || value.Length > _maximumByteLength)
+        {
+            return value.ToArray();
+        }
+
+        var hash = XxHash3.HashToUInt64(value);
+        hash = hash == 0 ? 1 : hash;
+        var index = (int)hash & (table.Entries.Length - 1);
+        var entry = Volatile.Read(ref table.Entries[index]);
+        if (entry is not null &&
+            entry.Hash == hash &&
+            entry.Value.AsSpan().SequenceEqual(value))
+        {
+            return entry.Value;
+        }
+
+        var bytes = value.ToArray();
+        if (unchecked((ulong)Volatile.Read(ref table.CandidateHashes[index])) == hash)
+        {
+            Volatile.Write(ref table.Entries[index], new Entry(hash, bytes));
+            Volatile.Write(ref table.CandidateHashes[index], 0);
+        }
+        else
+        {
+            Volatile.Write(ref table.CandidateHashes[index], unchecked((long)hash));
+        }
+
+        return bytes;
+    }
+
+    internal void Disable() => Volatile.Write(ref _table, null);
+
+    private sealed record Entry(ulong Hash, byte[] Value);
+
+    private sealed class Table(int capacity)
+    {
+        internal Entry?[] Entries { get; } = new Entry?[capacity];
+
+        internal long[] CandidateHashes { get; } = new long[capacity];
+    }
+}
+
 internal static class BoxedScalarCache
 {
     private const int Minimum = -128;

@@ -1,4 +1,3 @@
-using System.IO.Pipelines;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
@@ -18,8 +17,6 @@ public sealed partial class MySqlConnection : ISqlConnection
     private readonly MySqlConnectOptions _options;
     private readonly Socket _socket;
     private readonly Stream _stream;
-    private readonly PipeReader _pipeReader;
-    private readonly PipeWriter _pipeWriter;
     private readonly MySqlPacketReader _reader;
     private readonly MySqlPacketWriter _writer;
     private readonly MySqlPayloadWriter _payload = new();
@@ -52,10 +49,8 @@ public sealed partial class MySqlConnection : ISqlConnection
         IsSecure = secure;
         _capabilities = capabilities;
         _authenticationMethod = authenticationMethod;
-        _pipeReader = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
-        _pipeWriter = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
-        _reader = new MySqlPacketReader(_pipeReader);
-        _writer = new MySqlPacketWriter(_pipeWriter);
+        _reader = new MySqlPacketReader(stream);
+        _writer = new MySqlPacketWriter(stream);
         _strings = new Utf8StringCache(
           options.StringCacheCapacity,
           options.StringCacheMaximumByteLength);
@@ -322,14 +317,6 @@ public sealed partial class MySqlConnection : ISqlConnection
         finally
         {
             await _scheduler.DisposeAsync().ConfigureAwait(false);
-            try
-            {
-                await _pipeWriter.CompleteAsync().ConfigureAwait(false);
-            }
-            catch (Exception exception) when (IsFatalConnectionError(exception))
-            {
-            }
-
             await _reader.CompleteAsync().ConfigureAwait(false);
             await _stream.DisposeAsync().ConfigureAwait(false);
             _socket.Dispose();
