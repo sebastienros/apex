@@ -314,9 +314,10 @@ public sealed class PgTlsConnectionTests
           new X509BasicConstraintsExtension(false, false, 0, critical: true));
         request.CertificateExtensions.Add(
           new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature, critical: true));
-        return request.CreateSelfSigned(
+              using var certificate = request.CreateSelfSigned(
           DateTimeOffset.UtcNow.AddMinutes(-5),
           DateTimeOffset.UtcNow.AddDays(1));
+              return CloneCertificate(certificate);
     }
 
         private static X509Certificate2 CreateCertificateAuthority()
@@ -335,9 +336,10 @@ public sealed class PgTlsConnectionTests
                         critical: true));
                 request.CertificateExtensions.Add(
                     new X509SubjectKeyIdentifierExtension(request.PublicKey, critical: false));
-                return request.CreateSelfSigned(
+                using var certificate = request.CreateSelfSigned(
                     DateTimeOffset.UtcNow.AddMinutes(-5),
                     DateTimeOffset.UtcNow.AddDays(1));
+                return CloneCertificate(certificate);
         }
 
         private static X509Certificate2 CreateServerCertificate(
@@ -369,8 +371,14 @@ public sealed class PgTlsConnectionTests
                     new DateTimeOffset(authority.NotBefore).AddSeconds(1),
                     new DateTimeOffset(authority.NotAfter).AddSeconds(-1),
                     serial);
-                return issued.CopyWithPrivateKey(rsa);
+                using var certificate = issued.CopyWithPrivateKey(rsa);
+                return CloneCertificate(certificate);
         }
+
+        private static X509Certificate2 CloneCertificate(X509Certificate2 certificate) =>
+                X509CertificateLoader.LoadPkcs12(
+                    certificate.Export(X509ContentType.Pfx),
+                    password: null);
 
         private static bool ValidateCertificate(
                 X509Certificate? remote,
