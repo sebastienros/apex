@@ -1,3 +1,5 @@
+using System.Runtime.CompilerServices;
+
 namespace Apex.SqlClient.Tests;
 
 [TestClass]
@@ -32,6 +34,27 @@ public sealed class SqlParametersTests
         Assert.AreEqual(SqlValueKind.Boolean, parameters[0].Kind);
         Assert.AreEqual(3, parameters[2].Get<int>());
         Assert.AreEqual(7.5m, parameters[6].Get<decimal>());
+    }
+
+    [TestMethod]
+    public void StoresSixteenByteScalarsInline()
+    {
+        Guid guid = Guid.Parse("12345678-1234-5678-9012-123456789abc");
+        DateTimeOffset timestamp = new(2026, 8, 16, 9, 30, 0, TimeSpan.FromHours(-7));
+
+        SqlValue guidValue = guid;
+        SqlValue timestampValue = timestamp;
+
+        Assert.AreEqual(guid, guidValue.Get<Guid>());
+        Assert.AreEqual(guid, guidValue.ToObject());
+        Assert.AreEqual(timestamp, timestampValue.Get<DateTimeOffset>());
+        Assert.AreEqual(timestamp, timestampValue.ToObject());
+    }
+
+    [TestMethod]
+    public void UsesCompactValueLayout()
+    {
+        Assert.AreEqual(32, Unsafe.SizeOf<SqlValue>());
     }
 
     [TestMethod]

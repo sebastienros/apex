@@ -5,6 +5,45 @@ interface Apex.PgClient.IPgSubscriber : System.IAsyncDisposable
   Method: System.Threading.Tasks.ValueTask UnsubscribeAsync(System.String, System.Threading.CancellationToken)
   Property: System.Collections.Generic.IAsyncEnumerable`1[Apex.PgClient.PgNotification] Notifications
   Property: System.Collections.Generic.IReadOnlyCollection`1[System.String] Channels
+interface Apex.PgClient.IPgTypeCodec
+  Method: Byte[] EncodeBinary(System.Object)
+  Method: System.Object DecodeBinary(System.ReadOnlyMemory`1[System.Byte])
+  Method: System.Type get_ClrType()
+  Property: System.Type ClrType
+class Apex.PgClient.PgBatch : System.Collections.Generic.IEnumerable`1[Apex.PgClient.PgBatchCommand], System.Collections.Generic.IReadOnlyCollection`1[Apex.PgClient.PgBatchCommand], System.Collections.Generic.IReadOnlyList`1[Apex.PgClient.PgBatchCommand], System.Collections.IEnumerable
+  Constructor: Void .ctor()
+  Method: Apex.PgClient.PgBatchCommand Add(System.String, Apex.PgClient.PgParameters)
+  Method: Apex.PgClient.PgBatchCommand get_Item(Int32)
+  Method: Int32 get_Count()
+  Method: System.Collections.Generic.IEnumerator`1[Apex.PgClient.PgBatchCommand] GetEnumerator()
+  Property: Apex.PgClient.PgBatchCommand Item [Int32]
+  Property: Int32 Count
+class Apex.PgClient.PgBatchCommand
+  Constructor: Void .ctor(System.String, Apex.PgClient.PgParameters)
+  Method: Apex.PgClient.PgParameters get_Parameters()
+  Method: System.String get_Sql()
+  Property: Apex.PgClient.PgParameters Parameters
+  Property: System.String Sql
+class Apex.PgClient.PgBatchException : System.Exception, System.Runtime.Serialization.ISerializable
+  Method: Apex.PgClient.PgException get_ServerError()
+  Method: Int32 get_CommandIndex()
+  Property: Apex.PgClient.PgException ServerError
+  Property: Int32 CommandIndex
+class Apex.PgClient.PgBatchReader : System.Collections.Generic.IEnumerable`1[Apex.SqlClient.SqlRowSet], System.Collections.Generic.IReadOnlyCollection`1[Apex.SqlClient.SqlRowSet], System.Collections.Generic.IReadOnlyList`1[Apex.SqlClient.SqlRowSet], System.Collections.IEnumerable
+  Method: Apex.SqlClient.SqlRowSet get_Current()
+  Method: Apex.SqlClient.SqlRowSet get_Item(Int32)
+  Method: Int32 get_Count()
+  Method: System.Collections.Generic.IEnumerator`1[Apex.SqlClient.SqlRowSet] GetEnumerator()
+  Method: System.Threading.Tasks.ValueTask`1[System.Boolean] NextResultAsync(System.Threading.CancellationToken)
+  Property: Apex.SqlClient.SqlRowSet Current
+  Property: Apex.SqlClient.SqlRowSet Item [Int32]
+  Property: Int32 Count
+class Apex.PgClient.PgBinaryImporter : System.IAsyncDisposable
+  Method: System.Threading.Tasks.ValueTask CompleteAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask StartRowAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask WriteAsync(Apex.PgClient.PgParameter, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask WriteNullAsync(System.Threading.CancellationToken)
 struct Apex.PgClient.PgBox : System.IEquatable`1[Apex.PgClient.PgBox]
   Constructor: Void .ctor(Apex.PgClient.PgPoint, Apex.PgClient.PgPoint)
   Method: Apex.PgClient.PgPoint get_LowerLeft()
@@ -65,6 +104,7 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
   Method: Apex.PgClient.PgProxyOptions get_Proxy()
   Method: Apex.PgClient.PgSslMode get_SslMode()
   Method: Apex.PgClient.PgSslNegotiation get_SslNegotiation()
+  Method: Apex.PgClient.PgTypeRegistry get_TypeRegistry()
   Method: Boolean Equals(Apex.PgClient.PgConnectOptions)
   Method: Boolean Equals(Apex.SqlClient.SqlConnectOptions)
   Method: Boolean Equals(System.Object)
@@ -91,11 +131,13 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
   Method: Void set_SslNegotiation(Apex.PgClient.PgSslNegotiation)
   Method: Void set_StringCacheCapacity(Int32)
   Method: Void set_StringCacheMaximumByteLength(Int32)
+  Method: Void set_TypeRegistry(Apex.PgClient.PgTypeRegistry)
   Method: Void set_UseLayer7Proxy(Boolean)
   Property: Apex.PgClient.PgChannelBinding ChannelBinding
   Property: Apex.PgClient.PgProxyOptions Proxy
   Property: Apex.PgClient.PgSslMode SslMode
   Property: Apex.PgClient.PgSslNegotiation SslNegotiation
+  Property: Apex.PgClient.PgTypeRegistry TypeRegistry
   Property: Boolean UseLayer7Proxy
   Property: Int32 PipeliningLimit
   Property: Int32 StringCacheCapacity
@@ -107,6 +149,7 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
 class Apex.PgClient.PgConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
   Event: System.Action`1[Apex.PgClient.PgNotice] Notice
   Event: System.Action`1[Apex.PgClient.PgNotification] Notification
+  Method: Apex.PgClient.PgTypeRegistry get_TypeRegistry()
   Method: Apex.SqlClient.DatabaseMetadata get_DatabaseMetadata()
   Method: Boolean get_IsSecure()
   Method: Int32 get_ProcessId()
@@ -114,40 +157,92 @@ class Apex.PgClient.PgConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISq
   Method: System.Collections.Generic.IAsyncEnumerable`1[Apex.SqlClient.SqlRow] StreamAsync(System.String, Apex.SqlClient.SqlParameters, Int32, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask CancelRequestAsync(System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask EnlistTransactionAsync(System.Transactions.Transaction, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask ReloadTypesAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.PgClient.PgBatchReader] ExecuteBatchAsync(Apex.PgClient.PgBatch, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.PgClient.PgBinaryImporter] BeginBinaryImportAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.PgClient.PgTransaction] BeginPgTransactionAsync(Apex.PgClient.PgTransactionOptions, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlPreparedStatement] PrepareAsync(System.String, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlRowReader] ExecuteReaderAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.ISqlTransaction] BeginTransactionAsync(System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteTypedAsync(System.String, Apex.PgClient.PgParameters, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryTypedAsync(System.String, Apex.PgClient.PgParameters, System.Threading.CancellationToken)
   Method: Void add_Notice(System.Action`1[Apex.PgClient.PgNotice])
   Method: Void add_Notification(System.Action`1[Apex.PgClient.PgNotification])
   Method: Void remove_Notice(System.Action`1[Apex.PgClient.PgNotice])
   Method: Void remove_Notification(System.Action`1[Apex.PgClient.PgNotification])
+  Property: Apex.PgClient.PgTypeRegistry TypeRegistry
   Property: Apex.SqlClient.DatabaseMetadata DatabaseMetadata
   Property: Boolean IsSecure
   Property: Int32 ProcessId
   Property: Int32 SecretKey
+class Apex.PgClient.PgErrorCodes
+  Field: System.String AdminShutdown
+  Field: System.String CannotConnectNow
+  Field: System.String ConnectionDoesNotExist
+  Field: System.String ConnectionException
+  Field: System.String ConnectionFailure
+  Field: System.String CrashShutdown
+  Field: System.String DatabaseDropped
+  Field: System.String DeadlockDetected
+  Field: System.String IdleSessionTimeout
+  Field: System.String InFailedSqlTransaction
+  Field: System.String LockNotAvailable
+  Field: System.String ObjectInUse
+  Field: System.String ObjectNotInPrerequisiteState
+  Field: System.String ProtocolViolation
+  Field: System.String QueryCanceled
+  Field: System.String SerializationFailure
+  Field: System.String SqlClientUnableToEstablishSqlConnection
+  Field: System.String SqlServerRejectedEstablishmentOfSqlConnection
+  Field: System.String TransactionResolutionUnknown
+  Field: System.String TransactionRollback
+  Field: System.String UndefinedColumn
+  Field: System.String UndefinedTable
+  Field: System.String UniqueViolation
 class Apex.PgClient.PgException : Apex.SqlClient.SqlClientException, System.Runtime.Serialization.ISerializable
+  Method: Boolean get_IsFatal()
+  Method: Boolean get_IsTransactionAbort()
+  Method: Boolean get_IsTransient()
+  Method: System.Nullable`1[System.Int32] get_InternalPosition()
   Method: System.Nullable`1[System.Int32] get_Position()
   Method: System.String get_ColumnName()
   Method: System.String get_ConstraintName()
+  Method: System.String get_DataTypeName()
   Method: System.String get_Detail()
+  Method: System.String get_File()
   Method: System.String get_Hint()
+  Method: System.String get_InternalQuery()
+  Method: System.String get_Line()
+  Method: System.String get_Routine()
   Method: System.String get_SchemaName()
   Method: System.String get_Severity()
   Method: System.String get_SqlState()
   Method: System.String get_TableName()
+  Method: System.String get_Where()
+  Property: Boolean IsFatal
+  Property: Boolean IsTransactionAbort
+  Property: Boolean IsTransient
+  Property: System.Nullable`1[System.Int32] InternalPosition
   Property: System.Nullable`1[System.Int32] Position
   Property: System.String ColumnName
   Property: System.String ConstraintName
+  Property: System.String DataTypeName
   Property: System.String Detail
+  Property: System.String File
   Property: System.String Hint
+  Property: System.String InternalQuery
+  Property: System.String Line
+  Property: System.String Routine
   Property: System.String SchemaName
   Property: System.String Severity
   Property: System.String SqlState
   Property: System.String TableName
+  Property: System.String Where
 struct Apex.PgClient.PgInet : System.IEquatable`1[Apex.PgClient.PgInet]
   Constructor: Void .ctor(System.Net.IPAddress, System.Nullable`1[System.Int32])
   Method: Boolean Equals(Apex.PgClient.PgInet)
@@ -190,6 +285,11 @@ struct Apex.PgClient.PgInterval : System.IEquatable`1[Apex.PgClient.PgInterval]
   Property: Int32 Months
   Property: Int32 Seconds
   Property: Int32 Years
+enum Apex.PgClient.PgIsolationLevel : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.PgClient.PgIsolationLevel ReadCommitted
+  Field: Apex.PgClient.PgIsolationLevel RepeatableRead
+  Field: Apex.PgClient.PgIsolationLevel Serializable
+  Field: Int32 value__
 struct Apex.PgClient.PgLine : System.IEquatable`1[Apex.PgClient.PgLine]
   Constructor: Void .ctor(Double, Double, Double)
   Method: Boolean Equals(Apex.PgClient.PgLine)
@@ -307,6 +407,36 @@ enum Apex.PgClient.PgNumericSpecialValue : System.IComparable, System.IConvertib
   Field: Apex.PgClient.PgNumericSpecialValue NegativeInfinity
   Field: Apex.PgClient.PgNumericSpecialValue PositiveInfinity
   Field: Byte value__
+struct Apex.PgClient.PgParameter : System.IEquatable`1[Apex.PgClient.PgParameter]
+  Constructor: Void .ctor(Apex.PgClient.PgType, Apex.SqlClient.SqlValue, Apex.PgClient.PgParameterFormat)
+  Method: Apex.PgClient.PgParameter Create(Apex.PgClient.PgType, System.Object, Apex.PgClient.PgParameterFormat)
+  Method: Apex.PgClient.PgParameterFormat get_Format()
+  Method: Apex.PgClient.PgType get_Type()
+  Method: Apex.SqlClient.SqlValue get_Value()
+  Method: Boolean Equals(Apex.PgClient.PgParameter)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean op_Equality(Apex.PgClient.PgParameter, Apex.PgClient.PgParameter)
+  Method: Boolean op_Inequality(Apex.PgClient.PgParameter, Apex.PgClient.PgParameter)
+  Method: Int32 GetHashCode()
+  Method: System.String ToString()
+  Property: Apex.PgClient.PgParameterFormat Format
+  Property: Apex.PgClient.PgType Type
+  Property: Apex.SqlClient.SqlValue Value
+enum Apex.PgClient.PgParameterFormat : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
+  Field: Apex.PgClient.PgParameterFormat Auto
+  Field: Apex.PgClient.PgParameterFormat Binary
+  Field: Apex.PgClient.PgParameterFormat Text
+  Field: Int32 value__
+struct Apex.PgClient.PgParameters : System.Collections.Generic.IEnumerable`1[Apex.PgClient.PgParameter], System.Collections.Generic.IReadOnlyCollection`1[Apex.PgClient.PgParameter], System.Collections.Generic.IReadOnlyList`1[Apex.PgClient.PgParameter], System.Collections.IEnumerable
+  Method: Apex.PgClient.PgParameter get_Item(Int32)
+  Method: Apex.PgClient.PgParameters Create(Apex.PgClient.PgParameter[])
+  Method: Apex.PgClient.PgParameters From(System.ReadOnlySpan`1[Apex.PgClient.PgParameter])
+  Method: Apex.PgClient.PgParameters get_Empty()
+  Method: Int32 get_Count()
+  Method: System.Collections.Generic.IEnumerator`1[Apex.PgClient.PgParameter] GetEnumerator()
+  Property: Apex.PgClient.PgParameter Item [Int32]
+  Property: Apex.PgClient.PgParameters Empty
+  Property: Int32 Count
 class Apex.PgClient.PgPath : System.IEquatable`1[Apex.PgClient.PgPath]
   Constructor: Void .ctor(System.Collections.Generic.IReadOnlyList`1[Apex.PgClient.PgPoint], Boolean)
   Method: Apex.PgClient.PgPath <Clone>$()
@@ -429,6 +559,164 @@ struct Apex.PgClient.PgTimeWithTimeZone : System.IEquatable`1[Apex.PgClient.PgTi
   Method: Void set_Time(System.TimeOnly)
   Property: System.TimeOnly Time
   Property: System.TimeSpan Offset
+class Apex.PgClient.PgTransaction : Apex.SqlClient.ISqlTransaction, System.IAsyncDisposable
+  Method: Boolean get_IsCompleted()
+  Method: System.Threading.Tasks.ValueTask CommitAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask CreateSavepointAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Threading.Tasks.ValueTask ReleaseSavepointAsync(System.String, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask RollbackAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask RollbackToSavepointAsync(System.String, System.Threading.CancellationToken)
+  Property: Boolean IsCompleted
+class Apex.PgClient.PgTransactionOptions : System.IEquatable`1[Apex.PgClient.PgTransactionOptions]
+  Constructor: Void .ctor()
+  Method: Apex.PgClient.PgIsolationLevel get_IsolationLevel()
+  Method: Apex.PgClient.PgTransactionOptions <Clone>$()
+  Method: Boolean Equals(Apex.PgClient.PgTransactionOptions)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean get_Deferrable()
+  Method: Boolean get_ReadOnly()
+  Method: Boolean op_Equality(Apex.PgClient.PgTransactionOptions, Apex.PgClient.PgTransactionOptions)
+  Method: Boolean op_Inequality(Apex.PgClient.PgTransactionOptions, Apex.PgClient.PgTransactionOptions)
+  Method: Int32 GetHashCode()
+  Method: System.String ToString()
+  Method: Void set_Deferrable(Boolean)
+  Method: Void set_IsolationLevel(Apex.PgClient.PgIsolationLevel)
+  Method: Void set_ReadOnly(Boolean)
+  Property: Apex.PgClient.PgIsolationLevel IsolationLevel
+  Property: Boolean Deferrable
+  Property: Boolean ReadOnly
+struct Apex.PgClient.PgType : System.IEquatable`1[Apex.PgClient.PgType]
+  Constructor: Void .ctor(UInt32, System.String)
+  Method: Apex.PgClient.PgType get_Bigint()
+  Method: Apex.PgClient.PgType get_BigintArray()
+  Method: Apex.PgClient.PgType get_BigintMultirange()
+  Method: Apex.PgClient.PgType get_BigintRange()
+  Method: Apex.PgClient.PgType get_BigintRangeArray()
+  Method: Apex.PgClient.PgType get_Boolean()
+  Method: Apex.PgClient.PgType get_BooleanArray()
+  Method: Apex.PgClient.PgType get_Bytea()
+  Method: Apex.PgClient.PgType get_ByteaArray()
+  Method: Apex.PgClient.PgType get_Date()
+  Method: Apex.PgClient.PgType get_DateArray()
+  Method: Apex.PgClient.PgType get_DateMultirange()
+  Method: Apex.PgClient.PgType get_DateRange()
+  Method: Apex.PgClient.PgType get_DateRangeArray()
+  Method: Apex.PgClient.PgType get_DoublePrecision()
+  Method: Apex.PgClient.PgType get_DoublePrecisionArray()
+  Method: Apex.PgClient.PgType get_Integer()
+  Method: Apex.PgClient.PgType get_IntegerArray()
+  Method: Apex.PgClient.PgType get_IntegerMultirange()
+  Method: Apex.PgClient.PgType get_IntegerRange()
+  Method: Apex.PgClient.PgType get_IntegerRangeArray()
+  Method: Apex.PgClient.PgType get_Interval()
+  Method: Apex.PgClient.PgType get_IntervalArray()
+  Method: Apex.PgClient.PgType get_Json()
+  Method: Apex.PgClient.PgType get_JsonArray()
+  Method: Apex.PgClient.PgType get_Jsonb()
+  Method: Apex.PgClient.PgType get_JsonbArray()
+  Method: Apex.PgClient.PgType get_Money()
+  Method: Apex.PgClient.PgType get_Numeric()
+  Method: Apex.PgClient.PgType get_NumericArray()
+  Method: Apex.PgClient.PgType get_NumericMultirange()
+  Method: Apex.PgClient.PgType get_NumericRange()
+  Method: Apex.PgClient.PgType get_NumericRangeArray()
+  Method: Apex.PgClient.PgType get_Real()
+  Method: Apex.PgClient.PgType get_RealArray()
+  Method: Apex.PgClient.PgType get_Smallint()
+  Method: Apex.PgClient.PgType get_SmallintArray()
+  Method: Apex.PgClient.PgType get_Text()
+  Method: Apex.PgClient.PgType get_TextArray()
+  Method: Apex.PgClient.PgType get_Time()
+  Method: Apex.PgClient.PgType get_TimeArray()
+  Method: Apex.PgClient.PgType get_TimeTz()
+  Method: Apex.PgClient.PgType get_TimeTzArray()
+  Method: Apex.PgClient.PgType get_Timestamp()
+  Method: Apex.PgClient.PgType get_TimestampArray()
+  Method: Apex.PgClient.PgType get_TimestampMultirange()
+  Method: Apex.PgClient.PgType get_TimestampRange()
+  Method: Apex.PgClient.PgType get_TimestampRangeArray()
+  Method: Apex.PgClient.PgType get_TimestampTz()
+  Method: Apex.PgClient.PgType get_TimestampTzArray()
+  Method: Apex.PgClient.PgType get_TimestampTzMultirange()
+  Method: Apex.PgClient.PgType get_TimestampTzRange()
+  Method: Apex.PgClient.PgType get_TimestampTzRangeArray()
+  Method: Apex.PgClient.PgType get_Uuid()
+  Method: Apex.PgClient.PgType get_UuidArray()
+  Method: Apex.PgClient.PgType get_Varchar()
+  Method: Apex.PgClient.PgType get_VarcharArray()
+  Method: Boolean Equals(Apex.PgClient.PgType)
+  Method: Boolean Equals(System.Object)
+  Method: Boolean op_Equality(Apex.PgClient.PgType, Apex.PgClient.PgType)
+  Method: Boolean op_Inequality(Apex.PgClient.PgType, Apex.PgClient.PgType)
+  Method: Int32 GetHashCode()
+  Method: System.String ToString()
+  Method: System.String get_Name()
+  Method: UInt32 get_Oid()
+  Property: Apex.PgClient.PgType Bigint
+  Property: Apex.PgClient.PgType BigintArray
+  Property: Apex.PgClient.PgType BigintMultirange
+  Property: Apex.PgClient.PgType BigintRange
+  Property: Apex.PgClient.PgType BigintRangeArray
+  Property: Apex.PgClient.PgType Boolean
+  Property: Apex.PgClient.PgType BooleanArray
+  Property: Apex.PgClient.PgType Bytea
+  Property: Apex.PgClient.PgType ByteaArray
+  Property: Apex.PgClient.PgType Date
+  Property: Apex.PgClient.PgType DateArray
+  Property: Apex.PgClient.PgType DateMultirange
+  Property: Apex.PgClient.PgType DateRange
+  Property: Apex.PgClient.PgType DateRangeArray
+  Property: Apex.PgClient.PgType DoublePrecision
+  Property: Apex.PgClient.PgType DoublePrecisionArray
+  Property: Apex.PgClient.PgType Integer
+  Property: Apex.PgClient.PgType IntegerArray
+  Property: Apex.PgClient.PgType IntegerMultirange
+  Property: Apex.PgClient.PgType IntegerRange
+  Property: Apex.PgClient.PgType IntegerRangeArray
+  Property: Apex.PgClient.PgType Interval
+  Property: Apex.PgClient.PgType IntervalArray
+  Property: Apex.PgClient.PgType Json
+  Property: Apex.PgClient.PgType JsonArray
+  Property: Apex.PgClient.PgType Jsonb
+  Property: Apex.PgClient.PgType JsonbArray
+  Property: Apex.PgClient.PgType Money
+  Property: Apex.PgClient.PgType Numeric
+  Property: Apex.PgClient.PgType NumericArray
+  Property: Apex.PgClient.PgType NumericMultirange
+  Property: Apex.PgClient.PgType NumericRange
+  Property: Apex.PgClient.PgType NumericRangeArray
+  Property: Apex.PgClient.PgType Real
+  Property: Apex.PgClient.PgType RealArray
+  Property: Apex.PgClient.PgType Smallint
+  Property: Apex.PgClient.PgType SmallintArray
+  Property: Apex.PgClient.PgType Text
+  Property: Apex.PgClient.PgType TextArray
+  Property: Apex.PgClient.PgType Time
+  Property: Apex.PgClient.PgType TimeArray
+  Property: Apex.PgClient.PgType TimeTz
+  Property: Apex.PgClient.PgType TimeTzArray
+  Property: Apex.PgClient.PgType Timestamp
+  Property: Apex.PgClient.PgType TimestampArray
+  Property: Apex.PgClient.PgType TimestampMultirange
+  Property: Apex.PgClient.PgType TimestampRange
+  Property: Apex.PgClient.PgType TimestampRangeArray
+  Property: Apex.PgClient.PgType TimestampTz
+  Property: Apex.PgClient.PgType TimestampTzArray
+  Property: Apex.PgClient.PgType TimestampTzMultirange
+  Property: Apex.PgClient.PgType TimestampTzRange
+  Property: Apex.PgClient.PgType TimestampTzRangeArray
+  Property: Apex.PgClient.PgType Uuid
+  Property: Apex.PgClient.PgType UuidArray
+  Property: Apex.PgClient.PgType Varchar
+  Property: Apex.PgClient.PgType VarcharArray
+  Property: System.String Name
+  Property: UInt32 Oid
+class Apex.PgClient.PgTypeRegistry
+  Constructor: Void .ctor()
+  Method: Boolean TryGetType(System.String, Apex.PgClient.PgType ByRef)
+  Method: Boolean TryGetType(UInt32, Apex.PgClient.PgType ByRef)
+  Method: Void Register[T](Apex.PgClient.PgType, System.Func`2[T,System.Byte[]], System.Func`2[System.ReadOnlyMemory`1[System.Byte],T])
 class Apex.PgClient.PgUnsupportedTypeException : Apex.SqlClient.SqlClientException, System.Runtime.Serialization.ISerializable
   Constructor: Void .ctor(UInt32)
   Method: UInt32 get_TypeId()

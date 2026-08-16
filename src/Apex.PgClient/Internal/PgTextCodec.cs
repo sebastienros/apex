@@ -896,6 +896,38 @@ internal static class PgTextCodec
           FormatPhysicalAddress(address),
           SqlValueKind.Object when value.ToObject() is BitArray bits =>
           FormatBitArray(bits),
+          SqlValueKind.Object when value.ToObject() is bool[] values =>
+          FormatArray(values, item => item ? "true" : "false"),
+          SqlValueKind.Object when value.ToObject() is short[] values =>
+          FormatArray(values, item => item.ToString(CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is int[] values =>
+          FormatArray(values, item => item.ToString(CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is long[] values =>
+          FormatArray(values, item => item.ToString(CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is float[] values =>
+          FormatArray(values, item => item.ToString("R", CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is double[] values =>
+          FormatArray(values, item => item.ToString("R", CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is decimal[] values =>
+          FormatArray(values, item => item.ToString(CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is string[] values =>
+          FormatArray(values, static item => item),
+          SqlValueKind.Object when value.ToObject() is Guid[] values =>
+          FormatArray(values, item => item.ToString("D")),
+          SqlValueKind.Object when value.ToObject() is byte[][] values =>
+          FormatArray(values, item => "\\x" + Convert.ToHexStringLower(item)),
+          SqlValueKind.Object when value.ToObject() is DateOnly[] values =>
+          FormatArray(values, item => item.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is DateTime[] values =>
+          FormatArray(values, item => item.ToString(
+            "yyyy-MM-dd HH:mm:ss.fffffff",
+            CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is DateTimeOffset[] values =>
+          FormatArray(values, item => item.ToString(
+            "yyyy-MM-dd HH:mm:ss.fffffffzzz",
+            CultureInfo.InvariantCulture)),
+          SqlValueKind.Object when value.ToObject() is JsonElement[] values =>
+          FormatArray(values, static item => item.GetRawText()),
           SqlValueKind.Object when value.ToObject() is BigInteger[] integers =>
           FormatArray(integers, integer => integer.ToString(CultureInfo.InvariantCulture)),
           SqlValueKind.Object when value.ToObject() is Int128[] integers =>
@@ -1009,10 +1041,20 @@ internal static class PgTextCodec
 
     private static string FormatArray<T>(
         IReadOnlyList<T> values,
-        Func<T, string> formatter,
+        Func<T, string?> formatter,
         char delimiter = ',') =>
       "{" + string.Join(delimiter, values.Select(value =>
-        "\"" + formatter(value)
-          .Replace("\\", "\\\\", StringComparison.Ordinal)
-          .Replace("\"", "\\\"", StringComparison.Ordinal) + "\"")) + "}";
+      {
+          if (value is null)
+          {
+              return "NULL";
+          }
+
+          var formatted = formatter(value);
+          return formatted is null
+            ? "NULL"
+            : "\"" + formatted
+              .Replace("\\", "\\\\", StringComparison.Ordinal)
+              .Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+      })) + "}";
 }
