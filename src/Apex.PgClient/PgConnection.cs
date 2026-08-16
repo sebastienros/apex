@@ -1578,6 +1578,7 @@ public sealed class PgConnection : ISqlConnection
         var ordinals = SqlColumnOrdinalMapCache.GetOrAdd(columns);
         var completed = false;
         PgException? error = null;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? collectorError = null;
 
         while (true)
         {
@@ -1587,13 +1588,26 @@ public sealed class PgConnection : ISqlConnection
             {
                 case (byte)'D':
                     ValidateRow(message.Payload.Span, columns);
-                    collector(
-                        state,
-                        new SqlRow(
-                            columns,
-                            ordinals,
-                            _rowDecoder,
-                            message.Payload));
+                    if (collectorError is null)
+                    {
+                        try
+                        {
+                            collector(
+                                state,
+                                new SqlRow(
+                                    columns,
+                                    ordinals,
+                                    _rowDecoder,
+                                    message.Payload));
+                        }
+                        catch (Exception exception)
+                        {
+                            collectorError =
+                              System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(
+                                  exception);
+                        }
+                    }
+
                     break;
                 case (byte)'C':
                     completed = true;
@@ -1633,6 +1647,7 @@ public sealed class PgConnection : ISqlConnection
                     }
 
                     cancellationToken.ThrowIfCancellationRequested();
+                    collectorError?.Throw();
                     return state;
                 default:
                     throw new InvalidDataException(

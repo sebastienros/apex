@@ -11,11 +11,17 @@ namespace Apex.MySqlClient.Internal;
 internal sealed class MySqlPacketWriter
 {
     private static readonly Encoding s_utf8 = new UTF8Encoding(false, true);
-    private readonly PipeWriter _writer;
+    private readonly Stream _stream;
+    private readonly ArrayBufferWriter<byte> _writer = new(16 * 1024);
+
+    internal MySqlPacketWriter(Stream stream)
+    {
+        _stream = stream;
+    }
 
     internal MySqlPacketWriter(PipeWriter writer)
+        : this(writer.AsStream(leaveOpen: true))
     {
-        _writer = writer;
     }
 
     internal void WritePacket(byte sequence, ReadOnlySpan<byte> payload)
@@ -85,11 +91,18 @@ internal sealed class MySqlPacketWriter
         _writer.Advance(MySqlProtocol.PacketHeaderLength + payloadLength);
     }
 
-    internal ValueTask<FlushResult> FlushAsync(CancellationToken cancellationToken) =>
-      _writer.FlushAsync(cancellationToken);
+    internal async ValueTask FlushAsync(CancellationToken cancellationToken)
+    {
+        if (_writer.WrittenCount == 0)
+        {
+            return;
+        }
 
-    internal ValueTask CompleteAsync(Exception? exception = null) =>
-      _writer.CompleteAsync(exception);
+        await _stream.WriteAsync(
+            _writer.WrittenMemory,
+            cancellationToken).ConfigureAwait(false);
+        _writer.Clear();
+    }
 
     private void WriteFrame(byte sequence, ReadOnlySpan<byte> payload)
     {

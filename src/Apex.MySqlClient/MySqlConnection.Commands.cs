@@ -172,6 +172,58 @@ public sealed partial class MySqlConnection
         }
     }
 
+    internal async ValueTask<TState> ExecutePreparedCollectAsync<TState>(
+        MySqlStatement statement,
+        TState state,
+        Action<TState, SqlRow> collector,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var operation = statement.Operation;
+        using var activity = SqlClientDiagnostics.StartQuery(
+            "mysql",
+            _options.Database,
+            _options.Host,
+            _options.Port,
+            operation);
+        var started = Stopwatch.GetTimestamp();
+        Exception? error = null;
+        try
+        {
+            return await _scheduler.ExecuteAsync(
+                token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    WriteExecute(statement, parameters, MySqlCursorType.NoCursor);
+                    return ValueTask.CompletedTask;
+                },
+                _ => ReceiveWithCancellationAsync(
+                    () => ReadCollectedResultsAsync(
+                        state,
+                        collector,
+                        CancellationToken.None),
+                    cancellationToken),
+                barrier: cancellationToken.CanBeCanceled || _options.AllowLoadLocalInfile,
+                cancellationToken,
+                flushBatch: true).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            error = exception;
+            activity?.SetStatus(ActivityStatusCode.Error, exception.Message);
+            throw;
+        }
+        finally
+        {
+            SqlClientDiagnostics.RecordQuery(
+                Stopwatch.GetElapsedTime(started),
+                "mysql",
+                operation,
+                error);
+        }
+    }
+
     private ValueTask<MySqlExecutionResult> ReceiveExecutionWithCancellationAsync(
         bool binary,
         CancellationToken cancellationToken) =>

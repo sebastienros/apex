@@ -80,6 +80,90 @@ public sealed partial class MySqlConnection
         return new ResultData(decoder.Columns, builder.Build(decoder.Columns), 0, string.Empty);
     }
 
+    private async ValueTask<TState> ReadCollectedResultsAsync<TState>(
+        TState state,
+        Action<TState, SqlRow> collector,
+        CancellationToken cancellationToken)
+    {
+        var collect = true;
+        ExceptionDispatchInfo? collectorError = null;
+        while (true)
+        {
+            collectorError = await ReadCollectedResultSetAsync(
+                state,
+                collector,
+                collect,
+                collectorError,
+                cancellationToken).ConfigureAwait(false);
+            if ((_status & MySqlServerStatus.MoreResultsExist) == 0)
+            {
+                collectorError?.Throw();
+                return state;
+            }
+
+            collect = false;
+        }
+    }
+
+    private async ValueTask<ExceptionDispatchInfo?> ReadCollectedResultSetAsync<TState>(
+        TState state,
+        Action<TState, SqlRow> collector,
+        bool collect,
+        ExceptionDispatchInfo? collectorError,
+        CancellationToken cancellationToken)
+    {
+        int columnCount;
+        using (var packet = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var header = ReadResultHeader(packet.Span);
+            if (header.IsLocalInfile)
+            {
+                var fileName = s_utf8.GetString(packet.Span[1..]);
+                await HandleLocalInfileAsync(fileName, packet.Sequence, cancellationToken)
+                    .ConfigureAwait(false);
+                return collectorError;
+            }
+
+            if (header.IsCompletion)
+            {
+                _lastColumns = Array.Empty<MySqlColumnMetadata>();
+                return collectorError;
+            }
+
+            columnCount = header.ColumnCount;
+        }
+
+        var decoder = await ReadColumnDefinitionsAsync(
+            columnCount,
+            binary: true,
+            cancellationToken).ConfigureAwait(false);
+        var columns = decoder.Columns;
+        var ordinals = SqlColumnOrdinalMapCache.GetOrAdd(columns);
+        while (true)
+        {
+            using var packet = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (TryCompleteResultSet(packet.Span))
+            {
+                return collectorError;
+            }
+
+            decoder.ValidateRow(packet.Span);
+            if (collect && collectorError is null)
+            {
+                try
+                {
+                    collector(
+                        state,
+                        new SqlRow(columns, ordinals, decoder, packet.Memory));
+                }
+                catch (Exception exception)
+                {
+                    collectorError = ExceptionDispatchInfo.Capture(exception);
+                }
+            }
+        }
+    }
+
     private async ValueTask<MySqlRowDecoder> ReadColumnDefinitionsAsync(
         int columnCount,
         bool binary,

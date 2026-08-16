@@ -198,6 +198,27 @@ public sealed class MySqlConnectionWireTests
             await connection.WriteBinaryRowAsync([MySqlType.Long], [42]);
             await connection.WriteFinalOkAsync();
 
+            executePayload = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementExecute);
+            Assert.AreEqual(7u, BinaryPrimitives.ReadUInt32LittleEndian(executePayload.AsSpan(1)));
+            await connection.WriteColumnCountAsync(1);
+            await connection.WriteColumnAsync("id", MySqlType.Long);
+            await connection.WriteBinaryRowAsync([MySqlType.Long], [43]);
+            await connection.WriteFinalOkAsync();
+
+            executePayload = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementExecute);
+            Assert.AreEqual(7u, BinaryPrimitives.ReadUInt32LittleEndian(executePayload.AsSpan(1)));
+            await connection.WriteColumnCountAsync(1);
+            await connection.WriteColumnAsync("id", MySqlType.Long);
+            await connection.WriteBinaryRowAsync([MySqlType.Long], [44]);
+            await connection.WriteBinaryRowAsync([MySqlType.Long], [45]);
+            await connection.WriteFinalOkAsync();
+
+            await connection.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT 9");
+            await connection.WriteColumnCountAsync(1);
+            await connection.WriteColumnAsync("value", MySqlType.Long);
+            await connection.WriteTextRowAsync("9");
+            await connection.WriteFinalOkAsync();
+
             var closePayload = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementClose);
             Assert.AreEqual(7u, BinaryPrimitives.ReadUInt32LittleEndian(closePayload.AsSpan(1)));
 
@@ -208,8 +229,21 @@ public sealed class MySqlConnectionWireTests
         await using var statement = await client.PrepareAsync("SELECT ? AS id");
 
         var rows = await statement.QueryAsync(SqlParameters.Create(42));
-
         Assert.AreEqual(42, rows[0].Get<int>("id"));
+
+        List<int> collected = [];
+        await statement.CollectAsync(
+            collected,
+            static (values, row) => values.Add(row.GetInt32("id")),
+            SqlParameters.Create(43));
+        CollectionAssert.AreEqual(new[] { 43 }, collected);
+
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            () => statement.CollectAsync(
+                0,
+                static (_, _) => throw new InvalidOperationException("Collector failed."),
+                SqlParameters.Create(44)).AsTask());
+        Assert.AreEqual(9, (await client.QueryAsync("SELECT 9"))[0].GetInt32(0));
 
         await statement.DisposeAsync();
         await client.DisposeAsync();

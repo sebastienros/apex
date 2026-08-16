@@ -352,7 +352,7 @@ public sealed class MsSqlConnectionWireTests
     }
 
     [TestMethod]
-    public async Task FirstPreparedReaderCapturesFragmentedReturnHandle()
+    public async Task FirstPreparedCollectorCapturesFragmentedReturnHandle()
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
@@ -363,13 +363,12 @@ public sealed class MsSqlConnectionWireTests
             await using var connection = await MsSqlClient.ConnectAsync(
               TestOptions(port));
             var statement = await connection.PrepareAsync("SELECT @P1");
-            await using (var reader =
-                         await statement.ExecuteReaderAsync(SqlParameters.Create(41)))
-            {
-                Assert.IsTrue(await reader.ReadAsync());
-                Assert.AreEqual(41, reader.GetInt32(0));
-                Assert.IsFalse(await reader.ReadAsync());
-            }
+            List<int> collected = [];
+            await statement.CollectAsync(
+                collected,
+                static (values, row) => values.Add(row.GetInt32(0)),
+                SqlParameters.Create(41));
+            CollectionAssert.AreEqual(new[] { 41 }, collected);
 
             var second = await statement.QueryAsync(SqlParameters.Create(42));
             Assert.AreEqual(42, second[0].GetInt32(0));
@@ -497,7 +496,10 @@ public sealed class MsSqlConnectionWireTests
           TdsProcedureId.PrepExec,
           expectedHandle: 0,
           expectedValue: 41);
-        var firstResponse = BuildPreparedIntResult(41, preparedHandle: 73);
+        var firstResponse = BuildPreparedIntResult(
+            41,
+            preparedHandle: 73,
+            secondValue: fragmentedFirst ? 99 : null);
         if (fragmentedFirst)
         {
             var position = 0;
@@ -836,7 +838,8 @@ public sealed class MsSqlConnectionWireTests
 
     private static byte[] BuildPreparedIntResult(
         int value,
-        int? preparedHandle)
+        int? preparedHandle,
+        int? secondValue = null)
     {
         ArrayBufferWriter<byte> response = new();
         response.WriteByte(TdsTokenType.ColumnMetadata);
@@ -848,6 +851,19 @@ public sealed class MsSqlConnectionWireTests
         response.WriteByte(TdsTokenType.Row);
         response.WriteInt32LittleEndian(value);
         WriteDone(response, (ushort)TdsDoneStatus.More);
+        if (secondValue is int additionalValue)
+        {
+            response.WriteByte(TdsTokenType.ColumnMetadata);
+            response.WriteUInt16LittleEndian(1);
+            response.WriteUInt32LittleEndian(0);
+            response.WriteUInt16LittleEndian(0);
+            response.WriteByte(TdsDataType.Int4);
+            response.WriteBVarChar("additional");
+            response.WriteByte(TdsTokenType.Row);
+            response.WriteInt32LittleEndian(additionalValue);
+            WriteDone(response, (ushort)TdsDoneStatus.More);
+        }
+
         response.WriteByte(TdsTokenType.ReturnStatus);
         response.WriteInt32LittleEndian(0);
         if (preparedHandle is int handle)

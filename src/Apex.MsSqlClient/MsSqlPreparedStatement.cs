@@ -36,6 +36,39 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement
         }
     }
 
+    public async ValueTask<TState> CollectAsync<TState>(
+        TState state,
+        Action<TState, SqlRow> collector,
+        SqlParameters parameters = default,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(collector);
+        MsSqlRowReader reader;
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            _hasExecution = true;
+            reader = new MsSqlRowReader(
+                _connection,
+                this,
+                parameters,
+                cancellationToken);
+        }
+
+        await using (reader.ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (reader.CurrentResultIndex == 0)
+                {
+                    collector(state, reader.CurrentRow);
+                }
+            }
+        }
+
+        return state;
+    }
+
     public async ValueTask<SqlCommandResult> ExecuteAsync(
         SqlParameters parameters = default,
         CancellationToken cancellationToken = default)

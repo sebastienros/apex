@@ -7,12 +7,17 @@ namespace Apex.MySqlClient.Internal;
 /// <summary>A reassembled MySQL packet backed by a pooled buffer.</summary>
 internal readonly struct MySqlPacket : IDisposable
 {
-    private readonly byte[]? _buffer;
+    private readonly byte[]? _owner;
+    private readonly ReadOnlyMemory<byte> _memory;
 
-    internal MySqlPacket(byte[]? buffer, int length, byte sequence)
+    internal MySqlPacket(
+        ReadOnlyMemory<byte> memory,
+        byte[]? owner,
+        byte sequence)
     {
-        _buffer = buffer;
-        Length = length;
+        _memory = memory;
+        _owner = owner;
+        Length = memory.Length;
         Sequence = sequence;
     }
 
@@ -20,19 +25,17 @@ internal readonly struct MySqlPacket : IDisposable
 
     internal byte Sequence { get; }
 
-    internal ReadOnlySpan<byte> Span =>
-      _buffer is null ? ReadOnlySpan<byte>.Empty : _buffer.AsSpan(0, Length);
+    internal ReadOnlySpan<byte> Span => _memory.Span;
 
-    internal ReadOnlyMemory<byte> Memory =>
-      _buffer is null ? ReadOnlyMemory<byte>.Empty : _buffer.AsMemory(0, Length);
+    internal ReadOnlyMemory<byte> Memory => _memory;
 
-    internal byte Header => Length == 0 ? (byte)0 : _buffer![0];
+    internal byte Header => Length == 0 ? (byte)0 : _memory.Span[0];
 
     public void Dispose()
     {
-        if (_buffer is not null)
+        if (_owner is not null)
         {
-            ArrayPool<byte>.Shared.Return(_buffer);
+            ArrayPool<byte>.Shared.Return(_owner);
         }
     }
 }
@@ -43,11 +46,20 @@ internal readonly struct MySqlPacket : IDisposable
 /// </summary>
 internal sealed class MySqlPacketReader
 {
-    private readonly PipeReader _reader;
+    private readonly Stream _stream;
+    private byte[]? _buffer;
+    private int _start;
+    private int _end;
+
+    internal MySqlPacketReader(Stream stream)
+    {
+        _stream = stream;
+        _buffer = ArrayPool<byte>.Shared.Rent(32 * 1024);
+    }
 
     internal MySqlPacketReader(PipeReader reader)
+        : this(reader.AsStream(leaveOpen: true))
     {
-        _reader = reader;
     }
 
     internal async ValueTask<MySqlPacket> ReadAsync(CancellationToken cancellationToken)
@@ -98,7 +110,10 @@ internal sealed class MySqlPacketReader
                 length += next.Length;
                 if (next.Length < MySqlProtocol.MaximumFramePayloadLength)
                 {
-                    MySqlPacket joined = new(accumulated, length, next.Sequence);
+                    MySqlPacket joined = new(
+                        accumulated.AsMemory(0, length),
+                        accumulated,
+                        next.Sequence);
                     accumulated = null;
                     return joined;
                 }
@@ -115,8 +130,16 @@ internal sealed class MySqlPacketReader
         }
     }
 
-    internal ValueTask CompleteAsync(Exception? exception = null) =>
-      _reader.CompleteAsync(exception);
+    internal ValueTask CompleteAsync(Exception? exception = null)
+    {
+        var buffer = Interlocked.Exchange(ref _buffer, null);
+        if (buffer is not null)
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+
+        return ValueTask.CompletedTask;
+    }
 
     /// <summary>Reads one packet directly from a stream, without buffering beyond its payload.</summary>
     internal static async ValueTask<MySqlPacket> ReadFromStreamAsync(
@@ -129,7 +152,7 @@ internal sealed class MySqlPacketReader
         var sequence = header[3];
         if (length == 0)
         {
-            return new MySqlPacket(null, 0, sequence);
+            return new MySqlPacket(ReadOnlyMemory<byte>.Empty, null, sequence);
         }
 
         var payload = ArrayPool<byte>.Shared.Rent(length);
@@ -144,66 +167,113 @@ internal sealed class MySqlPacketReader
             throw;
         }
 
-        return new MySqlPacket(payload, length, sequence);
+        return new MySqlPacket(payload.AsMemory(0, length), payload, sequence);
     }
 
     private async ValueTask<MySqlPacket> ReadFrameAsync(CancellationToken cancellationToken)
     {
-        while (true)
+        await EnsureBufferedAsync(
+            MySqlProtocol.PacketHeaderLength,
+            cancellationToken).ConfigureAwait(false);
+        var buffer = _buffer!;
+        var header = BinaryPrimitives.ReadUInt32LittleEndian(
+            buffer.AsSpan(_start, MySqlProtocol.PacketHeaderLength));
+        var length = (int)(header & 0x00FF_FFFF);
+        var sequence = (byte)(header >> 24);
+        var totalLength = MySqlProtocol.PacketHeaderLength + length;
+
+        if (totalLength > buffer.Length)
         {
-            var result = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            var buffer = result.Buffer;
-            if (TryReadFrame(buffer, out var packet, out var consumed))
+            var payload = length == 0 ? null : ArrayPool<byte>.Shared.Rent(length);
+            var bufferedPayload = Math.Min(length, _end - _start - MySqlProtocol.PacketHeaderLength);
+            if (bufferedPayload > 0)
             {
-                _reader.AdvanceTo(consumed);
-                return packet;
+                buffer.AsSpan(
+                    _start + MySqlProtocol.PacketHeaderLength,
+                    bufferedPayload).CopyTo(payload);
             }
 
-            if (result.IsCompleted)
+            _start += MySqlProtocol.PacketHeaderLength + bufferedPayload;
+            if (_start == _end)
             {
-                _reader.AdvanceTo(buffer.End);
-                throw new EndOfStreamException("MySQL closed the connection mid-packet.");
+                _start = 0;
+                _end = 0;
             }
 
-            _reader.AdvanceTo(buffer.Start, buffer.End);
+            try
+            {
+                if (bufferedPayload < length)
+                {
+                    await _stream.ReadExactlyAsync(
+                        payload!.AsMemory(bufferedPayload, length - bufferedPayload),
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+            catch
+            {
+                if (payload is not null)
+                {
+                    ArrayPool<byte>.Shared.Return(payload);
+                }
+
+                throw;
+            }
+
+            return new MySqlPacket(
+                payload is null
+                    ? ReadOnlyMemory<byte>.Empty
+                    : payload.AsMemory(0, length),
+                payload,
+                sequence);
         }
+
+        await EnsureBufferedAsync(totalLength, cancellationToken).ConfigureAwait(false);
+        buffer = _buffer!;
+        var memory = buffer.AsMemory(
+            _start + MySqlProtocol.PacketHeaderLength,
+            length);
+        _start += totalLength;
+        if (_start == _end)
+        {
+            _start = 0;
+            _end = 0;
+        }
+
+        return new MySqlPacket(memory, null, sequence);
     }
 
-    private static bool TryReadFrame(
-        ReadOnlySequence<byte> buffer,
-        out MySqlPacket packet,
-        out SequencePosition consumed)
+    private async ValueTask EnsureBufferedAsync(
+        int required,
+        CancellationToken cancellationToken)
     {
-        packet = default;
-        consumed = buffer.Start;
-        if (buffer.Length < MySqlProtocol.PacketHeaderLength)
+        var buffer = _buffer ??
+            throw new ObjectDisposedException(nameof(MySqlPacketReader));
+        var available = _end - _start;
+        if (available >= required)
         {
-            return false;
+            return;
         }
 
-        SequenceReader<byte> reader = new(buffer);
-        if (!reader.TryReadLittleEndian(out int header))
+        if (_start > 0)
         {
-            return false;
+            buffer.AsSpan(_start, available).CopyTo(buffer);
         }
 
-        var length = header & 0x00FF_FFFF;
-        var sequence = (byte)((uint)header >> 24);
-        var total = MySqlProtocol.PacketHeaderLength + (long)length;
-        if (buffer.Length < total)
+        _start = 0;
+        _end = available;
+        while (_end < required)
         {
-            return false;
-        }
+            var read = await _stream.ReadAsync(
+                buffer.AsMemory(_end),
+                cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                throw new EndOfStreamException(
+                    "MySQL closed the connection mid-packet.");
+            }
 
-        var payload = length == 0 ? null : ArrayPool<byte>.Shared.Rent(length);
-        if (payload is not null)
-        {
-            buffer.Slice(MySqlProtocol.PacketHeaderLength, length).CopyTo(payload);
+            _end += read;
         }
-
-        consumed = buffer.GetPosition(total);
-        packet = new MySqlPacket(payload, length, sequence);
-        return true;
     }
 
     internal static void WriteHeader(Span<byte> destination, int payloadLength, byte sequence)
