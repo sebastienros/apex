@@ -334,7 +334,6 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         private const int MaximumPoolSize = 256;
         private static int s_poolCount;
         private readonly Action _continueEnqueue;
-        private readonly object _lifecycleLock = new();
         private ManualResetValueTaskSourceCore<T> _completion;
         private Func<CancellationToken, ValueTask>? _sendAsync;
         private Func<CancellationToken, ValueTask<T>>? _receiveAsync;
@@ -346,7 +345,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         private int _pendingWriteGeneration;
         private bool _isBarrier;
         private bool _flushBatch;
-        private bool _consumed;
+        private int _consumed;
 
         private Command()
         {
@@ -395,43 +394,40 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
         public T GetResult(short token)
         {
-            lock (_lifecycleLock)
+            var status = _completion.GetStatus(token);
+            if (status == ValueTaskSourceStatus.Pending)
             {
-                var status = _completion.GetStatus(token);
-                if (status == ValueTaskSourceStatus.Pending)
-                {
-                    throw new InvalidOperationException("The command has not completed.");
-                }
+                throw new InvalidOperationException("The command has not completed.");
+            }
 
-                if (_consumed)
-                {
-                    throw new InvalidOperationException("A command ValueTask may only be consumed once.");
-                }
+            if (Interlocked.Exchange(ref _consumed, 1) != 0)
+            {
+                throw new InvalidOperationException("A command ValueTask may only be consumed once.");
+            }
 
-                _consumed = true;
-                try
+            try
+            {
+                return _completion.GetResult(token);
+            }
+            finally
+            {
+                _sendAsync = null;
+                _receiveAsync = null;
+                _scheduler = null;
+                _cancellationToken = default;
+                _pendingWrite = default;
+                _pendingWriteGeneration = 0;
+                _isBarrier = false;
+                _flushBatch = false;
+                _completion.Reset();
+                Volatile.Write(ref _consumed, 0);
+                if (Interlocked.Increment(ref s_poolCount) <= MaximumPoolSize)
                 {
-                    return _completion.GetResult(token);
+                    s_pool.Enqueue(this);
                 }
-                finally
+                else
                 {
-                    _sendAsync = null;
-                    _receiveAsync = null;
-                    _scheduler = null;
-                    _cancellationToken = default;
-                    _pendingWrite = default;
-                    _pendingWriteGeneration = 0;
-                    _isBarrier = false;
-                    _flushBatch = false;
-                    _completion.Reset();
-                    if (Interlocked.Increment(ref s_poolCount) <= MaximumPoolSize)
-                    {
-                        s_pool.Enqueue(this);
-                    }
-                    else
-                    {
-                        Interlocked.Decrement(ref s_poolCount);
-                    }
+                    Interlocked.Decrement(ref s_poolCount);
                 }
             }
         }
@@ -505,22 +501,19 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             CancellationToken cancellationToken,
             bool flushBatch)
         {
-            lock (_lifecycleLock)
-            {
-                _completion.RunContinuationsAsynchronously = true;
-                _scheduler = scheduler;
-                _sendAsync = sendAsync;
-                _receiveAsync = receiveAsync;
-                _cancellationToken = cancellationToken;
-                _pendingWrite = default;
-                _pendingWriteGeneration = 0;
-                _isBarrier = isBarrier;
-                _flushBatch = flushBatch;
-                _consumed = false;
-                var generation = unchecked(_generation + 1);
-                Volatile.Write(ref _generation, generation);
-                Volatile.Write(ref _completionState, GetIncompleteState(generation));
-            }
+            _completion.RunContinuationsAsynchronously = true;
+            _scheduler = scheduler;
+            _sendAsync = sendAsync;
+            _receiveAsync = receiveAsync;
+            _cancellationToken = cancellationToken;
+            _pendingWrite = default;
+            _pendingWriteGeneration = 0;
+            _isBarrier = isBarrier;
+            _flushBatch = flushBatch;
+            Volatile.Write(ref _consumed, 0);
+            var generation = unchecked(_generation + 1);
+            Volatile.Write(ref _generation, generation);
+            Volatile.Write(ref _completionState, GetIncompleteState(generation));
         }
 
         private void ContinueEnqueue()

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Runtime.InteropServices;
 using Apex.PgClient.Internal;
 
 namespace Apex.PgClient.Tests;
@@ -32,6 +33,21 @@ public sealed class PgValueCachesTests
 
         Assert.AreNotSame(first, second);
         Assert.AreNotSame(second, third);
+    }
+
+    [TestMethod]
+    public void CachesRepeatedSmallUtf8BytesBehindReadOnlyMemory()
+    {
+        Utf8BytesCache cache = new(capacity: 16, maximumByteLength: 64);
+        var value = Encoding.UTF8.GetBytes("repeated");
+
+        var first = cache.GetBytes(value);
+        var second = cache.GetBytes(value);
+        var third = cache.GetBytes(value);
+
+        Assert.IsFalse(HasSameBackingArray(first, second));
+        Assert.IsTrue(HasSameBackingArray(second, third));
+        Assert.IsTrue(third.Span.SequenceEqual(value));
     }
 
     [TestMethod]
@@ -96,5 +112,14 @@ public sealed class PgValueCachesTests
             var value = values[index % values.Length];
             Assert.AreEqual(Encoding.UTF8.GetString(value), cache.GetString(value));
         });
+    }
+
+    private static bool HasSameBackingArray(
+        ReadOnlyMemory<byte> left,
+        ReadOnlyMemory<byte> right)
+    {
+        Assert.IsTrue(MemoryMarshal.TryGetArray(left, out var leftSegment));
+        Assert.IsTrue(MemoryMarshal.TryGetArray(right, out var rightSegment));
+        return ReferenceEquals(leftSegment.Array, rightSegment.Array);
     }
 }

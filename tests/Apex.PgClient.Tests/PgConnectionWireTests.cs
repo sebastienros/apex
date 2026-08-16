@@ -77,7 +77,7 @@ public sealed class PgConnectionWireTests
     }
 
     [TestMethod]
-    public async Task PreparesExecutesAndClosesStatement()
+    public async Task PreparesCollectsAndClosesStatement()
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
@@ -95,8 +95,12 @@ public sealed class PgConnectionWireTests
         await using var statement =
           await connection.PrepareAsync("SELECT $1::int4 AS id");
 
-        var rows = await statement.QueryAsync(SqlParameters.Create(7));
-        Assert.AreEqual(7, rows[0].Get<int>("id"));
+        List<int> values = [];
+        await statement.CollectAsync(
+            values,
+            static (result, row) => result.Add(row.Get<int>("id")),
+            SqlParameters.Create(7));
+        Assert.AreEqual(7, values[0]);
 
         try
         {

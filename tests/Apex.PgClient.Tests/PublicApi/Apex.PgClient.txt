@@ -115,6 +115,8 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
   Method: Int32 get_PipeliningLimit()
   Method: Int32 get_StringCacheCapacity()
   Method: Int32 get_StringCacheMaximumByteLength()
+  Method: Int32 get_Utf8BytesCacheCapacity()
+  Method: Int32 get_Utf8BytesCacheMaximumByteLength()
   Method: System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String] get_Properties()
   Method: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] get_ClientCertificates()
   Method: System.Net.Security.RemoteCertificateValidationCallback get_CertificateValidationCallback()
@@ -133,6 +135,8 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
   Method: Void set_StringCacheMaximumByteLength(Int32)
   Method: Void set_TypeRegistry(Apex.PgClient.PgTypeRegistry)
   Method: Void set_UseLayer7Proxy(Boolean)
+  Method: Void set_Utf8BytesCacheCapacity(Int32)
+  Method: Void set_Utf8BytesCacheMaximumByteLength(Int32)
   Property: Apex.PgClient.PgChannelBinding ChannelBinding
   Property: Apex.PgClient.PgProxyOptions Proxy
   Property: Apex.PgClient.PgSslMode SslMode
@@ -142,6 +146,8 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
   Property: Int32 PipeliningLimit
   Property: Int32 StringCacheCapacity
   Property: Int32 StringCacheMaximumByteLength
+  Property: Int32 Utf8BytesCacheCapacity
+  Property: Int32 Utf8BytesCacheMaximumByteLength
   Property: System.Collections.Generic.IReadOnlyDictionary`2[System.String,System.String] Properties
   Property: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] ClientCertificates
   Property: System.Net.Security.RemoteCertificateValidationCallback CertificateValidationCallback

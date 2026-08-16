@@ -54,6 +54,7 @@ interface Apex.SqlClient.ISqlPreparedStatement : System.IAsyncDisposable
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlRowSet] QueryAsync(Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[System.Collections.Generic.IReadOnlyList`1[Apex.SqlClient.SqlCommandResult]] ExecuteBatchAsync(System.Collections.Generic.IReadOnlyList`1[Apex.SqlClient.SqlParameters], System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask`1[TState] CollectAsync[TState](TState, System.Action`2[TState,Apex.SqlClient.SqlRow], Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
   Property: System.String Sql
 interface Apex.SqlClient.ISqlRowReader : System.IAsyncDisposable
   Method: Boolean GetBoolean(Int32)

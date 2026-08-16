@@ -12,7 +12,7 @@ public sealed class PgWireReaderTests
     public async Task ReadsMessageSplitAcrossWrites()
     {
         Pipe pipe = new();
-        PgWireReader reader = new(pipe.Reader);
+        PgWireReader reader = new(pipe.Reader.AsStream(leaveOpen: true));
         var frame = CreateFrame((byte)'C', [(byte)'O', (byte)'K', 0]);
 
         var pending = reader.ReadAsync(CancellationToken.None).AsTask();
@@ -41,7 +41,7 @@ public sealed class PgWireReaderTests
         for (var split = 0; split <= frame.Length; split++)
         {
             Pipe pipe = new();
-            PgWireReader reader = new(pipe.Reader);
+            PgWireReader reader = new(pipe.Reader.AsStream(leaveOpen: true));
             var pending = reader.ReadAsync(CancellationToken.None).AsTask();
             if (split > 0)
             {
@@ -67,7 +67,7 @@ public sealed class PgWireReaderTests
     public async Task ReadsCoalescedMessagesIndividually()
     {
         Pipe pipe = new();
-        PgWireReader reader = new(pipe.Reader);
+        PgWireReader reader = new(pipe.Reader.AsStream(leaveOpen: true));
         pipe.Writer.Write(CreateFrame((byte)'1', []));
         pipe.Writer.Write(CreateFrame((byte)'Z', [(byte)'I']));
         await pipe.Writer.FlushAsync();
@@ -91,7 +91,7 @@ public sealed class PgWireReaderTests
           .ToArray();
         var corpus = frames.SelectMany(static frame => frame).ToArray();
         Pipe pipe = new();
-        PgWireReader reader = new(pipe.Reader);
+        PgWireReader reader = new(pipe.Reader.AsStream(leaveOpen: true));
         Task writer = Task.Run(async () =>
         {
             var position = 0;
@@ -120,7 +120,7 @@ public sealed class PgWireReaderTests
     public async Task RejectsInvalidMessageLength()
     {
         Pipe pipe = new();
-        PgWireReader reader = new(pipe.Reader);
+        PgWireReader reader = new(pipe.Reader.AsStream(leaveOpen: true));
         pipe.Writer.Write(new byte[] { (byte)'D', 0, 0, 0, 3 });
         await pipe.Writer.FlushAsync();
 

@@ -92,7 +92,8 @@ internal sealed class SqlRowPageCollectionBuilder
     private const int MaximumPageRows = 256;
     private const int MaximumPageBytes = 64 * 1024;
     private readonly ISqlRowDecoder _decoder;
-    private readonly List<SqlRowPageBuilder> _pages = [];
+    private SqlRowPageBuilder? _firstPage;
+    private List<SqlRowPageBuilder>? _additionalPages;
     private SqlRowPageBuilder? _current;
     private int _count;
 
@@ -119,19 +120,22 @@ internal sealed class SqlRowPageCollectionBuilder
     internal SqlRow[] Build(IReadOnlyList<SqlColumn> columns)
     {
         Flush();
-        if (_pages.Count == 0)
+        if (_firstPage is null)
         {
             return [];
         }
 
-        if (_pages.Count == 1)
+        if (_additionalPages is null)
         {
-            return _pages[0].Build(columns);
+            return _firstPage.Build(columns);
         }
 
         SqlRow[] rows = new SqlRow[_count];
         var offset = 0;
-        foreach (var page in _pages)
+        var firstRows = _firstPage.Build(columns);
+        firstRows.CopyTo(rows, offset);
+        offset += firstRows.Length;
+        foreach (var page in _additionalPages)
         {
             var pageRows = page.Build(columns);
             pageRows.CopyTo(rows, offset);
@@ -149,7 +153,15 @@ internal sealed class SqlRowPageCollectionBuilder
             return;
         }
 
-        _pages.Add(current);
+        if (_firstPage is null)
+        {
+            _firstPage = current;
+        }
+        else
+        {
+            (_additionalPages ??= []).Add(current);
+        }
+
         _current = null;
     }
 

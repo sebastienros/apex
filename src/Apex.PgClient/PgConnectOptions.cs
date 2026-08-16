@@ -22,6 +22,10 @@ public sealed record PgConnectOptions : SqlConnectOptions
 
     public int StringCacheMaximumByteLength { get; init; } = 64;
 
+    public int Utf8BytesCacheCapacity { get; init; } = 1024;
+
+    public int Utf8BytesCacheMaximumByteLength { get; init; } = 1024;
+
     public PgSslMode SslMode { get; init; } = PgSslMode.Disable;
 
     public PgSslNegotiation SslNegotiation { get; init; } = PgSslNegotiation.Postgres;

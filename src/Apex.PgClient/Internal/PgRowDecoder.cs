@@ -13,17 +13,36 @@ namespace Apex.PgClient.Internal;
 internal sealed class PgRowDecoder : ISqlRowDecoder
 {
     private readonly Utf8StringCache _strings;
+    private readonly Utf8BytesCache _bytes;
     private readonly PgTypeRegistry _typeRegistry;
 
     internal PgRowDecoder(
         int stringCacheCapacity,
         int stringCacheMaximumByteLength,
         PgTypeRegistry? typeRegistry = null)
+        : this(
+            stringCacheCapacity,
+            stringCacheMaximumByteLength,
+            stringCacheCapacity,
+            stringCacheMaximumByteLength,
+            typeRegistry)
+    {
+    }
+
+    internal PgRowDecoder(
+        int stringCacheCapacity,
+        int stringCacheMaximumByteLength,
+        int utf8BytesCacheCapacity,
+        int utf8BytesCacheMaximumByteLength,
+        PgTypeRegistry? typeRegistry = null)
     {
         _typeRegistry = typeRegistry ?? new PgTypeRegistry();
         _strings = new Utf8StringCache(
           stringCacheCapacity,
           stringCacheMaximumByteLength);
+        _bytes = new Utf8BytesCache(
+          utf8BytesCacheCapacity,
+          utf8BytesCacheMaximumByteLength);
     }
 
     public int GetFieldCount(ReadOnlyMemory<byte> row) =>
@@ -265,16 +284,21 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         int ordinal,
         SqlColumn column)
     {
-        EnsureType(column, 17, typeof(byte[]));
         var field = GetField(row, ordinal);
         if (field.IsNull)
         {
             return null;
         }
 
-        return column.Format == SqlDataFormat.Binary
-          ? PgBinaryCodec.DecodeBytes(field.Value.Span)
-          : PgTextCodec.DecodeBytes(field.Value.Span);
+        if (column.TypeId == 17 && IsKnownFormat(column.Format))
+        {
+            return column.Format == SqlDataFormat.Binary
+              ? PgBinaryCodec.DecodeBytes(field.Value.Span)
+              : PgTextCodec.DecodeBytes(field.Value.Span);
+        }
+
+        EnsureStringType(column, typeof(byte[]));
+        return field.Value.ToArray();
     }
 
     public ReadOnlyMemory<byte> DecodeReadOnlyMemory(
@@ -282,11 +306,16 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         int ordinal,
         SqlColumn column)
     {
-        EnsureType(column, 17, typeof(ReadOnlyMemory<byte>));
         var field = GetRequiredField(row, ordinal);
-        return column.Format == SqlDataFormat.Binary
-          ? field.Value
-          : PgTextCodec.DecodeBytes(field.Value.Span);
+        if (column.TypeId == 17 && IsKnownFormat(column.Format))
+        {
+            return column.Format == SqlDataFormat.Binary
+              ? field.Value
+              : PgTextCodec.DecodeBytes(field.Value.Span);
+        }
+
+        EnsureStringType(column, typeof(ReadOnlyMemory<byte>));
+        return _bytes.GetBytes(field.Value.Span);
     }
 
     public ReadOnlyMemory<byte>? DecodeNullableReadOnlyMemory(
@@ -294,16 +323,21 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         int ordinal,
         SqlColumn column)
     {
-        EnsureType(column, 17, typeof(ReadOnlyMemory<byte>?));
         var field = GetField(row, ordinal);
         if (field.IsNull)
         {
             return null;
         }
 
-        return column.Format == SqlDataFormat.Binary
-          ? field.Value
-          : PgTextCodec.DecodeBytes(field.Value.Span);
+        if (column.TypeId == 17 && IsKnownFormat(column.Format))
+        {
+            return column.Format == SqlDataFormat.Binary
+              ? field.Value
+              : PgTextCodec.DecodeBytes(field.Value.Span);
+        }
+
+        EnsureStringType(column, typeof(ReadOnlyMemory<byte>?));
+        return _bytes.GetBytes(field.Value.Span);
     }
 
     public Guid DecodeGuid(
@@ -1374,7 +1408,11 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         return TypedDecoderKind.Unsupported;
     }
 
-    internal void DisableCache() => _strings.Disable();
+    internal void DisableCache()
+    {
+        _strings.Disable();
+        _bytes.Disable();
+    }
 
     internal static PgNumeric DecodePgNumeric(
         ReadOnlyMemory<byte> row,

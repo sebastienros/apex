@@ -40,6 +40,24 @@ internal sealed class PgPreparedStatement : ISqlPreparedStatement
             cancellationToken);
     }
 
+    public ValueTask<TState> CollectAsync<TState>(
+        TState state,
+        Action<TState, SqlRow> collector,
+        SqlParameters parameters = default,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(collector);
+        return _connection.ExecutePreparedCollectAsync(
+            _name,
+            _operation,
+            _columns,
+            state,
+            collector,
+            parameters,
+            cancellationToken);
+    }
+
     public async ValueTask<SqlCommandResult> ExecuteAsync(
         SqlParameters parameters = default,
         CancellationToken cancellationToken = default)
