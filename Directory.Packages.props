@@ -6,9 +6,9 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <GlobalPackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.301" PrivateAssets="all" />
     <PackageVersion Include="BenchmarkDotNet" Version="0.15.8" />
     <PackageVersion Include="Microsoft.Data.SqlClient" Version="7.0.2" />
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.400" />
     <PackageVersion Include="MySqlConnector" Version="2.6.1" />
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <!-- Testcontainers 4.13.0 requests vulnerable SSH.NET 2025.1.0. -->
