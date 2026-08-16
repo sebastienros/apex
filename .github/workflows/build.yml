@@ -20,10 +20,9 @@ jobs:
         with:
           global-json-file: global.json
       - name: Test
+        timeout-minutes: 1
         run: |
           dotnet test --project tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj --configuration Release
           dotnet test --project tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj --configuration Release
           dotnet test --project tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj --configuration Release
           dotnet test --project tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj --configuration Release
-      - name: Pack
-        run: dotnet pack Apex.slnx --configuration Release --output artifacts -p:PackageVersion=0.1.${{ github.run_number }} -p:ContinuousIntegrationBuild=true

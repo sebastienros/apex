@@ -28,6 +28,7 @@ jobs:
       - name: Version
         run: dotnet --version
       - name: Test
+        timeout-minutes: 1
         run: dotnet test --project ${{ matrix.project }} --configuration Release
 
   databases:

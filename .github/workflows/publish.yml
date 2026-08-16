@@ -21,6 +21,7 @@ jobs:
         with:
           global-json-file: global.json
       - name: Test
+        timeout-minutes: 1
         run: |
           dotnet test --project tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj --configuration Release
           dotnet test --project tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj --configuration Release

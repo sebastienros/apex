@@ -55,4 +55,5 @@ jobs:
         with:
           global-json-file: global.json
       - name: Test database services
+        timeout-minutes: 1
         run: dotnet test --project tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj --configuration Release
