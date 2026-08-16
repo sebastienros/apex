@@ -2,11 +2,11 @@ using Apex.SqlClient;
 
 namespace Apex.PgClient;
 
-internal sealed class PgTransaction : ISqlTransaction
+public sealed class PgTransaction : ISqlTransaction
 {
     private readonly PgConnection _connection;
 
-    public PgTransaction(PgConnection connection)
+    internal PgTransaction(PgConnection connection)
     {
         _connection = connection;
     }
@@ -39,6 +39,36 @@ internal sealed class PgTransaction : ISqlTransaction
         IsCompleted = true;
     }
 
+    public ValueTask CreateSavepointAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfCompleted();
+        return _connection.ExecuteTransactionControlAsync(
+            "SAVEPOINT " + QuoteIdentifier(name),
+            cancellationToken);
+    }
+
+    public ValueTask RollbackToSavepointAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfCompleted();
+        return _connection.ExecuteTransactionControlAsync(
+            "ROLLBACK TO SAVEPOINT " + QuoteIdentifier(name),
+            cancellationToken);
+    }
+
+    public ValueTask ReleaseSavepointAsync(
+        string name,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfCompleted();
+        return _connection.ExecuteTransactionControlAsync(
+            "RELEASE SAVEPOINT " + QuoteIdentifier(name),
+            cancellationToken);
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (!IsCompleted)
@@ -53,5 +83,18 @@ internal sealed class PgTransaction : ISqlTransaction
         {
             throw new InvalidOperationException("The transaction has already completed.");
         }
+    }
+
+    private static string QuoteIdentifier(string name)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (System.Text.Encoding.UTF8.GetByteCount(name) > 63)
+        {
+            throw new ArgumentException(
+                "PostgreSQL identifiers cannot exceed 63 UTF-8 bytes.",
+                nameof(name));
+        }
+
+        return "\"" + name.Replace("\"", "\"\"", StringComparison.Ordinal) + "\"";
     }
 }

@@ -9,6 +9,7 @@ using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Threading.Tasks.Sources;
+using System.Transactions;
 using Apex.PgClient.Internal;
 using Apex.SqlClient;
 using Apex.SqlClient.Internal;
@@ -25,6 +26,7 @@ public sealed class PgConnection : ISqlConnection
     private readonly PgWireReader _reader;
     private readonly PgWireWriter _writer;
     private readonly PgRowDecoder _rowDecoder;
+    private readonly PgTypeRegistry _typeRegistry;
     private readonly byte[]? _channelBindingData;
     private readonly SqlAuthenticationMethod _authenticationMethod;
     private readonly BoundedOrderedCommandScheduler _scheduler;
@@ -34,6 +36,7 @@ public sealed class PgConnection : ISqlConnection
     private int _processId;
     private int _secretKey;
     private int _statementSequence;
+    private int _copyActive;
     private int _portalSequence;
     private byte _transactionStatus = (byte)'I';
     private DatabaseMetadata _databaseMetadata =
@@ -56,10 +59,12 @@ public sealed class PgConnection : ISqlConnection
         _pipeReader = PipeReader.Create(stream, new StreamPipeReaderOptions(leaveOpen: true));
         _pipeWriter = PipeWriter.Create(stream, new StreamPipeWriterOptions(leaveOpen: true));
         _reader = new PgWireReader(_pipeReader);
-        _writer = new PgWireWriter(_pipeWriter);
+        _typeRegistry = options.TypeRegistry ?? new PgTypeRegistry();
+        _writer = new PgWireWriter(_pipeWriter, _typeRegistry);
         _rowDecoder = new PgRowDecoder(
           options.StringCacheCapacity,
-          options.StringCacheMaximumByteLength);
+          options.StringCacheMaximumByteLength,
+          _typeRegistry);
         _scheduler = new BoundedOrderedCommandScheduler(
           options.PipeliningLimit,
           (int)Math.Max(16, Math.Min(4096, (long)options.PipeliningLimit * 4)),
@@ -84,9 +89,12 @@ public sealed class PgConnection : ISqlConnection
 
     public int SecretKey => _secretKey;
 
+    public PgTypeRegistry TypeRegistry => _typeRegistry;
+
     internal bool IsUsable => !_disposed && !_scheduler.IsStopped && _socket.Connected;
 
-    internal bool IsReadyForPool => IsUsable && _transactionStatus == (byte)'I';
+    internal bool IsReadyForPool =>
+        IsUsable && _transactionStatus == (byte)'I' && Volatile.Read(ref _copyActive) == 0;
 
     internal static async ValueTask<PgConnection> ConnectAsync(
         PgConnectOptions options,
@@ -201,6 +209,15 @@ public sealed class PgConnection : ISqlConnection
         return await ExecuteQueryCoreAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
     }
 
+    public async ValueTask<SqlRowSet> QueryTypedAsync(
+        string sql,
+        PgParameters parameters,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        return await ExecuteTypedQueryCoreAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
+    }
+
     public async ValueTask<SqlCommandResult> ExecuteAsync(
         string sql,
         CancellationToken cancellationToken = default)
@@ -218,12 +235,150 @@ public sealed class PgConnection : ISqlConnection
         return new SqlCommandResult(result.AffectedRows, result.CommandTag);
     }
 
+    public async ValueTask<SqlCommandResult> ExecuteTypedAsync(
+        string sql,
+        PgParameters parameters,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await QueryTypedAsync(sql, parameters, cancellationToken).ConfigureAwait(false);
+        return new SqlCommandResult(result.AffectedRows, result.CommandTag);
+    }
+
+    public async ValueTask<PgBatchReader> ExecuteBatchAsync(
+        PgBatch batch,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(batch);
+        ThrowIfCopyActive();
+        if (batch.Count == 0)
+        {
+            throw new ArgumentException("A PostgreSQL batch must contain at least one command.", nameof(batch));
+        }
+
+        using var activity = SqlClientDiagnostics.StartQuery(
+            "postgresql",
+            _options.Database,
+            _options.Host,
+            _options.Port,
+            "BATCH");
+        activity?.SetTag("db.operation.batch.size", batch.Count);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        Exception? error = null;
+        try
+        {
+            return await _scheduler.ExecuteAsync(
+                async token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    ThrowIfCopyActive();
+                    await _writer.WriteBatchAsync(batch, CancellationToken.None).ConfigureAwait(false);
+                },
+                async _ => new PgBatchReader(
+                    await ReadBatchResultsAsync(cancellationToken).ConfigureAwait(false)),
+                barrier: true,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            error = exception;
+            activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, exception.Message);
+            throw;
+        }
+        finally
+        {
+            SqlClientDiagnostics.RecordQuery(
+                System.Diagnostics.Stopwatch.GetElapsedTime(started),
+                "postgresql",
+                "BATCH",
+                error);
+        }
+    }
+
+    public async ValueTask<PgBinaryImporter> BeginBinaryImportAsync(
+        string copySql,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(copySql);
+        if (Volatile.Read(ref _copyActive) != 0)
+        {
+            throw new InvalidOperationException("A COPY operation is already active.");
+        }
+
+        var activity = SqlClientDiagnostics.StartQuery(
+            "postgresql",
+            _options.Database,
+            _options.Host,
+            _options.Port,
+            "COPY");
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var ownsCopy = false;
+        try
+        {
+            var columnCount = await _scheduler.ExecuteAsync(
+                async token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    if (Interlocked.CompareExchange(ref _copyActive, 1, 0) != 0)
+                    {
+                        throw new InvalidOperationException("A COPY operation is already active.");
+                    }
+
+                    ownsCopy = true;
+                    await _writer.WriteQueryAsync(copySql, CancellationToken.None).ConfigureAwait(false);
+                },
+                _ => ReadCopyInResponseAsync(cancellationToken),
+                barrier: true,
+                cancellationToken).ConfigureAwait(false);
+            PgBinaryImporter importer = new(this, columnCount, activity, started);
+            await importer.InitializeAsync(cancellationToken).ConfigureAwait(false);
+            return importer;
+        }
+        catch (Exception exception)
+        {
+            if (ownsCopy)
+            {
+                _socket.Dispose();
+                Volatile.Write(ref _copyActive, 0);
+            }
+            activity?.SetStatus(
+                System.Diagnostics.ActivityStatusCode.Error,
+                exception.Message);
+            activity?.Dispose();
+            SqlClientDiagnostics.RecordQuery(
+                System.Diagnostics.Stopwatch.GetElapsedTime(started),
+                "postgresql",
+                "COPY",
+                exception);
+            throw;
+        }
+    }
+
+    public async ValueTask ReloadTypesAsync(CancellationToken cancellationToken = default)
+    {
+        var rows = await QueryAsync(
+            """
+            SELECT t.oid::int8 AS oid,
+                   n.nspname || '.' || t.typname AS qualified_name
+            FROM pg_catalog.pg_type AS t
+            JOIN pg_catalog.pg_namespace AS n ON n.oid = t.typnamespace
+            """,
+            cancellationToken).ConfigureAwait(false);
+        foreach (var row in rows)
+        {
+            _typeRegistry.RegisterType(
+                new PgType(checked((uint)row.Get<long>("oid")), row.Get<string>("qualified_name")));
+        }
+    }
+
     public async IAsyncEnumerable<SqlRow> StreamAsync(
         string sql,
         SqlParameters parameters = default,
         int fetchSize = 50,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
+        ThrowIfCopyActive();
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fetchSize);
 
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
@@ -243,6 +398,7 @@ public sealed class PgConnection : ISqlConnection
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         if (_options.UseLayer7Proxy && _transactionStatus != (byte)'T')
         {
@@ -257,6 +413,7 @@ public sealed class PgConnection : ISqlConnection
           async token =>
           {
               token.ThrowIfCancellationRequested();
+              ThrowIfCopyActive();
               await _writer.WritePrepareAsync(name, sql, CancellationToken.None).ConfigureAwait(false);
           },
           async _ =>
@@ -279,6 +436,7 @@ public sealed class PgConnection : ISqlConnection
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         return ValueTask.FromResult<ISqlRowReader>(
           new PgRowReader(
@@ -292,25 +450,99 @@ public sealed class PgConnection : ISqlConnection
     public async ValueTask<ISqlTransaction> BeginTransactionAsync(
         CancellationToken cancellationToken = default)
     {
+        return await BeginTransactionCoreAsync(
+            "BEGIN",
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask<PgTransaction> BeginPgTransactionAsync(
+        PgTransactionOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
+        options ??= new PgTransactionOptions();
+        if (options.Deferrable &&
+            (!options.ReadOnly || options.IsolationLevel != PgIsolationLevel.Serializable))
+        {
+            throw new ArgumentException(
+                "Deferrable transactions must be serializable and read-only.",
+                nameof(options));
+        }
+
+        return await BeginTransactionCoreAsync(
+            BuildBeginTransactionSql(options),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async ValueTask<PgTransaction> BeginTransactionCoreAsync(
+        string beginSql,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
         return await _scheduler.ExecuteAsync(
           async token =>
           {
               token.ThrowIfCancellationRequested();
+              ThrowIfCopyActive();
               if (_transactionStatus != (byte)'I')
               {
                   throw new InvalidOperationException("A transaction is already active.");
               }
 
-              await _writer.WriteQueryAsync("BEGIN", CancellationToken.None).ConfigureAwait(false);
+              await _writer.WriteQueryAsync(beginSql, CancellationToken.None).ConfigureAwait(false);
           },
           async _ =>
           {
               await ReadQueryResultsAsync(CancellationToken.None).ConfigureAwait(false);
-              return (ISqlTransaction)new PgTransaction(this);
+              return new PgTransaction(this);
           },
           barrier: true,
           cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask EnlistTransactionAsync(
+        Transaction transaction,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transaction);
+        if (transaction.TransactionInformation.Status != TransactionStatus.Active)
+        {
+           throw new TransactionException("Only an active ambient transaction can be enlisted.");
+        }
+
+        var pgTransaction = await BeginPgTransactionAsync(
+           new PgTransactionOptions(),
+           cancellationToken).ConfigureAwait(false);
+        try
+        {
+           transaction.EnlistVolatile(
+               new PgAmbientTransactionEnlistment(pgTransaction),
+               EnlistmentOptions.None);
+        }
+        catch
+        {
+           await pgTransaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+           throw;
+        }
+    }
+
+    private static string BuildBeginTransactionSql(PgTransactionOptions options)
+    {
+        var isolation = options.IsolationLevel switch
+        {
+           PgIsolationLevel.ReadCommitted => "READ COMMITTED",
+           PgIsolationLevel.RepeatableRead => "REPEATABLE READ",
+           PgIsolationLevel.Serializable => "SERIALIZABLE",
+           _ => throw new ArgumentOutOfRangeException(
+               nameof(options),
+               options.IsolationLevel,
+               "Unsupported PostgreSQL isolation level."),
+        };
+        return "BEGIN ISOLATION LEVEL " + isolation +
+              (options.ReadOnly ? " READ ONLY" : " READ WRITE") +
+              (options.Deferrable ? " DEFERRABLE" : " NOT DEFERRABLE");
     }
 
     public async ValueTask CancelRequestAsync(CancellationToken cancellationToken = default)
@@ -350,14 +582,21 @@ public sealed class PgConnection : ISqlConnection
         _disposed = true;
         try
         {
-            await _scheduler.ExecuteAsync(
-            async token =>
+            if (Volatile.Read(ref _copyActive) == 0)
             {
-                token.ThrowIfCancellationRequested();
-                await _writer.WriteTerminateAsync(CancellationToken.None).ConfigureAwait(false);
-            },
-            static _ => ValueTask.FromResult(true),
-            barrier: true).ConfigureAwait(false);
+                await _scheduler.ExecuteAsync(
+                async token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    await _writer.WriteTerminateAsync(CancellationToken.None).ConfigureAwait(false);
+                },
+                static _ => ValueTask.FromResult(true),
+                barrier: true).ConfigureAwait(false);
+            }
+            else
+            {
+                _socket.Dispose();
+            }
         }
         catch (Exception exception) when (
           !_socket.Connected ||
@@ -515,6 +754,7 @@ public sealed class PgConnection : ISqlConnection
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
         var operation = GetOperation(sql);
         using var activity = SqlClientDiagnostics.StartQuery(
           "postgresql",
@@ -535,18 +775,24 @@ public sealed class PgConnection : ISqlConnection
                   async token =>
                   {
                       token.ThrowIfCancellationRequested();
+                      ThrowIfCopyActive();
                       await _writer.WriteQueryAsync(sql, CancellationToken.None).ConfigureAwait(false);
                   },
                   _ => ReceiveQueryAsync(cancellationToken),
                   barrier: cancellationToken.CanBeCanceled,
                   cancellationToken: cancellationToken);
             }
+
             else if (_statementCache is not null &&
                      sql.Length <= _options.PreparedStatementCacheSqlLengthLimit)
             {
                 cachedExecution = true;
                 execution = _scheduler.ExecuteAsync(
-                  static _ => ValueTask.CompletedTask,
+                  _ =>
+                  {
+                      ThrowIfCopyActive();
+                      return ValueTask.CompletedTask;
+                  },
                   _ => PrepareCacheAndExecuteAsync(sql, parameters, cancellationToken),
                   barrier: true,
                   cancellationToken);
@@ -557,6 +803,7 @@ public sealed class PgConnection : ISqlConnection
                   async token =>
                   {
                       token.ThrowIfCancellationRequested();
+                      ThrowIfCopyActive();
                       await _writer.WriteExtendedQueryAsync(
                 sql,
                 parameters,
@@ -581,7 +828,11 @@ public sealed class PgConnection : ISqlConnection
                 }
 
                 return await _scheduler.ExecuteAsync(
-                  static _ => ValueTask.CompletedTask,
+                  _ =>
+                  {
+                      ThrowIfCopyActive();
+                      return ValueTask.CompletedTask;
+                  },
                   _ => PrepareCacheAndExecuteAsync(sql, parameters, cancellationToken),
                   barrier: true,
                   cancellationToken).ConfigureAwait(false);
@@ -603,12 +854,61 @@ public sealed class PgConnection : ISqlConnection
         }
     }
 
+    private async ValueTask<SqlRowSet> ExecuteTypedQueryCoreAsync(
+        string sql,
+        PgParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
+        var operation = GetOperation(sql);
+        using var activity = SqlClientDiagnostics.StartQuery(
+            "postgresql",
+            _options.Database,
+            _options.Host,
+            _options.Port,
+            operation);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        Exception? error = null;
+        try
+        {
+            return await _scheduler.ExecuteAsync(
+                async token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    ThrowIfCopyActive();
+                    await _writer.WriteExtendedQueryAsync(
+                        sql,
+                        parameters,
+                        CancellationToken.None).ConfigureAwait(false);
+                },
+                _ => ReceiveQueryAsync(cancellationToken),
+                barrier: true,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            error = exception;
+            activity?.SetStatus(System.Diagnostics.ActivityStatusCode.Error, exception.Message);
+            throw;
+        }
+        finally
+        {
+            SqlClientDiagnostics.RecordQuery(
+                System.Diagnostics.Stopwatch.GetElapsedTime(started),
+                "postgresql",
+                operation,
+                error);
+        }
+    }
+
     private async ValueTask<SqlRowSet> PrepareCacheAndExecuteAsync(
         string sql,
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfCopyActive();
         string? existing;
         lock (_statementCacheGate)
         {
@@ -697,6 +997,7 @@ public sealed class PgConnection : ISqlConnection
                 async token =>
                 {
                     token.ThrowIfCancellationRequested();
+                    ThrowIfCopyActive();
                     await _writer.WritePreparedQueryAsync(
                                     name,
                                     parameters,
@@ -734,6 +1035,7 @@ public sealed class PgConnection : ISqlConnection
           async token =>
           {
               token.ThrowIfCancellationRequested();
+              ThrowIfCopyActive();
               await _writer.WriteQueryAsync(sql, CancellationToken.None).ConfigureAwait(false);
           },
           async _ =>
@@ -743,6 +1045,69 @@ public sealed class PgConnection : ISqlConnection
           },
           barrier: true,
           cancellationToken).ConfigureAwait(false);
+    }
+
+    internal ValueTask WriteCopyDataAsync(
+        ReadOnlyMemory<byte> payload,
+        CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _copyActive) == 0)
+        {
+            throw new InvalidOperationException("No COPY operation is active.");
+        }
+
+        return _writer.WriteCopyDataAsync(payload, cancellationToken);
+    }
+
+    internal async ValueTask CompleteCopyAsync(CancellationToken cancellationToken)
+    {
+        var completed = false;
+        try
+        {
+            await _writer.WriteCopyDoneAsync(cancellationToken).ConfigureAwait(false);
+            await ReadCopyCompletionAsync(
+                CancellationToken.None,
+                throwServerError: true).ConfigureAwait(false);
+            completed = true;
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch
+        {
+            _socket.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (completed || !_socket.Connected)
+            {
+                Volatile.Write(ref _copyActive, 0);
+            }
+        }
+    }
+
+    internal async ValueTask AbortCopyAsync(string message)
+    {
+        if (Volatile.Read(ref _copyActive) == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await _writer.WriteCopyFailAsync(message, CancellationToken.None).ConfigureAwait(false);
+            await ReadCopyCompletionAsync(
+                CancellationToken.None,
+                throwServerError: false).ConfigureAwait(false);
+        }
+        catch
+        {
+            _socket.Dispose();
+            throw;
+        }
+        finally
+        {
+            Volatile.Write(ref _copyActive, 0);
+        }
     }
 
     internal async ValueTask ClosePreparedAsync(string name)
@@ -756,6 +1121,7 @@ public sealed class PgConnection : ISqlConnection
           async token =>
           {
               token.ThrowIfCancellationRequested();
+              ThrowIfCopyActive();
               await _writer.WriteCloseStatementAsync(name, CancellationToken.None).ConfigureAwait(false);
           },
           async _ =>
@@ -812,6 +1178,7 @@ public sealed class PgConnection : ISqlConnection
           async token =>
           {
               token.ThrowIfCancellationRequested();
+              ThrowIfCopyActive();
               if (bound)
               {
                   await _writer.WriteExecutePortalAsync(
@@ -845,6 +1212,7 @@ public sealed class PgConnection : ISqlConnection
           async token =>
           {
               token.ThrowIfCancellationRequested();
+              ThrowIfCopyActive();
               await _writer.WriteClosePortalAsync(
             portalName,
             CancellationToken.None).ConfigureAwait(false);
@@ -1038,6 +1406,181 @@ public sealed class PgConnection : ISqlConnection
                     throw new InvalidDataException(
                       $"Unexpected PostgreSQL query message '{(char)message.Type}'.");
             }
+        }
+    }
+
+    private async ValueTask<SqlRowSet> ReadBatchResultsAsync(
+        CancellationToken cancellationToken)
+    {
+        List<ResultBuilder> results = [];
+        ResultBuilder current = new(_rowDecoder);
+        PgException? error = null;
+        var errorIndex = -1;
+        Task? cancellationRequest = null;
+        using var registration = cancellationToken.Register(
+            () => cancellationRequest = TryCancelRequestAsync());
+        while (true)
+        {
+            using var message = await _reader.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+            switch (message.Type)
+            {
+                case (byte)'T':
+                    current.SetColumns(ParseColumns(message.Payload.Span));
+                    break;
+                case (byte)'D':
+                    current.AddRow(message.Payload.Span);
+                    break;
+                case (byte)'C':
+                    current.Complete(ParseCommandTag(message.Payload.Span));
+                    results.Add(current);
+                    current = new ResultBuilder(_rowDecoder);
+                    break;
+                case (byte)'I':
+                    current.Complete(string.Empty);
+                    results.Add(current);
+                    current = new ResultBuilder(_rowDecoder);
+                    break;
+                case (byte)'E':
+                    error ??= ParseError(message.Payload.Span);
+                    errorIndex = results.Count;
+                    break;
+                case (byte)'N':
+                    HandleNotice(message.Payload.Span);
+                    break;
+                case (byte)'S':
+                    HandleParameterStatus(message.Payload.Span);
+                    break;
+                case (byte)'A':
+                    HandleNotification(message.Payload.Span);
+                    break;
+                case (byte)'1':
+                case (byte)'2':
+                case (byte)'3':
+                case (byte)'n':
+                case (byte)'t':
+                    break;
+                case (byte)'Z':
+                    UpdateTransactionStatus(message.Payload.Span);
+                    registration.Dispose();
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        cancellationRequest ??= TryCancelRequestAsync();
+                        await cancellationRequest.ConfigureAwait(false);
+                        throw new OperationCanceledException(cancellationToken);
+                    }
+
+                    if (error is not null)
+                    {
+                        throw new PgBatchException(errorIndex, error);
+                    }
+
+                    return BuildResultChain(results);
+                default:
+                    throw new InvalidDataException(
+                        $"Unexpected PostgreSQL batch message '{(char)message.Type}'.");
+            }
+        }
+    }
+
+    private async ValueTask<int> ReadCopyInResponseAsync(
+        CancellationToken cancellationToken)
+    {
+        PgException? error = null;
+        while (true)
+        {
+            using var message = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            switch (message.Type)
+            {
+                case (byte)'G':
+                    PgPayloadReader response = new(message.Payload.Span);
+                    var overallFormat = response.ReadByte();
+                    var columnCount = response.ReadInt16();
+                    if (overallFormat != 1 || columnCount < 0)
+                    {
+                        throw new InvalidDataException(
+                            "The server did not start a binary COPY import.");
+                    }
+
+                    for (var i = 0; i < columnCount; i++)
+                    {
+                        if (response.ReadInt16() != 1)
+                        {
+                            throw new InvalidDataException(
+                                "The server returned a non-binary COPY column.");
+                        }
+                    }
+
+                    return columnCount;
+                case (byte)'E':
+                    error = ParseError(message.Payload.Span);
+                    break;
+                case (byte)'N':
+                    HandleNotice(message.Payload.Span);
+                    break;
+                case (byte)'S':
+                    HandleParameterStatus(message.Payload.Span);
+                    break;
+                case (byte)'A':
+                    HandleNotification(message.Payload.Span);
+                    break;
+                case (byte)'Z':
+                    UpdateTransactionStatus(message.Payload.Span);
+                    throw error is not null
+                      ? error
+                      : new InvalidDataException(
+                        "PostgreSQL rejected COPY without an error response.");
+                default:
+                    throw new InvalidDataException(
+                        $"Unexpected PostgreSQL COPY response '{(char)message.Type}'.");
+            }
+        }
+    }
+
+    private async ValueTask ReadCopyCompletionAsync(
+        CancellationToken cancellationToken,
+        bool throwServerError)
+    {
+        PgException? error = null;
+        while (true)
+        {
+            using var message = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            switch (message.Type)
+            {
+                case (byte)'C':
+                    break;
+                case (byte)'E':
+                    error = ParseError(message.Payload.Span);
+                    break;
+                case (byte)'N':
+                    HandleNotice(message.Payload.Span);
+                    break;
+                case (byte)'S':
+                    HandleParameterStatus(message.Payload.Span);
+                    break;
+                case (byte)'A':
+                    HandleNotification(message.Payload.Span);
+                    break;
+                case (byte)'Z':
+                    UpdateTransactionStatus(message.Payload.Span);
+                    if (throwServerError && error is not null)
+                    {
+                        throw error;
+                    }
+
+                    return;
+                default:
+                    throw new InvalidDataException(
+                        $"Unexpected PostgreSQL COPY completion '{(char)message.Type}'.");
+            }
+        }
+    }
+
+    private void ThrowIfCopyActive()
+    {
+        if (Volatile.Read(ref _copyActive) != 0)
+        {
+            throw new InvalidOperationException(
+                "The connection cannot execute commands while a COPY operation is active.");
         }
     }
 
@@ -1679,6 +2222,7 @@ public sealed class PgConnection : ISqlConnection
               async token =>
               {
                   token.ThrowIfCancellationRequested();
+                  connection.ThrowIfCopyActive();
                   if (sql is not null)
                   {
                       await connection._writer.WriteExtendedQueryAsync(
