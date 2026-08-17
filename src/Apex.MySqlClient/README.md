@@ -2,7 +2,7 @@
 
 # Apex MySQL and MariaDB client
 
-`Apex.MySqlClient` is a direct MySQL protocol driver for .NET 10.
+`Apex.MySqlClient` is a direct MySQL protocol driver for .NET 10 and .NET 11.
 
 ## Connect and pool
 

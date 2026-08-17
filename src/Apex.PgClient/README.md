@@ -2,7 +2,7 @@
 
 # Apex PostgreSQL client
 
-`Apex.PgClient` is a direct PostgreSQL protocol driver for .NET 10.
+`Apex.PgClient` is a direct PostgreSQL protocol driver for .NET 10 and .NET 11.
 
 ## Connect and pool
 
