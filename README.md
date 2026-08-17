@@ -2,7 +2,7 @@
 
 # Apex SQL drivers
 
-Apex is a set of asynchronous .NET 10 database drivers that implement the
+Apex is a set of asynchronous .NET 10 and .NET 11 database drivers that implement the
 PostgreSQL, MySQL/MariaDB, and Microsoft SQL Server wire protocols directly. The API is a
 port of the [Vert.x SQL clients](https://github.com/eclipse-vertx/vertx-sql-client)
 for .NET; it does not implement ADO.NET or wrap another runtime database driver.

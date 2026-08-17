@@ -5,10 +5,11 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <Features Condition="'$(TargetFramework)' == 'net11.0'">runtime-async=on</Features>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Description>High-performance direct PostgreSQL driver for .NET 10.</Description>
+    <Description>High-performance direct PostgreSQL driver for .NET 10 and .NET 11.</Description>
     <IsAotCompatible>true</IsAotCompatible>
     <IsTrimmable>true</IsTrimmable>
   </PropertyGroup>
