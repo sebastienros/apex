@@ -1,0 +1,7 @@
+<Project>
+  <!-- The RC SDK's matching linker pack has not reached the package feed yet. -->
+  <ItemGroup Condition="'$(NETCoreSdkVersion)' == '11.0.100-rc.1.26413.103' and '$(TargetFramework)' == 'net11.0'">
+    <KnownILLinkPack Update="Microsoft.NET.ILLink.Tasks"
+                     ILLinkPackVersion="11.0.0-preview.7.26381.103" />
+  </ItemGroup>
+</Project>
