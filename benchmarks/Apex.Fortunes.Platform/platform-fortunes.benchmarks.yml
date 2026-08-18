@@ -15,7 +15,6 @@ jobs:
       branchOrCommit: "{{branchOrCommit}}"
       project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
     framework: net10.0
-    channel: latest
     patchReferences: true
     buildArguments:
       - /p:NoWarn=NU1507%3BCS1591
@@ -36,7 +35,6 @@ jobs:
       branchOrCommit: "{{branchOrCommit}}"
       project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
     framework: net10.0
-    channel: latest
     patchReferences: true
     buildArguments:
       - /p:NoWarn=NU1507%3BCS1591
@@ -56,7 +54,6 @@ jobs:
       branchOrCommit: "{{branchOrCommit}}"
       project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
     framework: net10.0
-    channel: latest
     patchReferences: true
     buildArguments:
       - /p:NoWarn=NU1507%3BCS1591
@@ -76,7 +73,6 @@ jobs:
       branchOrCommit: "{{branchOrCommit}}"
       project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
     framework: net10.0
-    channel: latest
     patchReferences: true
     buildArguments:
       - /p:NoWarn=NU1507%3BCS1591
@@ -96,7 +92,6 @@ jobs:
       branchOrCommit: "{{branchOrCommit}}"
       project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
     framework: net10.0
-    channel: latest
     patchReferences: true
     buildArguments:
       - /p:NoWarn=NU1507%3BCS1591
@@ -116,7 +111,6 @@ jobs:
       branchOrCommit: "{{branchOrCommit}}"
       project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
     framework: net10.0
-    channel: latest
     patchReferences: true
     buildArguments:
       - /p:NoWarn=NU1507%3BCS1591
