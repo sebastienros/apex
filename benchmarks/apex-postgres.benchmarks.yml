@@ -25,8 +25,6 @@ jobs:
       APEX_BENCH_WARMUP_SECONDS: "{{warmup}}"
       APEX_BENCH_WORKLOAD: "{{workload}}"
       APEX_PG_CONNECTION_STRING: "Host={{databaseServer}};Port=5432;Database=apex;Username=apex;Password=apex;SSL Mode={{sslMode}}"
-    options:
-      requiredOperatingSystem: linux
     metadata:
       - name: apex/operations-per-second
         source: Apex
