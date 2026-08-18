@@ -114,6 +114,38 @@ public sealed class MySqlConnectionWireTests
                 await server;
         }
 
+#if NET11_0_OR_GREATER
+        [TestMethod]
+        public async Task UsesExperimentalLowLevelTlsTransport()
+        {
+                using var certificate = CreateCertificate();
+                await using var harness = await ServerHarness.StartAsync();
+                Task server = Task.Run(async () =>
+                {
+                        await using var connection = await harness.AcceptAsync();
+                        var response = await connection.CompleteTlsHandshakeAsync(
+                            "8.4.2",
+                            certificate,
+                            MySqlProtocol.ClearPasswordPlugin);
+                        CollectionAssert.AreEqual(Encoding.UTF8.GetBytes("pass\0"), response);
+                        await connection.ExpectCommandAsync(MySqlCommand.Quit);
+                });
+
+                await using var client = await MySqlClient.ConnectAsync(
+                    harness.CreateOptions() with
+                    {
+                            SslMode = MySqlSslMode.Required,
+                            AuthenticationPlugin = MySqlAuthenticationPlugin.ClearPassword,
+                            AllowCleartextPassword = true,
+                            UseExperimentalLowLevelTls = true,
+                    });
+
+                Assert.IsTrue(client.IsSecure);
+                await client.DisposeAsync();
+                await server;
+        }
+#endif
+
         [TestMethod]
         public async Task SendsSha256PasswordInClearOnlyOverTls()
         {

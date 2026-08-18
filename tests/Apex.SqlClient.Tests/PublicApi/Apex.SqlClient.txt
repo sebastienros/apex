@@ -188,6 +188,7 @@ class Apex.SqlClient.SqlConnectOptions : System.IEquatable`1[Apex.SqlClient.SqlC
   Method: Boolean Equals(Apex.SqlClient.SqlConnectOptions)
   Method: Boolean Equals(System.Object)
   Method: Boolean get_CachePreparedStatements()
+  Method: Boolean get_UseExperimentalLowLevelTls()
   Method: Boolean op_Equality(Apex.SqlClient.SqlConnectOptions, Apex.SqlClient.SqlConnectOptions)
   Method: Boolean op_Inequality(Apex.SqlClient.SqlConnectOptions, Apex.SqlClient.SqlConnectOptions)
   Method: Int32 GetHashCode()
@@ -213,9 +214,11 @@ class Apex.SqlClient.SqlConnectOptions : System.IEquatable`1[Apex.SqlClient.SqlC
   Method: Void set_PreparedStatementCacheSqlLengthLimit(Int32)
   Method: Void set_ReconnectAttempts(Int32)
   Method: Void set_ReconnectInterval(System.TimeSpan)
+  Method: Void set_UseExperimentalLowLevelTls(Boolean)
   Method: Void set_Username(System.String)
   Property: Apex.SqlClient.SqlAuthenticationProvider AuthenticationProvider
   Property: Boolean CachePreparedStatements
+  Property: Boolean UseExperimentalLowLevelTls
   Property: Int32 Port
   Property: Int32 PreparedStatementCacheSize
   Property: Int32 PreparedStatementCacheSqlLengthLimit

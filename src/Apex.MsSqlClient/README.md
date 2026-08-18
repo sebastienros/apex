@@ -49,6 +49,10 @@ Certificate validation is enabled by default. `TrustServerCertificate` is an
 explicit opt-out for controlled environments. A TLS host name, client
 certificates, revocation policy, and custom validation callback can be supplied.
 
+On .NET 11 or later, set `UseExperimentalLowLevelTls=true` to opt into the
+`TlsBufferSession` transport. It supports both the TDS 7.x encapsulated handshake
+and TDS 8.0 direct TLS; the default remains `SslStream`.
+
 Only SQL authentication and federated access tokens are currently supported.
 Integrated/Windows authentication is not supported.
 

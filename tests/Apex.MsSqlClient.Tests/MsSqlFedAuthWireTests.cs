@@ -47,6 +47,37 @@ public sealed class MsSqlFedAuthWireTests
         }
     }
 
+#if NET11_0_OR_GREATER
+    [TestMethod]
+    public async Task EncapsulatedHandshakeUsesExperimentalLowLevelTlsTransport()
+    {
+        using var certificate = CreateCertificate();
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        FedAuthServerState state = new();
+        var server = RunFedAuthServerAsync(listener, certificate, state, sendFedAuthInfo: false);
+        try
+        {
+            await using var connection = await MsSqlClient.ConnectAsync(
+              BearerOptions(port, _ => AccessToken) with
+              {
+                  UseExperimentalLowLevelTls = true,
+              });
+
+            Assert.IsTrue(connection.IsSecure);
+            Assert.AreEqual(7, (await connection.QueryAsync("SELECT 7"))[0].GetInt32(0));
+            await server;
+            Assert.IsTrue(state.PreLoginRequestedFedAuth);
+            Assert.AreEqual(AccessToken, state.LoginToken);
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+#endif
+
     [TestMethod]
     public async Task FedAuthInfoIsAnsweredWithFederatedAuthenticationTokenMessage()
     {

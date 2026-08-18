@@ -56,6 +56,11 @@ SqlRowSet rows = await statement.QueryAsync();
 - Startup properties, bounded string caching, prepared-statement caching, and
   NativeAOT-compatible options and codecs.
 
+On .NET 11 or later, set `UseExperimentalLowLevelTls=true` to opt into the
+`TlsBufferSession` transport. The default remains `SslStream`; the experimental
+transport supports both PostgreSQL SSL negotiation modes, proxy streams,
+certificate validation, client certificates, and channel binding.
+
 ## Prepared statements and cursors
 
 ```csharp

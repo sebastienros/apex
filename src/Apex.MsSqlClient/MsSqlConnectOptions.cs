@@ -145,6 +145,12 @@ public sealed record MsSqlConnectOptions : SqlConnectOptions
                         ConnectTimeout = TimeSpan.FromSeconds(ParseNonNegativeInt(value, key)),
                     };
                     break;
+                case "useexperimentallowleveltls":
+                    options = options with
+                    {
+                        UseExperimentalLowLevelTls = ParseBoolean(value, key),
+                    };
+                    break;
                 case "stringcachecapacity":
                     options = options with
                     {

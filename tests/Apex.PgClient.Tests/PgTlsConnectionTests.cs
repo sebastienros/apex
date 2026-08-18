@@ -62,6 +62,61 @@ public sealed class PgTlsConnectionTests
         listener.Stop();
     }
 
+#if NET11_0_OR_GREATER
+    [TestMethod]
+    public async Task NegotiatesDirectTlsWithExperimentalLowLevelTransport()
+    {
+        using var certificate = CreateCertificate();
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunTlsServerAsync(listener, certificate, direct: true);
+
+        await using var connection = await PgClient.ConnectAsync(new PgConnectOptions
+        {
+            Host = "127.0.0.1",
+            Port = port,
+            Username = "user",
+            Password = "pass",
+            Database = "db",
+            SslMode = PgSslMode.Require,
+            SslNegotiation = PgSslNegotiation.Direct,
+            UseExperimentalLowLevelTls = true,
+        });
+
+        Assert.IsTrue(connection.IsSecure);
+        await connection.DisposeAsync();
+        await server;
+        listener.Stop();
+    }
+
+    [TestMethod]
+    public async Task NegotiatesTraditionalTlsWithExperimentalLowLevelTransport()
+    {
+        using var certificate = CreateCertificate();
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunTlsServerAsync(listener, certificate, direct: false);
+
+        await using var connection = await PgClient.ConnectAsync(new PgConnectOptions
+        {
+            Host = "127.0.0.1",
+            Port = port,
+            Username = "user",
+            Password = "pass",
+            Database = "db",
+            SslMode = PgSslMode.Require,
+            UseExperimentalLowLevelTls = true,
+        });
+
+        Assert.IsTrue(connection.IsSecure);
+        await connection.DisposeAsync();
+        await server;
+        listener.Stop();
+    }
+#endif
+
     [TestMethod]
     public async Task PreferredTlsFallsBackWhenServerDeclines()
     {

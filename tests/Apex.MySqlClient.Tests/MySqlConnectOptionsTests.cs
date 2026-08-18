@@ -107,7 +107,8 @@ public sealed class MySqlConnectOptionsTests
         // not backslash escaping: 'app user' and 's''ecret' are the correctly quoted forms.
         MySqlConnectOptions options = MySqlConnectOptions.Parse(
           "Server=db.example;Port=3316;User ID='app user';Password='s''ecret';" +
-          "Database=app;SslMode=Required;AllowPublicKeyRetrieval=false");
+          "Database=app;SslMode=Required;AllowPublicKeyRetrieval=false;" +
+          "UseExperimentalLowLevelTls=true");
 
         Assert.AreEqual("db.example", options.Host);
         Assert.AreEqual(3316, options.Port);
@@ -116,6 +117,7 @@ public sealed class MySqlConnectOptionsTests
         Assert.AreEqual("app", options.Database);
         Assert.AreEqual(MySqlSslMode.Required, options.SslMode);
         Assert.IsFalse(options.AllowPublicKeyRetrieval);
+        Assert.IsTrue(options.UseExperimentalLowLevelTls);
     }
 
     [TestMethod]

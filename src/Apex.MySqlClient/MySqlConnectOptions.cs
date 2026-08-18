@@ -215,6 +215,12 @@ public sealed record MySqlConnectOptions : SqlConnectOptions
                 case "pipelininglimit":
                     options = options with { PipeliningLimit = ParsePositiveInt(value, key) };
                     break;
+                case "useexperimentallowleveltls":
+                    options = options with
+                    {
+                        UseExperimentalLowLevelTls = ParseBoolean(value, key),
+                    };
+                    break;
                 case "cachepreparedstatements":
                     options = options with { CachePreparedStatements = ParseBoolean(value, key) };
                     break;

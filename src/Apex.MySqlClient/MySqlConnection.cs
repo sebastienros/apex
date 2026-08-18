@@ -318,10 +318,16 @@ public sealed partial class MySqlConnection : ISqlConnection
         {
             await _scheduler.DisposeAsync().ConfigureAwait(false);
             await _reader.CompleteAsync().ConfigureAwait(false);
-            await _stream.DisposeAsync().ConfigureAwait(false);
-            _socket.Dispose();
-            _payload.Release();
-            _strings.Disable();
+            try
+            {
+                await _stream.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _socket.Dispose();
+                _payload.Release();
+                _strings.Disable();
+            }
         }
     }
 
@@ -389,20 +395,35 @@ public sealed partial class MySqlConnection : ISqlConnection
               _ => null,
           };
 
-        SslStream ssl = new(stream, leaveInnerStreamOpen: false, validation);
+        SslClientAuthenticationOptions authenticationOptions = new()
+        {
+            TargetHost = IsUnixSocket(options) ? "localhost" : options.Host,
+            EnabledSslProtocols = SslProtocols.None,
+            ClientCertificates = options.ClientCertificates.Count == 0
+              ? null
+              : new X509CertificateCollection(options.ClientCertificates.ToArray()),
+            CertificateRevocationCheckMode = options.CertificateRevocationCheckMode,
+            RemoteCertificateValidationCallback = validation,
+        };
+
+        if (options.UseExperimentalLowLevelTls)
+        {
+#if NET11_0_OR_GREATER
+            return await LowLevelTlsStream.AuthenticateAsClientAsync(
+                stream,
+                authenticationOptions,
+                cancellationToken).ConfigureAwait(false);
+#else
+            throw new PlatformNotSupportedException(
+              "Experimental low-level TLS requires .NET 11 or later.");
+#endif
+        }
+
+        SslStream ssl = new(stream, leaveInnerStreamOpen: false);
         try
         {
-            var clientCertificates = options.ClientCertificates.Count == 0
-              ? null
-              : new X509CertificateCollection(options.ClientCertificates.ToArray());
             await ssl.AuthenticateAsClientAsync(
-              new SslClientAuthenticationOptions
-              {
-                  TargetHost = IsUnixSocket(options) ? "localhost" : options.Host,
-                  EnabledSslProtocols = SslProtocols.None,
-                  ClientCertificates = clientCertificates,
-                  CertificateRevocationCheckMode = options.CertificateRevocationCheckMode,
-              },
+              authenticationOptions,
               cancellationToken).ConfigureAwait(false);
         }
         catch

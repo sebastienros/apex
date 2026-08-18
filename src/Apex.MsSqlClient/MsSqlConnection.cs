@@ -330,8 +330,14 @@ public sealed class MsSqlConnection : ISqlConnection
             await _scheduler.DisposeAsync().ConfigureAwait(false);
             _rowDecoder.DisableCache();
             _writer.Dispose();
-            await _stream.DisposeAsync().ConfigureAwait(false);
-            _socket.Dispose();
+            try
+            {
+                await _stream.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _socket.Dispose();
+            }
         }
     }
 
@@ -817,7 +823,6 @@ public sealed class MsSqlConnection : ISqlConnection
         var validation =
           options.CertificateValidationCallback ??
           (options.TrustServerCertificate ? static (_, _, _, _) => true : null);
-        SslStream ssl = new(transport, leaveInnerStreamOpen: false, validation);
         var certificates = options.ClientCertificates.Count == 0
           ? null
           : new X509CertificateCollection(options.ClientCertificates.ToArray());
@@ -827,24 +832,48 @@ public sealed class MsSqlConnection : ISqlConnection
             EnabledSslProtocols = SslProtocols.None,
             CertificateRevocationCheckMode = options.CertificateRevocationCheckMode,
             ClientCertificates = certificates,
+            RemoteCertificateValidationCallback = validation,
         };
         if (options.EncryptionMode == MsSqlEncryptionMode.Strict)
         {
             authentication.ApplicationProtocols = [new SslApplicationProtocol("tds/8.0")];
         }
 
+        if (options.UseExperimentalLowLevelTls)
+        {
+#if NET11_0_OR_GREATER
+            LowLevelTlsStream tls = await LowLevelTlsStream.AuthenticateAsClientAsync(
+                transport,
+                authentication,
+                cancellationToken).ConfigureAwait(false);
+            ValidateStrictTlsAlpn(tls.NegotiatedApplicationProtocol, options);
+            handshakeStream?.SwitchToRaw();
+            return tls;
+#else
+            throw new PlatformNotSupportedException(
+              "Experimental low-level TLS requires .NET 11 or later.");
+#endif
+        }
+
+        SslStream ssl = new(transport, leaveInnerStreamOpen: false);
         await ssl.AuthenticateAsClientAsync(authentication, cancellationToken)
           .ConfigureAwait(false);
-        if (options.EncryptionMode == MsSqlEncryptionMode.Strict &&
-            ssl.NegotiatedApplicationProtocol != new SslApplicationProtocol("tds/8.0"))
-        {
-            await ssl.DisposeAsync().ConfigureAwait(false);
-            throw new AuthenticationException(
-              "SQL Server strict encryption did not negotiate the 'tds/8.0' ALPN protocol.");
-        }
+        ValidateStrictTlsAlpn(ssl.NegotiatedApplicationProtocol, options);
 
         handshakeStream?.SwitchToRaw();
         return ssl;
+    }
+
+    private static void ValidateStrictTlsAlpn(
+        SslApplicationProtocol negotiatedProtocol,
+        MsSqlConnectOptions options)
+    {
+        if (options.EncryptionMode == MsSqlEncryptionMode.Strict &&
+            negotiatedProtocol != new SslApplicationProtocol("tds/8.0"))
+        {
+            throw new AuthenticationException(
+              "SQL Server strict encryption did not negotiate the 'tds/8.0' ALPN protocol.");
+        }
     }
 
     private async ValueTask<MsSqlRoutingInfo?> InitializeAsync(

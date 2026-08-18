@@ -52,7 +52,8 @@ public sealed class MsSqlConnectOptionsTests
           "Server=tcp:db.example,1555;Initial Catalog={app;db};" +
           "User ID='app user';Password=\"s;cret\";Encrypt=optional;" +
           "Trust Server Certificate=yes;Packet Size=8192;Connect Timeout=5;" +
-          "String Cache Capacity=64;String Cache Maximum Byte Length=256");
+          "String Cache Capacity=64;String Cache Maximum Byte Length=256;" +
+          "Use Experimental Low Level Tls=true");
 
         Assert.AreEqual("db.example", options.Host);
         Assert.AreEqual(1555, options.Port);
@@ -65,6 +66,7 @@ public sealed class MsSqlConnectOptionsTests
         Assert.AreEqual(TimeSpan.FromSeconds(5), options.ConnectTimeout);
         Assert.AreEqual(64, options.StringCacheCapacity);
         Assert.AreEqual(256, options.StringCacheMaximumByteLength);
+        Assert.IsTrue(options.UseExperimentalLowLevelTls);
     }
 
     [TestMethod]
