@@ -1,0 +1,81 @@
+imports:
+  - https://raw.githubusercontent.com/aspnet/Benchmarks/main/scenarios/aspnet.profiles.yml
+
+variables:
+  branchOrCommit: main
+  concurrency: 16
+  duration: 30
+  payloadBytes: 4194304
+  warmup: 10
+
+jobs:
+  application:
+    source:
+      repository: https://github.com/sebastienros/apex.git
+      branchOrCommit: "{{branchOrCommit}}"
+      project: benchmarks/Apex.ComparisonHarness/Apex.ComparisonHarness.csproj
+    isConsoleApp: true
+    waitForExit: true
+    arguments: apex
+    environmentVariables:
+      APEX_BENCH_CONCURRENCY: "{{concurrency}}"
+      APEX_BENCH_DATABASE: postgres
+      APEX_BENCH_DURATION_SECONDS: "{{duration}}"
+      APEX_BENCH_PAYLOAD_BYTES: "{{payloadBytes}}"
+      APEX_BENCH_WARMUP_SECONDS: "{{warmup}}"
+      APEX_BENCH_WORKLOAD: "{{workload}}"
+      APEX_PG_CONNECTION_STRING: "Host={{databaseServer}};Port=5432;Database=apex;Username=apex;Password=apex;SSL Mode={{sslMode}}"
+    options:
+      requiredOperatingSystem: linux
+    onConfigure:
+      - job.timeout = Number(job.variables.duration) + Number(job.variables.warmup) + 120;
+
+  db:
+    source:
+      repository: https://github.com/sebastienros/apex.git
+      branchOrCommit: "{{branchOrCommit}}"
+      dockerFile: benchmarks/docker/postgres-tls/Dockerfile
+      dockerImageName: apex-postgres-tls
+      dockerContextDirectory: .
+    environmentVariables:
+      POSTGRES_DB: apex
+      POSTGRES_PASSWORD: apex
+      POSTGRES_USER: apex
+    readyStateText: ready to accept connections
+
+scenarios:
+  download-raw:
+    db:
+      job: db
+    application:
+      job: application
+      variables:
+        sslMode: Disable
+        workload: download
+
+  download-tls:
+    db:
+      job: db
+    application:
+      job: application
+      variables:
+        sslMode: Require
+        workload: download
+
+  upload-raw:
+    db:
+      job: db
+    application:
+      job: application
+      variables:
+        sslMode: Disable
+        workload: upload
+
+  upload-tls:
+    db:
+      job: db
+    application:
+      job: application
+      variables:
+        sslMode: Require
+        workload: upload

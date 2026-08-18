@@ -7,6 +7,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Crank.EventSources" />
     <PackageReference Include="Microsoft.Data.SqlClient" />
     <PackageReference Include="Npgsql" />
     <PackageReference Include="MySqlConnector" />
@@ -15,7 +16,7 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>

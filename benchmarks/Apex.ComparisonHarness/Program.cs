@@ -6,6 +6,7 @@ using Apex.MsSqlClient;
 using Apex.PgClient;
 using Apex.SqlClient;
 using Microsoft.Data.SqlClient;
+using Microsoft.Crank.EventSources;
 using MySqlConnector;
 using Npgsql;
 using ApexMySql = Apex.MySqlClient;
@@ -31,7 +32,8 @@ var database = requestedDatabase?.ToLowerInvariant() switch
 };
 var workload =
   Environment.GetEnvironmentVariable("APEX_BENCH_WORKLOAD") ?? "query";
-if (workload is not ("query" or "stream100" or "borrowed100" or "pipeline" or "batch" or "string100"))
+if (workload is not ("query" or "stream100" or "borrowed100" or "pipeline" or "batch" or
+    "string100" or "download" or "upload"))
 {
     throw new ArgumentException($"Unknown workload '{workload}'.");
 }
@@ -41,6 +43,9 @@ var fetchSize = int.Parse(
   CultureInfo.InvariantCulture);
 var rowCount = int.Parse(
   Environment.GetEnvironmentVariable("APEX_BENCH_ROW_COUNT") ?? "100",
+  CultureInfo.InvariantCulture);
+var payloadBytes = int.Parse(
+  Environment.GetEnvironmentVariable("APEX_BENCH_PAYLOAD_BYTES") ?? "4194304",
   CultureInfo.InvariantCulture);
 var pipelineDepth = int.Parse(
   Environment.GetEnvironmentVariable("APEX_BENCH_PIPELINE_DEPTH") ?? "64",
@@ -66,6 +71,7 @@ var connectionString =
   Environment.GetEnvironmentVariable(connectionVariable) ??
   throw new InvalidOperationException($"Set {connectionVariable}.");
 
+RegisterCrankMetrics();
 var runners = await Task.WhenAll(
   Enumerable.Range(0, concurrency)
     .Select(_ => CreateRunnerAsync(
@@ -75,6 +81,7 @@ var runners = await Task.WhenAll(
       fetchSize,
       rowCount,
       pipelineDepth,
+      payloadBytes,
       connectionString).AsTask()));
 try
 {
@@ -96,6 +103,17 @@ try
         Gen1Collections = GC.CollectionCount(1) - collectionsBefore[1],
         Gen2Collections = GC.CollectionCount(2) - collectionsBefore[2],
     };
+    result = result with
+    {
+        AllocatedBytesPerOperation = result.Operations == 0
+          ? 0
+          : (double)result.AllocatedBytes / result.Operations,
+        BytesPerOperation = workload is "download" or "upload" ? payloadBytes : 0,
+        TransferMibPerSecond = workload is "download" or "upload"
+          ? result.OperationsPerSecond * payloadBytes / (1024d * 1024d)
+          : 0,
+    };
+    ReportCrankMetrics(result);
     Console.WriteLine(JsonSerializer.Serialize(result, new JsonSerializerOptions { WriteIndented = true }));
 }
 finally
@@ -139,6 +157,9 @@ static async Task<HarnessResult> RunPhaseAsync(
       0,
       0,
       0,
+      0,
+      0,
+      0,
       Environment.Version.ToString(),
       System.Runtime.InteropServices.RuntimeInformation.OSDescription,
       System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture.ToString());
@@ -175,9 +196,15 @@ static ValueTask<IQueryRunner> CreateRunnerAsync(
     int fetchSize,
     int rowCount,
     int pipelineDepth,
+    int payloadBytes,
     string connectionString) =>
   (database, driver.ToLowerInvariant()) switch
   {
+      ("postgres", "apex") when workload is "download" or "upload" =>
+        WrapAsync(ApexTransferRunner.CreateAsync(
+          workload,
+          payloadBytes,
+          connectionString)),
       ("postgres", "apex") => WrapAsync(ApexQueryRunner.CreateAsync(
         workload,
         fetchSize,
@@ -219,6 +246,47 @@ static async ValueTask<IQueryRunner> WrapAsync<T>(ValueTask<T> runner)
   where T : IQueryRunner =>
   await runner;
 
+static void RegisterCrankMetrics()
+{
+    Register("apex/operations-per-second", "Operations/s", "Completed operations per second", "n2");
+    Register("apex/latency-p50", "P50 (ms)", "50th percentile operation latency", "n3");
+    Register("apex/latency-p95", "P95 (ms)", "95th percentile operation latency", "n3");
+    Register("apex/latency-p99", "P99 (ms)", "99th percentile operation latency", "n3");
+    Register("apex/allocated-bytes", "Allocated (B)", "Managed bytes allocated", "n0");
+    Register(
+      "apex/allocated-bytes-per-operation",
+      "Allocated/op (B)",
+      "Managed bytes allocated per operation",
+      "n2");
+    Register(
+      "apex/transfer-mib-per-second",
+      "Transfer (MiB/s)",
+      "Application payload transferred per second",
+      "n2");
+
+    static void Register(string name, string shortDescription, string longDescription, string format) =>
+      BenchmarksEventSource.Register(
+        name,
+        Operations.First,
+        Operations.First,
+        shortDescription,
+        longDescription,
+        format);
+}
+
+static void ReportCrankMetrics(HarnessResult result)
+{
+    BenchmarksEventSource.Measure("apex/operations-per-second", result.OperationsPerSecond);
+    BenchmarksEventSource.Measure("apex/latency-p50", result.P50Milliseconds);
+    BenchmarksEventSource.Measure("apex/latency-p95", result.P95Milliseconds);
+    BenchmarksEventSource.Measure("apex/latency-p99", result.P99Milliseconds);
+    BenchmarksEventSource.Measure("apex/allocated-bytes", result.AllocatedBytes);
+    BenchmarksEventSource.Measure(
+      "apex/allocated-bytes-per-operation",
+      result.AllocatedBytesPerOperation);
+    BenchmarksEventSource.Measure("apex/transfer-mib-per-second", result.TransferMibPerSecond);
+}
+
 static double Percentile(long[] ordered, double percentile)
 {
     if (ordered.Length == 0)
@@ -240,6 +308,117 @@ internal interface IQueryRunner : IAsyncDisposable
     ValueTask QueryAsync(CancellationToken cancellationToken);
 }
 
+internal static class ApexPostgreSqlOptions
+{
+    internal static PgConnectOptions Parse(
+        string connectionString,
+        bool useConfiguredSslMode = false)
+    {
+        NpgsqlConnectionStringBuilder builder = new(connectionString);
+        var username = builder.Username ??
+          throw new InvalidOperationException("Connection string requires Username.");
+        var stringCacheCapacity = int.Parse(
+          Environment.GetEnvironmentVariable("APEX_BENCH_STRING_CACHE_CAPACITY") ??
+          "1024",
+          CultureInfo.InvariantCulture);
+        return new PgConnectOptions
+        {
+            Host = builder.Host ??
+              throw new InvalidOperationException("Connection string requires Host."),
+            Port = builder.Port,
+            Database = builder.Database ?? username,
+            Username = username,
+            Password = builder.Password ?? string.Empty,
+            PipeliningLimit = 256,
+            SslMode = useConfiguredSslMode && builder.SslMode != Npgsql.SslMode.Disable
+              ? PgSslMode.Require
+              : PgSslMode.Disable,
+            StringCacheCapacity = stringCacheCapacity,
+        };
+    }
+}
+
+internal sealed class ApexTransferRunner(
+    PgConnection connection,
+    string workload,
+    int payloadBytes,
+    PgParameters uploadParameters,
+    ISqlPreparedStatement? downloadStatement) : IQueryRunner
+{
+    public static async ValueTask<ApexTransferRunner> CreateAsync(
+        string workload,
+        int payloadBytes,
+        string connectionString)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(payloadBytes);
+        var connection = await PgClient.ConnectAsync(
+          ApexPostgreSqlOptions.Parse(connectionString, useConfiguredSslMode: true));
+        byte[] payload = GC.AllocateUninitializedArray<byte>(payloadBytes);
+        for (var index = 0; index < payload.Length; index++)
+        {
+            payload[index] = (byte)index;
+        }
+
+        var uploadParameters =
+          PgParameters.Create(PgParameter.Create(PgType.Bytea, payload));
+        ISqlPreparedStatement? downloadStatement = null;
+        if (workload == "download")
+        {
+            await connection.ExecuteAsync(
+              "CREATE TEMP TABLE apex_transfer_benchmark(payload bytea NOT NULL)");
+            await connection.ExecuteTypedAsync(
+              "INSERT INTO apex_transfer_benchmark(payload) VALUES ($1)",
+              uploadParameters);
+            downloadStatement = await connection.PrepareAsync(
+              "SELECT payload FROM apex_transfer_benchmark");
+        }
+
+        return new ApexTransferRunner(
+          connection,
+          workload,
+          payloadBytes,
+          uploadParameters,
+          downloadStatement);
+    }
+
+    public int OperationsPerInvocation => 1;
+
+    public async ValueTask QueryAsync(CancellationToken cancellationToken)
+    {
+        int transferred;
+        if (workload == "download")
+        {
+            SqlRowSet rows = await downloadStatement!.QueryAsync(
+              cancellationToken: cancellationToken);
+            transferred = rows[0].Get<byte[]>(0).Length;
+        }
+        else
+        {
+            SqlRowSet rows = await connection.QueryTypedAsync(
+              "SELECT octet_length($1)",
+              uploadParameters,
+              cancellationToken);
+            transferred = rows[0].Get<int>(0);
+        }
+
+        if (transferred != payloadBytes)
+        {
+            throw new InvalidOperationException(
+              $"Expected {payloadBytes} transferred bytes but received {transferred}.");
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (downloadStatement is not null)
+        {
+            await downloadStatement.DisposeAsync();
+        }
+
+        await connection.DisposeAsync();
+    }
+}
+
 internal sealed class ApexQueryRunner(
     PgConnection connection,
     string workload,
@@ -257,24 +436,8 @@ internal sealed class ApexQueryRunner(
         int pipelineDepth,
         string connectionString)
     {
-        NpgsqlConnectionStringBuilder builder = new(connectionString);
-        var username = builder.Username ??
-          throw new InvalidOperationException("Connection string requires Username.");
-        var stringCacheCapacity = int.Parse(
-          Environment.GetEnvironmentVariable("APEX_BENCH_STRING_CACHE_CAPACITY") ??
-          "1024",
-          CultureInfo.InvariantCulture);
-        var connection = await PgClient.ConnectAsync(new PgConnectOptions
-        {
-            Host = builder.Host ??
-            throw new InvalidOperationException("Connection string requires Host."),
-            Port = builder.Port,
-            Database = builder.Database ?? username,
-            Username = username,
-            Password = builder.Password ?? string.Empty,
-            PipeliningLimit = 256,
-            StringCacheCapacity = stringCacheCapacity,
-        });
+        var connection = await PgClient.ConnectAsync(
+          ApexPostgreSqlOptions.Parse(connectionString));
         var pipelineStatement = workload is "pipeline" or "batch"
           ? await connection.PrepareAsync("SELECT 1::int4")
           : null;
@@ -1078,6 +1241,9 @@ internal sealed record HarnessResult(
     double P95Milliseconds,
     double P99Milliseconds,
     long AllocatedBytes,
+    double AllocatedBytesPerOperation,
+    int BytesPerOperation,
+    double TransferMibPerSecond,
     int Gen0Collections,
     int Gen1Collections,
     int Gen2Collections,
