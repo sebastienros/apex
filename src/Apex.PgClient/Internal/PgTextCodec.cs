@@ -5,6 +5,8 @@ using System.Net;
 using System.Net.NetworkInformation;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -174,6 +176,11 @@ internal static class PgTextCodec
 
     internal static BitArray DecodeBitArray(ReadOnlySpan<byte> value)
     {
+        if (value.Length >= Vector128<byte>.Count && Vector128.IsHardwareAccelerated)
+        {
+            return DecodeBitArrayVectorized(value);
+        }
+
         var result = new BitArray(value.Length);
         for (var i = 0; i < value.Length; i++)
         {
@@ -185,6 +192,45 @@ internal static class PgTextCodec
             };
         }
 
+        return result;
+    }
+
+    private static BitArray DecodeBitArrayVectorized(ReadOnlySpan<byte> value)
+    {
+        var words = new int[(value.Length + 31) / 32];
+        ref var source = ref MemoryMarshal.GetReference(value);
+        var zero = Vector128.Create((byte)'0');
+        var one = Vector128.Create((byte)1);
+        var index = 0;
+
+        for (; index <= value.Length - Vector128<byte>.Count; index += Vector128<byte>.Count)
+        {
+            var digits = Vector128.Subtract(
+                Vector128.LoadUnsafe(ref source, (nuint)index),
+                zero);
+            if (Vector128.GreaterThanAny(digits, one))
+            {
+                throw new FormatException("Invalid PostgreSQL BIT value.");
+            }
+
+            words[index / 32] |=
+                (int)Vector128.ExtractMostSignificantBits(Vector128.Equals(digits, one))
+                << (index & 31);
+        }
+
+        for (; index < value.Length; index++)
+        {
+            var digit = value[index] - (byte)'0';
+            if ((uint)digit > 1)
+            {
+                throw new FormatException("Invalid PostgreSQL BIT value.");
+            }
+
+            words[index / 32] |= digit << (index & 31);
+        }
+
+        var result = new BitArray(words);
+        result.Length = value.Length;
         return result;
     }
 
