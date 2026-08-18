@@ -1,3 +1,189 @@
+class Apex.SqlClient.ApexDbBatch : System.Data.Common.DbBatch, System.IAsyncDisposable, System.IDisposable
+  Method: Int32 ExecuteNonQuery()
+  Method: Int32 get_Timeout()
+  Method: System.Object ExecuteScalar()
+  Method: System.Threading.Tasks.Task PrepareAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task`1[System.Int32] ExecuteNonQueryAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task`1[System.Object] ExecuteScalarAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: Void Cancel()
+  Method: Void Dispose()
+  Method: Void Prepare()
+  Method: Void set_Timeout(Int32)
+  Property: Int32 Timeout
+class Apex.SqlClient.ApexDbBatchCommand : System.Data.Common.DbBatchCommand
+  Method: Boolean get_CanCreateParameter()
+  Method: Int32 get_RecordsAffected()
+  Method: System.Data.CommandType get_CommandType()
+  Method: System.Data.Common.DbParameter CreateParameter()
+  Method: System.String get_CommandText()
+  Method: Void set_CommandText(System.String)
+  Method: Void set_CommandType(System.Data.CommandType)
+  Property: Boolean CanCreateParameter
+  Property: Int32 RecordsAffected
+  Property: System.Data.CommandType CommandType
+  Property: System.String CommandText
+class Apex.SqlClient.ApexDbBatchCommandCollection : System.Data.Common.DbBatchCommandCollection, System.Collections.Generic.ICollection`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IEnumerable`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IList`1[System.Data.Common.DbBatchCommand], System.Collections.IEnumerable
+  Method: Boolean Contains(System.Data.Common.DbBatchCommand)
+  Method: Boolean Remove(System.Data.Common.DbBatchCommand)
+  Method: Boolean get_IsReadOnly()
+  Method: Int32 IndexOf(System.Data.Common.DbBatchCommand)
+  Method: Int32 get_Count()
+  Method: System.Collections.Generic.IEnumerator`1[System.Data.Common.DbBatchCommand] GetEnumerator()
+  Method: Void Add(System.Data.Common.DbBatchCommand)
+  Method: Void Clear()
+  Method: Void CopyTo(System.Data.Common.DbBatchCommand[], Int32)
+  Method: Void Insert(Int32, System.Data.Common.DbBatchCommand)
+  Method: Void RemoveAt(Int32)
+  Property: Boolean IsReadOnly
+  Property: Int32 Count
+class Apex.SqlClient.ApexDbCommand : System.Data.Common.DbCommand, System.ComponentModel.IComponent, System.Data.IDbCommand, System.IAsyncDisposable, System.IDisposable
+  Method: Boolean get_DesignTimeVisible()
+  Method: Int32 ExecuteNonQuery()
+  Method: Int32 get_CommandTimeout()
+  Method: System.Data.CommandType get_CommandType()
+  Method: System.Data.UpdateRowSource get_UpdatedRowSource()
+  Method: System.Object ExecuteScalar()
+  Method: System.String get_CommandText()
+  Method: System.Threading.Tasks.Task PrepareAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task`1[System.Int32] ExecuteNonQueryAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task`1[System.Object] ExecuteScalarAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: Void Cancel()
+  Method: Void Prepare()
+  Method: Void set_CommandText(System.String)
+  Method: Void set_CommandTimeout(Int32)
+  Method: Void set_CommandType(System.Data.CommandType)
+  Method: Void set_DesignTimeVisible(Boolean)
+  Method: Void set_UpdatedRowSource(System.Data.UpdateRowSource)
+  Property: Boolean DesignTimeVisible
+  Property: Int32 CommandTimeout
+  Property: System.Data.CommandType CommandType
+  Property: System.Data.UpdateRowSource UpdatedRowSource
+  Property: System.String CommandText
+class Apex.SqlClient.ApexDbConnection : System.Data.Common.DbConnection, System.ComponentModel.IComponent, System.Data.IDbConnection, System.IAsyncDisposable, System.IDisposable
+  Method: Int32 get_ConnectionTimeout()
+  Method: System.Data.ConnectionState get_State()
+  Method: System.String get_ConnectionString()
+  Method: System.String get_DataSource()
+  Method: System.String get_Database()
+  Method: System.String get_ServerVersion()
+  Method: System.Threading.Tasks.Task CloseAsync()
+  Method: System.Threading.Tasks.Task OpenAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: Void ChangeDatabase(System.String)
+  Method: Void Close()
+  Method: Void Open()
+  Method: Void set_ConnectionString(System.String)
+  Property: Int32 ConnectionTimeout
+  Property: System.Data.ConnectionState State
+  Property: System.String ConnectionString
+  Property: System.String DataSource
+  Property: System.String Database
+  Property: System.String ServerVersion
+class Apex.SqlClient.ApexDbDataReader : System.Data.Common.DbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
+  Method: Boolean GetBoolean(Int32)
+  Method: Boolean IsDBNull(Int32)
+  Method: Boolean NextResult()
+  Method: Boolean Read()
+  Method: Boolean get_HasRows()
+  Method: Boolean get_IsClosed()
+  Method: Byte GetByte(Int32)
+  Method: Char GetChar(Int32)
+  Method: Double GetDouble(Int32)
+  Method: Int16 GetInt16(Int32)
+  Method: Int32 GetInt32(Int32)
+  Method: Int32 GetOrdinal(System.String)
+  Method: Int32 GetValues(System.Object[])
+  Method: Int32 get_Depth()
+  Method: Int32 get_FieldCount()
+  Method: Int32 get_RecordsAffected()
+  Method: Int64 GetBytes(Int32, Int64, Byte[], Int32, Int32)
+  Method: Int64 GetChars(Int32, Int64, Char[], Int32, Int32)
+  Method: Int64 GetInt64(Int32)
+  Method: Single GetFloat(Int32)
+  Method: System.Collections.IEnumerator GetEnumerator()
+  Method: System.DateTime GetDateTime(Int32)
+  Method: System.Decimal GetDecimal(Int32)
+  Method: System.Guid GetGuid(Int32)
+  Method: System.Object GetValue(Int32)
+  Method: System.Object get_Item(Int32)
+  Method: System.Object get_Item(System.String)
+  Method: System.String GetDataTypeName(Int32)
+  Method: System.String GetName(Int32)
+  Method: System.String GetString(Int32)
+  Method: System.Threading.Tasks.Task CloseAsync()
+  Method: System.Threading.Tasks.Task`1[System.Boolean] IsDBNullAsync(Int32, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task`1[System.Boolean] NextResultAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task`1[System.Boolean] ReadAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task`1[T] GetFieldValueAsync[T](Int32, System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: System.Type GetFieldType(Int32)
+  Method: Void Close()
+  Property: Boolean HasRows
+  Property: Boolean IsClosed
+  Property: Int32 Depth
+  Property: Int32 FieldCount
+  Property: Int32 RecordsAffected
+  Property: System.Object Item [Int32]
+  Property: System.Object Item [System.String]
+class Apex.SqlClient.ApexDbParameter : System.Data.Common.DbParameter, System.Data.IDataParameter, System.Data.IDbDataParameter
+  Method: Boolean get_IsNullable()
+  Method: Boolean get_SourceColumnNullMapping()
+  Method: Int32 get_Size()
+  Method: System.Data.DataRowVersion get_SourceVersion()
+  Method: System.Data.DbType get_DbType()
+  Method: System.Data.ParameterDirection get_Direction()
+  Method: System.Object get_Value()
+  Method: System.String get_ParameterName()
+  Method: System.String get_SourceColumn()
+  Method: Void ResetDbType()
+  Method: Void set_DbType(System.Data.DbType)
+  Method: Void set_Direction(System.Data.ParameterDirection)
+  Method: Void set_IsNullable(Boolean)
+  Method: Void set_ParameterName(System.String)
+  Method: Void set_Size(Int32)
+  Method: Void set_SourceColumn(System.String)
+  Method: Void set_SourceColumnNullMapping(Boolean)
+  Method: Void set_SourceVersion(System.Data.DataRowVersion)
+  Method: Void set_Value(System.Object)
+  Property: Boolean IsNullable
+  Property: Boolean SourceColumnNullMapping
+  Property: Int32 Size
+  Property: System.Data.DataRowVersion SourceVersion
+  Property: System.Data.DbType DbType
+  Property: System.Data.ParameterDirection Direction
+  Property: System.Object Value
+  Property: System.String ParameterName
+  Property: System.String SourceColumn
+class Apex.SqlClient.ApexDbParameterCollection : System.Data.Common.DbParameterCollection, System.Collections.ICollection, System.Collections.IEnumerable, System.Collections.IList, System.Data.IDataParameterCollection
+  Method: Boolean Contains(System.Object)
+  Method: Boolean Contains(System.String)
+  Method: Int32 Add(System.Object)
+  Method: Int32 IndexOf(System.Object)
+  Method: Int32 IndexOf(System.String)
+  Method: Int32 get_Count()
+  Method: System.Collections.IEnumerator GetEnumerator()
+  Method: System.Object get_SyncRoot()
+  Method: Void AddRange(System.Array)
+  Method: Void Clear()
+  Method: Void CopyTo(System.Array, Int32)
+  Method: Void Insert(Int32, System.Object)
+  Method: Void Remove(System.Object)
+  Method: Void RemoveAt(Int32)
+  Method: Void RemoveAt(System.String)
+  Property: Int32 Count
+  Property: System.Object SyncRoot
+class Apex.SqlClient.ApexDbTransaction : System.Data.Common.DbTransaction, System.Data.IDbTransaction, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(Apex.SqlClient.ISqlTransaction, System.Data.Common.DbConnection, System.Data.IsolationLevel)
+  Method: System.Data.IsolationLevel get_IsolationLevel()
+  Method: System.Threading.Tasks.Task CommitAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.Task RollbackAsync(System.Threading.CancellationToken)
+  Method: System.Threading.Tasks.ValueTask DisposeAsync()
+  Method: Void Commit()
+  Method: Void Rollback()
+  Property: System.Data.IsolationLevel IsolationLevel
 class Apex.SqlClient.DatabaseMetadata : System.IEquatable`1[Apex.SqlClient.DatabaseMetadata]
   Constructor: Void .ctor(System.String, System.String, Int32, Int32)
   Method: Apex.SqlClient.DatabaseMetadata <Clone>$()
@@ -20,6 +206,10 @@ class Apex.SqlClient.DatabaseMetadata : System.IEquatable`1[Apex.SqlClient.Datab
   Property: Int32 MinorVersion
   Property: System.String FullVersion
   Property: System.String ProductName
+interface Apex.SqlClient.IApexMultiResultReader : Apex.SqlClient.ISqlRowReader, System.IAsyncDisposable
+  Method: System.Threading.Tasks.ValueTask`1[System.Boolean] NextResultAsync(System.Threading.CancellationToken)
+interface Apex.SqlClient.IApexResultBoundaryReader : Apex.SqlClient.IApexMultiResultReader, Apex.SqlClient.ISqlRowReader, System.IAsyncDisposable
+  Method: System.Threading.Tasks.ValueTask`1[System.Boolean] InitializeAsync(System.Threading.CancellationToken)
 interface Apex.SqlClient.ISqlClient : System.IAsyncDisposable
   Method: System.Collections.Generic.IAsyncEnumerable`1[Apex.SqlClient.SqlRow] StreamAsync(System.String, Apex.SqlClient.SqlParameters, Int32, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlCommandResult] ExecuteAsync(System.String, Apex.SqlClient.SqlParameters, System.Threading.CancellationToken)
@@ -124,7 +314,7 @@ class Apex.SqlClient.SqlAuthenticationProvider : System.MulticastDelegate, Syste
   Method: System.IAsyncResult BeginInvoke(System.Threading.CancellationToken, System.AsyncCallback, System.Object)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlAuthenticationCredential] EndInvoke(System.IAsyncResult)
   Method: System.Threading.Tasks.ValueTask`1[Apex.SqlClient.SqlAuthenticationCredential] Invoke(System.Threading.CancellationToken)
-class Apex.SqlClient.SqlClientException : System.Exception, System.Runtime.Serialization.ISerializable
+class Apex.SqlClient.SqlClientException : System.Data.Common.DbException, System.Runtime.Serialization.ISerializable
   Constructor: Void .ctor(System.String)
   Constructor: Void .ctor(System.String, System.Exception)
 class Apex.SqlClient.SqlClientExtensions

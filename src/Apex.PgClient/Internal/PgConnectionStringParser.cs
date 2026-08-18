@@ -10,13 +10,21 @@ internal static class PgConnectionStringParser
         while (position < input.Length)
         {
             SkipWhitespace(input, ref position);
+            while (position < input.Length && input[position] == ';')
+            {
+                position++;
+                SkipWhitespace(input, ref position);
+            }
             if (position == input.Length)
             {
                 break;
             }
 
             var keyStart = position;
-            while (position < input.Length && input[position] != '=' && !char.IsWhiteSpace(input[position]))
+            while (position < input.Length &&
+                input[position] != '=' &&
+                input[position] != ';' &&
+                !char.IsWhiteSpace(input[position]))
             {
                 position++;
             }
@@ -74,7 +82,9 @@ internal static class PgConnectionStringParser
     private static string ParseUnquoted(ReadOnlySpan<char> input, ref int position)
     {
         System.Text.StringBuilder value = new();
-        while (position < input.Length && !char.IsWhiteSpace(input[position]))
+        while (position < input.Length &&
+            input[position] != ';' &&
+            !char.IsWhiteSpace(input[position]))
         {
             var current = input[position++];
             if (current == '\\')

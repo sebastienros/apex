@@ -16,7 +16,7 @@ using Apex.SqlClient.Internal;
 
 namespace Apex.PgClient;
 
-public sealed class PgConnection : ISqlConnection
+public sealed class PgConnection : ISqlConnection, IApexAdoReaderConnection
 {
     private readonly PgConnectOptions _options;
     private readonly Socket _socket;
@@ -444,6 +444,30 @@ public sealed class PgConnection : ISqlConnection
             parameters,
             cancellationToken));
     }
+
+    internal ValueTask<ISqlRowReader> ExecuteAdoReaderAsync(
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
+        ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        return ValueTask.FromResult<ISqlRowReader>(
+          new PgRowReader(
+            this,
+            sql,
+            statementName: null,
+            parameters,
+            cancellationToken,
+            adoResultBoundaries: true));
+    }
+
+    ValueTask<ISqlRowReader> IApexAdoReaderConnection.ExecuteAdoReaderAsync(
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteAdoReaderAsync(sql, parameters, cancellationToken);
 
     public async ValueTask<ISqlTransaction> BeginTransactionAsync(
         CancellationToken cancellationToken = default)
@@ -1316,6 +1340,19 @@ public sealed class PgConnection : ISqlConnection
           statementName,
           parameters,
           cancellationToken));
+
+    internal ValueTask<ISqlRowReader> ExecuteAdoPreparedReaderAsync(
+        string statementName,
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+      ValueTask.FromResult<ISqlRowReader>(
+        new PgRowReader(
+          this,
+          sql: null,
+          statementName,
+          parameters,
+          cancellationToken,
+          adoResultBoundaries: true));
 
     private async IAsyncEnumerable<SqlRow> StreamRowsAsync(
         string? sql,
@@ -2595,10 +2632,14 @@ public sealed class PgConnection : ISqlConnection
         }
     }
 
-    private sealed class PgRowReader : ISqlRowReader, IValueTaskSource<bool>
+    private sealed class PgRowReader :
+        IApexResultBoundaryReader,
+        IApexRecordsAffectedReader,
+        IValueTaskSource<bool>
     {
         private readonly PgConnection _connection;
         private readonly AsyncAutoResetEvent _advance = new();
+        private readonly AsyncAutoResetEvent? _resultAdvance;
         private readonly object _gate = new();
         private readonly Action _cancelAction;
         private readonly CancellationTokenRegistration _operationCancellation;
@@ -2612,6 +2653,8 @@ public sealed class PgConnection : ISqlConnection
         private IReadOnlyList<SqlColumn> _columns = Array.Empty<SqlColumn>();
         private Exception? _error;
         private Task? _cancelRequest;
+        private TaskCompletionSource<bool>? _initialization;
+        private TaskCompletionSource<bool>? _nextResult;
         private bool _hasCurrent;
         private bool _currentDelivered;
         private bool _completed;
@@ -2619,6 +2662,12 @@ public sealed class PgConnection : ISqlConnection
         private bool _canceled;
         private bool _sent;
         private bool _readPending;
+        private bool _readSignaled;
+        private bool _resultEnded;
+        private bool _resultActive;
+        private readonly bool _adoResultBoundaries;
+        private bool _nextAwaitingStart;
+        private long _recordsAffected = -1;
         private int _disposed;
 
         internal PgRowReader(
@@ -2626,9 +2675,12 @@ public sealed class PgConnection : ISqlConnection
             string? sql,
             string? statementName,
             SqlParameters parameters,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool adoResultBoundaries = false)
         {
             _connection = connection;
+            _adoResultBoundaries = adoResultBoundaries;
+            _resultAdvance = adoResultBoundaries ? new AsyncAutoResetEvent() : null;
             _operationCancellationToken = cancellationToken;
             _cancelAction = Cancel;
             _readCompletion.RunContinuationsAsynchronously = true;
@@ -2678,6 +2730,59 @@ public sealed class PgConnection : ISqlConnection
 
         public int FieldCount => _columns.Count;
 
+        int IApexRecordsAffectedReader.RecordsAffected => GetRecordsAffected();
+
+        public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            Task<bool>? wait = null;
+            lock (_gate)
+            {
+                ThrowIfError();
+                if (_hasCurrent) return ValueTask.FromResult(true);
+                if (_resultEnded || _completed) return ValueTask.FromResult(false);
+                _initialization ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
+                wait = _initialization.Task;
+            }
+
+            return new ValueTask<bool>(wait.WaitAsync(cancellationToken));
+        }
+
+        public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
+        {
+            Task<bool>? wait = null;
+            var advanceRow = false;
+            var advanceResult = false;
+            lock (_gate)
+            {
+                ThrowIfError();
+                if (_completed) return ValueTask.FromResult(false);
+                if (_nextResult is not null)
+                {
+                    throw new InvalidOperationException("Concurrent result transitions are not supported.");
+                }
+
+                _nextResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                _nextAwaitingStart = true;
+                wait = _nextResult.Task;
+                advanceRow = _hasCurrent;
+                advanceResult = _resultEnded;
+            }
+
+            if (advanceRow) _advance.Set();
+            if (advanceResult) _resultAdvance!.Set();
+            return AwaitNextResultAsync(wait, cancellationToken);
+        }
+
+        private async ValueTask<bool> AwaitNextResultAsync(
+            Task<bool> wait,
+            CancellationToken cancellationToken)
+        {
+            using var registration = cancellationToken.CanBeCanceled
+                ? cancellationToken.Register(_cancelAction)
+                : default;
+            return await wait.ConfigureAwait(false);
+        }
+
         public ValueTask<bool> ReadAsync(
             CancellationToken cancellationToken = default)
         {
@@ -2699,6 +2804,11 @@ public sealed class PgConnection : ISqlConnection
                 }
 
                 if (_completed)
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                if (_adoResultBoundaries && _resultEnded)
                 {
                     return ValueTask.FromResult(false);
                 }
@@ -2749,6 +2859,7 @@ public sealed class PgConnection : ISqlConnection
                     _readCancellation = default;
                     _readCancellationToken = default;
                     _readPending = false;
+                    _readSignaled = false;
                 }
 
                 registration.Dispose();
@@ -2951,6 +3062,7 @@ public sealed class PgConnection : ISqlConnection
             }
 
             _advance.Set();
+            _resultAdvance?.Set();
             try
             {
                 await _operation.ConfigureAwait(false);
@@ -2988,6 +3100,7 @@ public sealed class PgConnection : ISqlConnection
                         {
                             case (byte)'T':
                                 _columns = ParseColumns(message.Payload.Span);
+                                ResultStarted();
                                 break;
                             case (byte)'D':
                                 ValidateRow(
@@ -3003,6 +3116,8 @@ public sealed class PgConnection : ISqlConnection
                                         retained = true;
                                     }
                                 }
+
+                                CompleteInitialization(hasRows: retained);
 
                                 if (retained)
                                 {
@@ -3027,10 +3142,23 @@ public sealed class PgConnection : ISqlConnection
                             case (byte)'1':
                             case (byte)'2':
                             case (byte)'3':
-                            case (byte)'C':
                             case (byte)'I':
                             case (byte)'n':
                             case (byte)'t':
+                                break;
+                            case (byte)'C':
+                                var commandTag = ParseCommandTag(message.Payload.Span);
+                                if (ReportsRecordsAffected(commandTag))
+                                {
+                                    AddRecordsAffected(ParseAffectedRows(commandTag));
+                                }
+                                if (!_resultActive)
+                                {
+                                    _columns = Array.Empty<SqlColumn>();
+                                    ResultStarted();
+                                }
+
+                                await ResultCompletedAsync().ConfigureAwait(false);
                                 break;
                             case (byte)'Z':
                                 _connection.UpdateTransactionStatus(message.Payload.Span);
@@ -3118,14 +3246,14 @@ public sealed class PgConnection : ISqlConnection
                 }
             }
 
-            if (advance)
-            {
-                _advance.Set();
-            }
+            if (advance) _advance.Set();
+            _resultAdvance?.Set();
         }
 
         private void Complete(Exception? error)
         {
+            TaskCompletionSource<bool>? initialization;
+            TaskCompletionSource<bool>? nextResult;
             lock (_gate)
             {
                 if (_completed)
@@ -3135,9 +3263,85 @@ public sealed class PgConnection : ISqlConnection
 
                 _error = error;
                 _completed = true;
+                initialization = _initialization;
+                _initialization = null;
+                nextResult = _nextResult;
+                _nextResult = null;
             }
 
+            if (error is null)
+            {
+                initialization?.TrySetResult(false);
+                nextResult?.TrySetResult(false);
+            }
+            else
+            {
+                initialization?.TrySetException(error);
+                nextResult?.TrySetException(error);
+            }
             SignalRead(result: false, error);
+        }
+
+        private void ResultStarted()
+        {
+            lock (_gate)
+            {
+                _resultEnded = false;
+                _resultActive = true;
+                if (_nextResult is not null)
+                {
+                    _nextAwaitingStart = false;
+                }
+            }
+        }
+
+        private async ValueTask ResultCompletedAsync()
+        {
+            TaskCompletionSource<bool>? initialization;
+            TaskCompletionSource<bool>? nextResult;
+            var waitForNext = false;
+            lock (_gate)
+            {
+                if (!_adoResultBoundaries) return;
+                _resultEnded = true;
+                _resultActive = false;
+                initialization = _initialization;
+                _initialization = null;
+                nextResult = !_nextAwaitingStart ? _nextResult : null;
+                if (nextResult is not null)
+                {
+                    _nextResult = null;
+                }
+                waitForNext = _nextResult is null && !_stopped;
+            }
+
+            initialization?.TrySetResult(false);
+            nextResult?.TrySetResult(true);
+            SignalRead(result: false, error: null);
+            if (waitForNext)
+            {
+                await _resultAdvance!.WaitAsync().ConfigureAwait(false);
+            }
+        }
+
+        private void CompleteInitialization(bool hasRows)
+        {
+            TaskCompletionSource<bool>? initialization;
+            TaskCompletionSource<bool>? nextResult;
+            lock (_gate)
+            {
+                if (!_adoResultBoundaries) return;
+                initialization = _initialization;
+                _initialization = null;
+                nextResult = !_nextAwaitingStart ? _nextResult : null;
+                if (nextResult is not null)
+                {
+                    _nextResult = null;
+                }
+            }
+
+            initialization?.TrySetResult(hasRows);
+            nextResult?.TrySetResult(true);
         }
 
         private void DisposeCurrent()
@@ -3179,12 +3383,52 @@ public sealed class PgConnection : ISqlConnection
             }
         }
 
+        private void AddRecordsAffected(long affectedRows)
+        {
+            while (true)
+            {
+                var current = Interlocked.Read(ref _recordsAffected);
+                long updated;
+                try
+                {
+                    updated = current < 0
+                        ? affectedRows
+                        : checked(current + affectedRows);
+                }
+
+                catch (OverflowException)
+                {
+                    updated = -1;
+                }
+
+                if (Interlocked.CompareExchange(ref _recordsAffected, updated, current) == current)
+                {
+                    return;
+                }
+            }
+        }
+
+        private static bool ReportsRecordsAffected(string commandTag) =>
+            commandTag.StartsWith("INSERT ", StringComparison.Ordinal) ||
+            commandTag.StartsWith("UPDATE ", StringComparison.Ordinal) ||
+            commandTag.StartsWith("DELETE ", StringComparison.Ordinal) ||
+            commandTag.StartsWith("MERGE ", StringComparison.Ordinal);
+
+        private int GetRecordsAffected()
+        {
+            var affectedRows = Interlocked.Read(ref _recordsAffected);
+            return affectedRows is >= int.MinValue and <= int.MaxValue
+                ? (int)affectedRows
+                : -1;
+        }
+
         private void SignalRead(bool result, Exception? error)
         {
             bool signal;
             lock (_gate)
             {
-                signal = _readPending;
+                signal = _readPending && !_readSignaled;
+                _readSignaled |= signal;
                 if (signal && result)
                 {
                     _currentDelivered = true;

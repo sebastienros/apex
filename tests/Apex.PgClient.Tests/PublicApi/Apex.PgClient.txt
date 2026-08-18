@@ -152,7 +152,7 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
   Property: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] ClientCertificates
   Property: System.Net.Security.RemoteCertificateValidationCallback CertificateValidationCallback
   Property: System.Security.Cryptography.X509Certificates.X509RevocationMode CertificateRevocationCheckMode
-class Apex.PgClient.PgConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+class Apex.PgClient.PgConnection : Apex.SqlClient.IApexAdoReaderConnection, Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
   Event: System.Action`1[Apex.PgClient.PgNotice] Notice
   Event: System.Action`1[Apex.PgClient.PgNotification] Notification
   Method: Apex.PgClient.PgTypeRegistry get_TypeRegistry()
@@ -186,6 +186,42 @@ class Apex.PgClient.PgConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISq
   Property: Boolean IsSecure
   Property: Int32 ProcessId
   Property: Int32 SecretKey
+class Apex.PgClient.PgDbBatch : Apex.SqlClient.ApexDbBatch, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+class Apex.PgClient.PgDbBatchCommand : Apex.SqlClient.ApexDbBatchCommand
+  Constructor: Void .ctor()
+class Apex.PgClient.PgDbBatchCommandCollection : Apex.SqlClient.ApexDbBatchCommandCollection, System.Collections.Generic.ICollection`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IEnumerable`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IList`1[System.Data.Common.DbBatchCommand], System.Collections.IEnumerable
+  Constructor: Void .ctor()
+class Apex.PgClient.PgDbCommand : Apex.SqlClient.ApexDbCommand, System.ComponentModel.IComponent, System.Data.IDbCommand, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+  Constructor: Void .ctor(Apex.PgClient.PgDbConnection)
+class Apex.PgClient.PgDbConnection : Apex.SqlClient.ApexDbConnection, System.ComponentModel.IComponent, System.Data.IDbConnection, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+  Constructor: Void .ctor(System.String)
+class Apex.PgClient.PgDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
+class Apex.PgClient.PgDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(System.String)
+  Method: System.String get_ConnectionString()
+  Property: System.String ConnectionString
+class Apex.PgClient.PgDbParameter : Apex.SqlClient.ApexDbParameter, System.Data.IDataParameter, System.Data.IDbDataParameter
+  Constructor: Void .ctor()
+class Apex.PgClient.PgDbParameterCollection : Apex.SqlClient.ApexDbParameterCollection, System.Collections.ICollection, System.Collections.IEnumerable, System.Collections.IList, System.Data.IDataParameterCollection
+  Constructor: Void .ctor()
+class Apex.PgClient.PgDbProviderFactory : System.Data.Common.DbProviderFactory
+  Constructor: Void .ctor()
+  Field: Apex.PgClient.PgDbProviderFactory Instance
+  Method: Boolean get_CanCreateBatch()
+  Method: Boolean get_CanCreateDataSourceEnumerator()
+  Method: System.Data.Common.DbBatch CreateBatch()
+  Method: System.Data.Common.DbBatchCommand CreateBatchCommand()
+  Method: System.Data.Common.DbCommand CreateCommand()
+  Method: System.Data.Common.DbConnection CreateConnection()
+  Method: System.Data.Common.DbDataSource CreateDataSource(System.String)
+  Method: System.Data.Common.DbParameter CreateParameter()
+  Property: Boolean CanCreateBatch
+  Property: Boolean CanCreateDataSourceEnumerator
+class Apex.PgClient.PgDbTransaction : Apex.SqlClient.ApexDbTransaction, System.Data.IDbTransaction, System.IAsyncDisposable, System.IDisposable
 class Apex.PgClient.PgErrorCodes
   Field: System.String AdminShutdown
   Field: System.String CannotConnectNow

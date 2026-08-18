@@ -63,6 +63,81 @@ public sealed class MySqlConnectionWireTests
     }
 
     [TestMethod]
+    public async Task AdoReaderDrainsUnreadRowsAndClosesAfterAnEmptyResult()
+    {
+        await using var harness = await ServerHarness.StartAsync();
+        Task server = Task.Run(async () =>
+        {
+            await using var connection = await harness.AcceptAsync();
+            await connection.CompleteHandshakeAsync("8.4.2");
+
+            await connection.ExpectTextCommandAsync(
+                MySqlCommand.Query,
+                "SELECT 1 AS value UNION ALL SELECT 2; SELECT 3 AS value");
+            await connection.WriteColumnCountAsync(1);
+            await connection.WriteColumnAsync("value", MySqlType.Long);
+            await connection.WriteTextRowAsync("1");
+            await connection.WriteTextRowAsync("2");
+            await connection.WriteOkWithMoreResultsAsync();
+            await connection.WriteColumnCountAsync(1);
+            await connection.WriteColumnAsync("value", MySqlType.Long);
+            await connection.WriteTextRowAsync("3");
+            await connection.WriteFinalOkAsync();
+
+            await connection.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT 1 WHERE FALSE");
+            await connection.WriteColumnCountAsync(1);
+            await connection.WriteColumnAsync("value", MySqlType.Long);
+            await connection.WriteFinalOkAsync();
+
+            await connection.ExpectTextCommandAsync(MySqlCommand.StatementPrepare, "SELECT 4 AS value");
+            await connection.WritePrepareOkAsync(statementId: 7, columnCount: 1, parameterCount: 0);
+            await connection.WriteColumnAsync("value", MySqlType.Long);
+            var executePayload = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementExecute);
+            Assert.AreEqual(7u, BinaryPrimitives.ReadUInt32LittleEndian(executePayload.AsSpan(1)));
+            await connection.WriteColumnCountAsync(1);
+            await connection.WriteColumnAsync("value", MySqlType.Long);
+            await connection.WriteBinaryRowAsync([MySqlType.Long], [4]);
+            await connection.WriteFinalOkAsync();
+
+            var closePayload = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementClose);
+            Assert.AreEqual(7u, BinaryPrimitives.ReadUInt32LittleEndian(closePayload.AsSpan(1)));
+            await connection.ExpectCommandAsync(MySqlCommand.Quit);
+        });
+
+        await using var client = new MySqlDbConnection(
+            $"Server={harness.Host};Port={harness.Port};User ID=user;Password=pass;" +
+            "AllowMultiStatements=true");
+        await client.OpenAsync(CancellationToken.None);
+        await using var command = client.CreateCommand();
+        command.CommandText = "SELECT 1 AS value UNION ALL SELECT 2; SELECT 3 AS value";
+
+        await using (var reader = await command.ExecuteReaderAsync(CancellationToken.None))
+        {
+            Assert.IsTrue(await reader.ReadAsync(CancellationToken.None));
+            Assert.AreEqual(1, reader.GetInt32(0));
+            Assert.IsTrue(await reader.NextResultAsync(CancellationToken.None));
+            Assert.IsTrue(await reader.ReadAsync(CancellationToken.None));
+            Assert.AreEqual(3, reader.GetInt32(0));
+        }
+
+        command.CommandText = "SELECT 1 WHERE FALSE";
+        var empty = await command.ExecuteReaderAsync(CancellationToken.None);
+        await empty.CloseAsync();
+
+        command.CommandText = "SELECT 4 AS value";
+        await command.PrepareAsync(CancellationToken.None);
+        await using (var prepared = await command.ExecuteReaderAsync(CancellationToken.None))
+        {
+            Assert.IsTrue(await prepared.ReadAsync(CancellationToken.None));
+            Assert.AreEqual(4, prepared.GetInt32(0));
+        }
+
+        await command.DisposeAsync();
+        await client.CloseAsync();
+        await server;
+    }
+
+    [TestMethod]
     public async Task ParsesMariaDbCompatibilityVersionPrefixDuringHandshake()
     {
         await using var harness = await ServerHarness.StartAsync();

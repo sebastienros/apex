@@ -1,6 +1,8 @@
+using System.Data.Common;
+
 namespace Apex.SqlClient;
 
-public class SqlClientException : Exception
+public class SqlClientException : DbException
 {
     public SqlClientException(string message)
         : base(message)

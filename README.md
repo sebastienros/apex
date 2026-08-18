@@ -5,7 +5,8 @@
 Apex is a set of asynchronous .NET 10 and .NET 11 database drivers that implement the
 PostgreSQL, MySQL/MariaDB, and Microsoft SQL Server wire protocols directly. The API is a
 port of the [Vert.x SQL clients](https://github.com/eclipse-vertx/vertx-sql-client)
-for .NET; it does not implement ADO.NET or wrap another runtime database driver.
+for .NET. The direct API remains the lowest-allocation API; each driver also exposes an
+optional asynchronous-only ADO.NET adapter.
 
 ## Packages
 
@@ -50,6 +51,33 @@ foreach (SqlRow row in rows)
 The placeholder syntax is database-specific: PostgreSQL uses `$1`, MySQL uses
 `?`, and Microsoft SQL Server uses `@P1`. Values are sent as protocol parameters and are
 never interpolated into SQL.
+
+### ADO.NET adapters
+
+`PgDbConnection`, `MySqlDbConnection`, and `MsSqlDbConnection` are provider-local
+`DbConnection` wrappers. Their matching commands, readers, transactions, parameters,
+provider factories, data sources, and batches use standard ADO.NET abstractions while
+delegating to the existing wire drivers. I/O is asynchronous only; synchronous execution
+methods throw `NotSupportedException`.
+
+```csharp
+await using var source = new PgDbDataSource("Host=localhost;Database=app;Username=app;Password=secret");
+await using DbConnection connection = await source.OpenConnectionAsync();
+await using DbCommand command = connection.CreateCommand();
+command.CommandText = "SELECT id FROM messages WHERE id = $1";
+command.Parameters.Add(new PgDbParameter { ParameterName = "id", Value = 42 });
+await using DbDataReader reader = await command.ExecuteReaderAsync();
+while (await reader.ReadAsync())
+    Console.WriteLine(reader.GetInt32(0));
+```
+
+`DbDataSource` instances own and reuse the existing Apex pools. For `ValueTask`,
+non-boxing `SqlValue`, and borrowed-reader access, prefer the direct Apex APIs above.
+Connections created by a data source remain bound to that source's pool and reject
+`ConnectionString` changes. Commands created directly by a data source lease a
+connection for execution and return it when execution or its reader completes.
+`DbBatch` preserves command order and transaction semantics; it does not imply a
+single wire round trip when the provider cannot represent the batch natively.
 
 ### Transactions
 
