@@ -67,13 +67,15 @@ crank \
   --scenario download-raw \
   --profile aspnet-gold-lin \
   --application.framework net10.0 \
+  --application.buildArguments /p:TargetFrameworks=net10.0 \
   --application.options.collectCounters true \
   --json apex-postgres-download-raw-net10.json
 ```
 
 Scenarios are `download-raw`, `download-tls`, `upload-raw`, and `upload-tls`.
-Change `--application.framework` to `net11.0` for the .NET 11 matrix. Before a
-branch is merged, add `--variable branchOrCommit <branch>` so both the
-application and PostgreSQL image use that branch. Crank results include
-operations per second, transfer MiB/s, latency percentiles, total allocations,
-and allocations per operation.
+Change both framework values to `net11.0` for the .NET 11 matrix. The
+`TargetFrameworks` build argument prevents an older SDK from evaluating newer
+target frameworks in referenced projects. Before a branch is merged, add
+`--variable branchOrCommit <branch>` so both the application and PostgreSQL
+image use that branch. Crank results include operations per second, transfer
+MiB/s, latency percentiles, total allocations, and allocations per operation.
