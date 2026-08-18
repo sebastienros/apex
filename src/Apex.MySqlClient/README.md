@@ -61,6 +61,9 @@ may be in flight; its conservative default is one.
 authentication sends a clear password only over TLS; without TLS, configure a
 trusted PEM server key or explicitly enable `AllowPublicKeyRetrieval`.
 
+On .NET 11 or later, set `UseExperimentalLowLevelTls=true` to opt into the
+`TlsBufferSession` transport. The default remains `SslStream`.
+
 Cancellation uses a short-lived authenticated connection to issue `KILL QUERY`.
 If cancellation cannot be delivered, the physical command connection is closed
 instead of being returned to a pool in an uncertain protocol state.

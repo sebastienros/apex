@@ -60,7 +60,7 @@ public sealed class PgConnectOptionsTests
     {
         PgConnectOptions options = PgConnectOptions.Parse(
           "host=db.example port=5544 user='app user' password='s\\'ecret' " +
-          "dbname=app sslmode=require pipelininglimit=32");
+          "dbname=app sslmode=require pipelininglimit=32 useexperimentallowleveltls=true");
 
         Assert.AreEqual("db.example", options.Host);
         Assert.AreEqual(5544, options.Port);
@@ -69,6 +69,7 @@ public sealed class PgConnectOptionsTests
         Assert.AreEqual("app", options.Database);
         Assert.AreEqual(PgSslMode.Require, options.SslMode);
         Assert.AreEqual(32, options.PipeliningLimit);
+        Assert.IsTrue(options.UseExperimentalLowLevelTls);
     }
 
     [TestMethod]

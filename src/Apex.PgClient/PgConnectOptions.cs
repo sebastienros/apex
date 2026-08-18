@@ -169,6 +169,12 @@ public sealed record PgConnectOptions : SqlConnectOptions
                         PipeliningLimit = ParsePositiveInt(value, key),
                     };
                     break;
+                case "useexperimentallowleveltls":
+                    options = options with
+                    {
+                        UseExperimentalLowLevelTls = bool.Parse(value),
+                    };
+                    break;
                 case "cachepreparedstatements":
                     options = options with
                     {

@@ -30,7 +30,7 @@ jobs:
         run: dotnet --version
       - name: Test
         timeout-minutes: 1
-        run: dotnet test --project ${{ matrix.project }} --configuration Release
+        run: dotnet test --project "${{ github.workspace }}/${{ matrix.project }}" --configuration Release
 
   databases:
     uses: ./.github/workflows/tests.yml

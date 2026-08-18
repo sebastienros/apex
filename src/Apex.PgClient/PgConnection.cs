@@ -138,7 +138,7 @@ public sealed class PgConnection : ISqlConnection
 
                 stream = await UpgradeToTlsAsync(stream, options, timeout.Token).ConfigureAwait(false);
                 secure = true;
-                channelBindingData = GetChannelBindingData((SslStream)stream);
+                channelBindingData = GetChannelBindingData(stream);
             }
             else if (options.SslMode is PgSslMode.Prefer or PgSslMode.Require or
                      PgSslMode.VerifyCa or PgSslMode.VerifyFull)
@@ -148,7 +148,7 @@ public sealed class PgConnection : ISqlConnection
                 {
                     stream = await UpgradeToTlsAsync(stream, options, timeout.Token).ConfigureAwait(false);
                     secure = true;
-                    channelBindingData = GetChannelBindingData((SslStream)stream);
+                    channelBindingData = GetChannelBindingData(stream);
                 }
                 else if (response != (byte)'N')
                 {
@@ -605,9 +605,15 @@ public sealed class PgConnection : ISqlConnection
         {
             await _scheduler.DisposeAsync().ConfigureAwait(false);
             await _reader.CompleteAsync().ConfigureAwait(false);
-            await _stream.DisposeAsync().ConfigureAwait(false);
-            _socket.Dispose();
-            _rowDecoder.DisableCache();
+            try
+            {
+                await _stream.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _socket.Dispose();
+                _rowDecoder.DisableCache();
+            }
         }
     }
 
@@ -2267,7 +2273,6 @@ public sealed class PgConnection : ISqlConnection
                 _ => null,
             };
 
-        SslStream ssl = new(stream, leaveInnerStreamOpen: false, validation);
         var clientCertificates = options.ClientCertificates.Count == 0
             ? null
             : new X509CertificateCollection(options.ClientCertificates.ToArray());
@@ -2277,6 +2282,7 @@ public sealed class PgConnection : ISqlConnection
             EnabledSslProtocols = SslProtocols.None,
             ClientCertificates = clientCertificates,
             CertificateRevocationCheckMode = options.CertificateRevocationCheckMode,
+            RemoteCertificateValidationCallback = validation,
         };
         if (options.SslNegotiation == PgSslNegotiation.Direct)
         {
@@ -2284,16 +2290,39 @@ public sealed class PgConnection : ISqlConnection
               [new SslApplicationProtocol("postgresql")];
         }
 
+        if (options.UseExperimentalLowLevelTls)
+        {
+#if NET11_0_OR_GREATER
+            LowLevelTlsStream tls = await LowLevelTlsStream.AuthenticateAsClientAsync(
+                stream,
+                authenticationOptions,
+                cancellationToken).ConfigureAwait(false);
+            ValidateDirectTlsAlpn(tls.NegotiatedApplicationProtocol, options);
+            return tls;
+#else
+            throw new PlatformNotSupportedException(
+              "Experimental low-level TLS requires .NET 11 or later.");
+#endif
+        }
+
+        SslStream ssl = new(stream, leaveInnerStreamOpen: false);
         await ssl.AuthenticateAsClientAsync(
             authenticationOptions,
             cancellationToken).ConfigureAwait(false);
+        ValidateDirectTlsAlpn(ssl.NegotiatedApplicationProtocol, options);
+        return ssl;
+    }
+
+    private static void ValidateDirectTlsAlpn(
+        SslApplicationProtocol negotiatedProtocol,
+        PgConnectOptions options)
+    {
         if (options.SslNegotiation == PgSslNegotiation.Direct &&
-              ssl.NegotiatedApplicationProtocol != new SslApplicationProtocol("postgresql"))
+            negotiatedProtocol != new SslApplicationProtocol("postgresql"))
         {
             throw new AuthenticationException(
               "PostgreSQL direct TLS did not negotiate the required 'postgresql' ALPN protocol.");
         }
-        return ssl;
     }
 
     private static bool VerifyCertificateAuthority(
@@ -2305,10 +2334,16 @@ public sealed class PgConnection : ISqlConnection
         chain is not null &&
         (errors & ~SslPolicyErrors.RemoteCertificateNameMismatch) == SslPolicyErrors.None;
 
-    private static byte[] GetChannelBindingData(SslStream stream)
+    private static byte[] GetChannelBindingData(Stream stream)
     {
-        var certificate = stream.RemoteCertificate ??
-          throw new AuthenticationException(
+        var certificate = stream switch
+        {
+           SslStream ssl => ssl.RemoteCertificate,
+#if NET11_0_OR_GREATER
+           LowLevelTlsStream tls => tls.RemoteCertificate,
+#endif
+           _ => null,
+        } ?? throw new AuthenticationException(
             "The TLS server certificate is unavailable for PostgreSQL channel binding.");
         var certificate2 =
           X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
