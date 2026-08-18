@@ -141,7 +141,7 @@ jobs:
       dockerFile: toolset/databases/mysql/mysql.dockerfile
       dockerImageName: mysql_te
       dockerContextDirectory: toolset/databases/mysql
-    readyStateText: Ready for start up
+    readyStateText: ready for connections. Bind-address
     noClean: true
 
   sqlserver:
