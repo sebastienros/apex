@@ -6,7 +6,6 @@ using Apex.MsSqlClient;
 using Apex.PgClient;
 using Apex.SqlClient;
 using Microsoft.Data.SqlClient;
-using Microsoft.Crank.EventSources;
 using MySqlConnector;
 using Npgsql;
 using ApexMySql = Apex.MySqlClient;
@@ -85,7 +84,6 @@ var runners = await Task.WhenAll(
 try
 {
     await RunPhaseAsync(driver, runners, warmup, record: false);
-    RegisterCrankMetrics();
     GC.Collect();
     GC.WaitForPendingFinalizers();
     GC.Collect();
@@ -246,45 +244,77 @@ static async ValueTask<IQueryRunner> WrapAsync<T>(ValueTask<T> runner)
   where T : IQueryRunner =>
   await runner;
 
-static void RegisterCrankMetrics()
-{
-    Register("apex/operations-per-second", "Operations/s", "Completed operations per second", "n2");
-    Register("apex/latency-p50", "P50 (ms)", "50th percentile operation latency", "n3");
-    Register("apex/latency-p95", "P95 (ms)", "95th percentile operation latency", "n3");
-    Register("apex/latency-p99", "P99 (ms)", "99th percentile operation latency", "n3");
-    Register("apex/allocated-bytes", "Allocated (B)", "Managed bytes allocated", "n0");
-    Register(
-      "apex/allocated-bytes-per-operation",
-      "Allocated/op (B)",
-      "Managed bytes allocated per operation",
-      "n2");
-    Register(
-      "apex/transfer-mib-per-second",
-      "Transfer (MiB/s)",
-      "Application payload transferred per second",
-      "n2");
-
-    static void Register(string name, string shortDescription, string longDescription, string format) =>
-      BenchmarksEventSource.Register(
-        name,
-        Operations.First,
-        Operations.First,
-        shortDescription,
-        longDescription,
-        format);
-}
-
 static void ReportCrankMetrics(HarnessResult result)
 {
-    BenchmarksEventSource.Measure("apex/operations-per-second", result.OperationsPerSecond);
-    BenchmarksEventSource.Measure("apex/latency-p50", result.P50Milliseconds);
-    BenchmarksEventSource.Measure("apex/latency-p95", result.P95Milliseconds);
-    BenchmarksEventSource.Measure("apex/latency-p99", result.P99Milliseconds);
-    BenchmarksEventSource.Measure("apex/allocated-bytes", result.AllocatedBytes);
-    BenchmarksEventSource.Measure(
-      "apex/allocated-bytes-per-operation",
-      result.AllocatedBytesPerOperation);
-    BenchmarksEventSource.Measure("apex/transfer-mib-per-second", result.TransferMibPerSecond);
+    CrankMetric[] metrics =
+    [
+        new(
+          "apex/operations-per-second",
+          result.OperationsPerSecond,
+          "Operations/s",
+          "Completed operations per second",
+          "n2"),
+        new(
+          "apex/latency-p50",
+          result.P50Milliseconds,
+          "P50 (ms)",
+          "50th percentile operation latency",
+          "n3"),
+        new(
+          "apex/latency-p95",
+          result.P95Milliseconds,
+          "P95 (ms)",
+          "95th percentile operation latency",
+          "n3"),
+        new(
+          "apex/latency-p99",
+          result.P99Milliseconds,
+          "P99 (ms)",
+          "99th percentile operation latency",
+          "n3"),
+        new(
+          "apex/allocated-bytes",
+          result.AllocatedBytes,
+          "Allocated (B)",
+          "Managed bytes allocated",
+          "n0"),
+        new(
+          "apex/allocated-bytes-per-operation",
+          result.AllocatedBytesPerOperation,
+          "Allocated/op (B)",
+          "Managed bytes allocated per operation",
+          "n2"),
+        new(
+          "apex/transfer-mib-per-second",
+          result.TransferMibPerSecond,
+          "Transfer (MiB/s)",
+          "Application payload transferred per second",
+          "n2"),
+    ];
+    var timestamp = DateTime.UtcNow;
+    var statistics = new
+    {
+        Metadata = metrics.Select(metric => new
+        {
+            Source = "Apex",
+            metric.Name,
+            Aggregate = "First",
+            Reduce = "First",
+            metric.Format,
+            metric.LongDescription,
+            metric.ShortDescription,
+        }),
+        Measurements = metrics.Select(metric => new
+        {
+            metric.Name,
+            Timestamp = timestamp,
+            metric.Value,
+        }),
+    };
+
+    Console.WriteLine("#StartJobStatistics");
+    Console.WriteLine(JsonSerializer.Serialize(statistics));
+    Console.WriteLine("#EndJobStatistics");
 }
 
 static double Percentile(long[] ordered, double percentile)
@@ -1250,3 +1280,10 @@ internal sealed record HarnessResult(
     string Runtime,
     string OperatingSystem,
     string Architecture);
+
+internal sealed record CrankMetric(
+    string Name,
+    double Value,
+    string ShortDescription,
+    string LongDescription,
+    string Format);
