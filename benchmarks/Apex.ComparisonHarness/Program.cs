@@ -71,7 +71,6 @@ var connectionString =
   Environment.GetEnvironmentVariable(connectionVariable) ??
   throw new InvalidOperationException($"Set {connectionVariable}.");
 
-RegisterCrankMetrics();
 var runners = await Task.WhenAll(
   Enumerable.Range(0, concurrency)
     .Select(_ => CreateRunnerAsync(
@@ -86,6 +85,7 @@ var runners = await Task.WhenAll(
 try
 {
     await RunPhaseAsync(driver, runners, warmup, record: false);
+    RegisterCrankMetrics();
     GC.Collect();
     GC.WaitForPendingFinalizers();
     GC.Collect();
