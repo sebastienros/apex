@@ -68,6 +68,7 @@ crank \
   --profile aspnet-gold-lin \
   --application.framework net10.0 \
   --application.buildArguments /p:TargetFrameworks=net10.0 \
+  --application.buildArguments /p:NoWarn=NU1507 \
   --application.options.collectCounters true \
   --json apex-postgres-download-raw-net10.json
 ```
@@ -75,7 +76,9 @@ crank \
 Scenarios are `download-raw`, `download-tls`, `upload-raw`, and `upload-tls`.
 Change both framework values to `net11.0` for the .NET 11 matrix. The
 `TargetFrameworks` build argument prevents an older SDK from evaluating newer
-target frameworks in referenced projects. Before a branch is merged, add
-`--variable branchOrCommit <branch>` so both the application and PostgreSQL
-image use that branch. Crank results include operations per second, transfer
-MiB/s, latency percentiles, total allocations, and allocations per operation.
+target frameworks in referenced projects. The run-local `NU1507` suppression
+allows the runtime feeds injected by the Crank agent without changing repository
+NuGet configuration. Before a branch is merged, add `--variable branchOrCommit
+<branch>` so both the application and PostgreSQL image use that branch. Crank
+results include operations per second, transfer MiB/s, latency percentiles,
+total allocations, and allocations per operation.
