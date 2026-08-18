@@ -27,6 +27,56 @@ jobs:
       APEX_PG_CONNECTION_STRING: "Host={{databaseServer}};Port=5432;Database=apex;Username=apex;Password=apex;SSL Mode={{sslMode}}"
     options:
       requiredOperatingSystem: linux
+    metadata:
+      - name: apex/operations-per-second
+        source: Apex
+        aggregate: first
+        reduce: first
+        shortDescription: Operations/s
+        longDescription: Completed operations per second
+        format: n2
+      - name: apex/latency-p50
+        source: Apex
+        aggregate: first
+        reduce: first
+        shortDescription: P50 (ms)
+        longDescription: 50th percentile operation latency
+        format: n3
+      - name: apex/latency-p95
+        source: Apex
+        aggregate: first
+        reduce: first
+        shortDescription: P95 (ms)
+        longDescription: 95th percentile operation latency
+        format: n3
+      - name: apex/latency-p99
+        source: Apex
+        aggregate: first
+        reduce: first
+        shortDescription: P99 (ms)
+        longDescription: 99th percentile operation latency
+        format: n3
+      - name: apex/allocated-bytes
+        source: Apex
+        aggregate: first
+        reduce: first
+        shortDescription: Allocated (B)
+        longDescription: Managed bytes allocated
+        format: n0
+      - name: apex/allocated-bytes-per-operation
+        source: Apex
+        aggregate: first
+        reduce: first
+        shortDescription: Allocated/op (B)
+        longDescription: Managed bytes allocated per operation
+        format: n2
+      - name: apex/transfer-mib-per-second
+        source: Apex
+        aggregate: first
+        reduce: first
+        shortDescription: Transfer (MiB/s)
+        longDescription: Application payload transferred per second
+        format: n2
     onConfigure:
       - job.timeout = Number(job.variables.duration) + Number(job.variables.warmup) + 120;
 
