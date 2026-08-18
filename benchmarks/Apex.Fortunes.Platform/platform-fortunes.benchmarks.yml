@@ -10,7 +10,7 @@ variables:
   sdkVersion: 11.0.100-rc.1.26413.103
 
 jobs:
-  # Crank combines SDK transport feeds during restore; suppress only the resulting source-mapping warning.
+  # Crank combines SDK transport feeds; extend the repository's CS1591 suppression with NU1507.
   platform-postgresql-apex:
     source:
       repository: https://github.com/sebastienros/apex.git
@@ -19,7 +19,7 @@ jobs:
     sdkVersion: "{{sdkVersion}}"
     framework: net10.0
     buildArguments:
-      - /p:NoWarn=NU1507
+      - /p:NoWarn=NU1507%3BCS1591
     readyStateText: Application started.
     arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
     variables:
@@ -39,7 +39,7 @@ jobs:
     sdkVersion: "{{sdkVersion}}"
     framework: net10.0
     buildArguments:
-      - /p:NoWarn=NU1507
+      - /p:NoWarn=NU1507%3BCS1591
     readyStateText: Application started.
     arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
     variables:
@@ -58,7 +58,7 @@ jobs:
     sdkVersion: "{{sdkVersion}}"
     framework: net10.0
     buildArguments:
-      - /p:NoWarn=NU1507
+      - /p:NoWarn=NU1507%3BCS1591
     readyStateText: Application started.
     arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
     variables:
@@ -77,7 +77,7 @@ jobs:
     sdkVersion: "{{sdkVersion}}"
     framework: net10.0
     buildArguments:
-      - /p:NoWarn=NU1507
+      - /p:NoWarn=NU1507%3BCS1591
     readyStateText: Application started.
     arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
     variables:
@@ -96,7 +96,7 @@ jobs:
     sdkVersion: "{{sdkVersion}}"
     framework: net10.0
     buildArguments:
-      - /p:NoWarn=NU1507
+      - /p:NoWarn=NU1507%3BCS1591
     readyStateText: Application started.
     arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
     variables:
@@ -115,7 +115,7 @@ jobs:
     sdkVersion: "{{sdkVersion}}"
     framework: net10.0
     buildArguments:
-      - /p:NoWarn=NU1507
+      - /p:NoWarn=NU1507%3BCS1591
     readyStateText: Application started.
     arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
     variables:
