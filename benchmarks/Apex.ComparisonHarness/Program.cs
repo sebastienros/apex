@@ -381,8 +381,17 @@ internal sealed class ApexTransferRunner(
         string connectionString)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(payloadBytes);
-        var connection = await PgClient.ConnectAsync(
-          ApexPostgreSqlOptions.Parse(connectionString, useConfiguredSslMode: true));
+        var options =
+          ApexPostgreSqlOptions.Parse(connectionString, useConfiguredSslMode: true);
+        var connection = await PgClient.ConnectAsync(options);
+        var expectedSecure = options.SslMode != PgSslMode.Disable;
+        if (connection.IsSecure != expectedSecure)
+        {
+            await connection.DisposeAsync();
+            throw new InvalidOperationException(
+              $"Expected PostgreSQL IsSecure={expectedSecure}, but was {connection.IsSecure}.");
+        }
+
         byte[] payload = GC.AllocateUninitializedArray<byte>(payloadBytes);
         for (var index = 0; index < payload.Length; index++)
         {
