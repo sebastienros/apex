@@ -34,14 +34,26 @@ public sealed partial class BenchmarkApplication
         _ => OutputEmptyAsync(Writer),
     };
 
-    private async Task RenderDatabaseAsync() =>
-        await OutputFortunesAsync(Writer, await Database.LoadAsync(CancellationToken.None));
+    private async Task RenderDatabaseAsync()
+    {
+        RazorSlice template = Database switch
+        {
+            Utf8FortuneDatabase utf8Database =>
+                Templates.Utf8Fortunes.Create(
+                    await utf8Database.LoadAsync(CancellationToken.None)),
+            StringFortuneDatabase stringDatabase =>
+                Templates.Fortunes.Create(
+                    await stringDatabase.LoadAsync(CancellationToken.None)),
+            _ => throw new InvalidOperationException(
+                $"Unsupported fortune database type '{Database.GetType().Name}'."),
+        };
+        await OutputFortunesAsync(Writer, template);
+    }
 
     private ValueTask OutputFortunesAsync(
         PipeWriter pipeWriter,
-        List<Fortune> fortunes)
+        RazorSlice template)
     {
-        var template = Templates.Fortunes.Create(fortunes);
         var chunkedWriter = StartResponse(pipeWriter);
         var renderTask = template.RenderAsync(chunkedWriter, HtmlEncoder);
         if (renderTask.IsCompletedSuccessfully)

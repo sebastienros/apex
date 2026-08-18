@@ -2,7 +2,7 @@ namespace Apex.Fortunes.Platform;
 
 public readonly struct Fortune : IComparable<Fortune>
 {
-    public Fortune(int id, ReadOnlyMemory<byte> message)
+    public Fortune(int id, string message)
     {
         Id = id;
         Message = message;
@@ -10,8 +10,8 @@ public readonly struct Fortune : IComparable<Fortune>
 
     public int Id { get; }
 
-    public ReadOnlyMemory<byte> Message { get; }
+    public string Message { get; }
 
     public int CompareTo(Fortune other) =>
-        Message.Span.SequenceCompareTo(other.Message.Span);
+        StringComparer.Ordinal.Compare(Message, other.Message);
 }

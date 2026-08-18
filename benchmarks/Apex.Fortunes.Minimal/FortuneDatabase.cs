@@ -1,6 +1,5 @@
 using System.Data;
 using System.Globalization;
-using System.Text;
 using Apex.MsSqlClient;
 using Apex.MySqlClient;
 using Apex.PgClient;
@@ -14,11 +13,6 @@ namespace Apex.Fortunes.Minimal;
 internal abstract class FortuneDatabase : IAsyncDisposable
 {
     protected const string Query = "SELECT id, message FROM fortune";
-    private static readonly ReadOnlyMemory<byte> s_additionalFortune =
-        "Additional fortune added at request time."u8.ToArray();
-
-    public abstract ValueTask<List<Fortune>> LoadAsync(CancellationToken cancellationToken);
-
     public abstract ValueTask DisposeAsync();
 
     public static ValueTask<FortuneDatabase> CreateAsync(IConfiguration configuration)
@@ -58,16 +52,6 @@ internal abstract class FortuneDatabase : IAsyncDisposable
             _ => throw new InvalidOperationException("The database selection is invalid."),
         };
     }
-
-    protected static List<Fortune> Complete(List<Fortune> fortunes)
-    {
-        fortunes.Add(new Fortune(0, s_additionalFortune));
-        fortunes.Sort();
-        return fortunes;
-    }
-
-    protected static Fortune Utf8Fortune(int id, string message) =>
-        new(id, Encoding.UTF8.GetBytes(message));
 
     protected static PgConnectOptions CreatePostgreSqlOptions(
         string connectionString,
@@ -143,7 +127,38 @@ internal abstract class FortuneDatabase : IAsyncDisposable
     }
 }
 
-internal sealed class ApexPostgreSqlFortuneDatabase : FortuneDatabase
+internal abstract class Utf8FortuneDatabase : FortuneDatabase
+{
+    private static readonly ReadOnlyMemory<byte> s_additionalFortune =
+        "Additional fortune added at request time."u8.ToArray();
+
+    public abstract ValueTask<List<Utf8Fortune>> LoadAsync(
+        CancellationToken cancellationToken);
+
+    protected static List<Utf8Fortune> Complete(List<Utf8Fortune> fortunes)
+    {
+        fortunes.Add(new Utf8Fortune(0, s_additionalFortune));
+        fortunes.Sort();
+        return fortunes;
+    }
+}
+
+internal abstract class StringFortuneDatabase : FortuneDatabase
+{
+    private const string AdditionalFortune = "Additional fortune added at request time.";
+
+    public abstract ValueTask<List<Fortune>> LoadAsync(
+        CancellationToken cancellationToken);
+
+    protected static List<Fortune> Complete(List<Fortune> fortunes)
+    {
+        fortunes.Add(new Fortune(0, AdditionalFortune));
+        fortunes.Sort();
+        return fortunes;
+    }
+}
+
+internal sealed class ApexPostgreSqlFortuneDatabase : Utf8FortuneDatabase
 {
     private readonly PgPipelinePool _pool;
     private readonly ISqlPreparedStatement _statement;
@@ -178,12 +193,13 @@ internal sealed class ApexPostgreSqlFortuneDatabase : FortuneDatabase
         }
     }
 
-    public override async ValueTask<List<Fortune>> LoadAsync(CancellationToken cancellationToken)
+    public override async ValueTask<List<Utf8Fortune>> LoadAsync(
+        CancellationToken cancellationToken)
     {
-        List<Fortune> fortunes = [];
+        List<Utf8Fortune> fortunes = [];
         await _statement.CollectAsync(
             fortunes,
-            static (results, row) => results.Add(new Fortune(
+            static (results, row) => results.Add(new Utf8Fortune(
                 row.GetInt32(0),
                 row.Get<ReadOnlyMemory<byte>>(1))),
             cancellationToken: cancellationToken);
@@ -203,7 +219,7 @@ internal sealed class ApexPostgreSqlFortuneDatabase : FortuneDatabase
     }
 }
 
-internal sealed class ApexMySqlFortuneDatabase : FortuneDatabase
+internal sealed class ApexMySqlFortuneDatabase : StringFortuneDatabase
 {
     private const string PreparedQuery = Query + " WHERE ? = 1";
     private static readonly SqlParameters s_one = SqlParameters.Create(1);
@@ -229,7 +245,7 @@ internal sealed class ApexMySqlFortuneDatabase : FortuneDatabase
         List<Fortune> fortunes = [];
         foreach (var row in rows)
         {
-            fortunes.Add(Utf8Fortune(row.GetInt32(0), row.GetString(1)));
+            fortunes.Add(new Fortune(row.GetInt32(0), row.GetString(1)));
         }
 
         return Complete(fortunes);
@@ -238,7 +254,7 @@ internal sealed class ApexMySqlFortuneDatabase : FortuneDatabase
     public override ValueTask DisposeAsync() => _pool.DisposeAsync();
 }
 
-internal sealed class ApexSqlServerFortuneDatabase : FortuneDatabase
+internal sealed class ApexSqlServerFortuneDatabase : StringFortuneDatabase
 {
     private const string ParameterizedQuery = Query + " WHERE @P1 = 1";
     private static readonly SqlParameters s_one = SqlParameters.Create(1);
@@ -264,7 +280,7 @@ internal sealed class ApexSqlServerFortuneDatabase : FortuneDatabase
         List<Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
-            fortunes.Add(Utf8Fortune(reader.GetInt32(0), reader.GetString(1)));
+            fortunes.Add(new Fortune(reader.GetInt32(0), reader.GetString(1)));
         }
 
         return Complete(fortunes);
@@ -273,7 +289,7 @@ internal sealed class ApexSqlServerFortuneDatabase : FortuneDatabase
     public override ValueTask DisposeAsync() => _pool.DisposeAsync();
 }
 
-internal sealed class NpgsqlFortuneDatabase : FortuneDatabase
+internal sealed class NpgsqlFortuneDatabase : StringFortuneDatabase
 {
     private const string ParameterizedQuery = Query + " WHERE $1 = 1";
     private readonly NpgsqlDataSource _dataSource;
@@ -297,7 +313,7 @@ internal sealed class NpgsqlFortuneDatabase : FortuneDatabase
         List<Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
-            fortunes.Add(Utf8Fortune(reader.GetInt32(0), reader.GetString(1)));
+            fortunes.Add(new Fortune(reader.GetInt32(0), reader.GetString(1)));
         }
 
         return Complete(fortunes);
@@ -306,7 +322,7 @@ internal sealed class NpgsqlFortuneDatabase : FortuneDatabase
     public override ValueTask DisposeAsync() => _dataSource.DisposeAsync();
 }
 
-internal sealed class MySqlConnectorFortuneDatabase : FortuneDatabase
+internal sealed class MySqlConnectorFortuneDatabase : StringFortuneDatabase
 {
     private const string ParameterizedQuery = Query + " WHERE @one = 1";
     private readonly string _connectionString;
@@ -333,7 +349,7 @@ internal sealed class MySqlConnectorFortuneDatabase : FortuneDatabase
         List<Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
-            fortunes.Add(Utf8Fortune(reader.GetInt32(0), reader.GetString(1)));
+            fortunes.Add(new Fortune(reader.GetInt32(0), reader.GetString(1)));
         }
 
         return Complete(fortunes);
@@ -342,7 +358,7 @@ internal sealed class MySqlConnectorFortuneDatabase : FortuneDatabase
     public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
 }
 
-internal sealed class MicrosoftDataSqlClientFortuneDatabase : FortuneDatabase
+internal sealed class MicrosoftDataSqlClientFortuneDatabase : StringFortuneDatabase
 {
     private const string ParameterizedQuery = Query + " WHERE @one = 1";
     private readonly string _connectionString;
@@ -370,7 +386,7 @@ internal sealed class MicrosoftDataSqlClientFortuneDatabase : FortuneDatabase
         List<Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
-            fortunes.Add(Utf8Fortune(reader.GetInt32(0), reader.GetString(1)));
+            fortunes.Add(new Fortune(reader.GetInt32(0), reader.GetString(1)));
         }
 
         return Complete(fortunes);

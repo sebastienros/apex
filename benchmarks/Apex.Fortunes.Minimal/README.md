@@ -21,7 +21,9 @@ unmerged branch.
 ## Apex strategies
 
 PostgreSQL uses `PgPipelinePool`, a pool-wide prepared statement, and `CollectAsync`; its hot
-path retains each `message` as `ReadOnlyMemory<byte>`. `APEX_CONNECTIONS` defaults to 56 and
+path retains each `message` as `ReadOnlyMemory<byte>` and renders the `Utf8Fortunes` view.
+Drivers that expose text as strings use the string-based `Fortune` model and `Fortunes` view
+without converting the message back to UTF-8. `APEX_CONNECTIONS` defaults to 56 and
 `APEX_PIPELINING` defaults to 16.
 
 MySQL uses `MySqlPool` with `CachePreparedStatements=true` and a parameterized query, which

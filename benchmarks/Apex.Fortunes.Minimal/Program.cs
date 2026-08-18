@@ -8,23 +8,38 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
 
 await using var database = await FortuneDatabase.CreateAsync(builder.Configuration);
-builder.Services.AddSingleton<FortuneDatabase>(database);
 builder.Services.AddSingleton(CreateHtmlEncoder());
 
 await using var app = builder.Build();
 
-app.MapGet(
-    "/fortunes",
-    static async (
-        FortuneDatabase database,
-        HtmlEncoder htmlEncoder,
-        CancellationToken cancellationToken) =>
-    {
-        var fortunes = await database.LoadAsync(cancellationToken);
-        var template = Fortunes.Create(fortunes);
-        template.HtmlEncoder = htmlEncoder;
-        return template;
-    });
+switch (database)
+{
+    case Utf8FortuneDatabase utf8Database:
+        app.MapGet(
+            "/fortunes",
+            async (HtmlEncoder htmlEncoder, CancellationToken cancellationToken) =>
+            {
+                var fortunes = await utf8Database.LoadAsync(cancellationToken);
+                var template = Utf8Fortunes.Create(fortunes);
+                template.HtmlEncoder = htmlEncoder;
+                return template;
+            });
+        break;
+    case StringFortuneDatabase stringDatabase:
+        app.MapGet(
+            "/fortunes",
+            async (HtmlEncoder htmlEncoder, CancellationToken cancellationToken) =>
+            {
+                var fortunes = await stringDatabase.LoadAsync(cancellationToken);
+                var template = Fortunes.Create(fortunes);
+                template.HtmlEncoder = htmlEncoder;
+                return template;
+            });
+        break;
+    default:
+        throw new InvalidOperationException(
+            $"Unsupported fortune database type '{database.GetType().Name}'.");
+}
 
 app.Lifetime.ApplicationStarted.Register(static () => Console.WriteLine("Application started."));
 

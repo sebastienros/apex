@@ -1,8 +1,8 @@
 # Apex Platform Fortunes
 
 This standalone Platform-style Fortunes application exposes `GET /fortunes`. It reads every
-row from `fortune`, adds the standard request-time fortune, sorts by ordinal UTF-8 message
-order, and renders the standard HTML response with RazorSlices HTML encoding.
+row from `fortune`, adds the standard request-time fortune, sorts by message, and renders the
+standard HTML response with RazorSlices HTML encoding.
 
 ## Selection
 
@@ -24,7 +24,8 @@ PostgreSQL and defaults to 64.
 ## Apex driver strategies
 
 PostgreSQL uses `PgPipelinePool`, a pool-wide prepared statement, and `CollectAsync`; it
-keeps `message` as `ReadOnlyMemory<byte>` on the request hot path. MySQL uses the bounded
+keeps `message` as `ReadOnlyMemory<byte>` and renders the `Utf8Fortunes` view on the request
+hot path. Drivers that expose text as strings use the string-based `Fortune` model and
+`Fortunes` view without converting the message back to UTF-8. MySQL uses the bounded
 `MySqlPool` query path with its per-connection prepared-statement cache enabled. SQL Server
-uses a bounded `MsSqlPool` and a borrowed row reader. Neither MySQL nor SQL Server assumes a
-PostgreSQL-style pipeline API.
+uses a bounded `MsSqlPool` and a borrowed row reader.
