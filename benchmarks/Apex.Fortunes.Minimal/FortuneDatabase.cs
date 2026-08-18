@@ -245,7 +245,7 @@ internal sealed class ApexMySqlFortuneDatabase : StringFortuneDatabase
         List<Fortune> fortunes = [];
         foreach (var row in rows)
         {
-            fortunes.Add(new Fortune(row.GetInt32(0), row.GetString(1)));
+            fortunes.Add(new Fortune(checked((int)row.Get<uint>(0)), row.GetString(1)));
         }
 
         return Complete(fortunes);
