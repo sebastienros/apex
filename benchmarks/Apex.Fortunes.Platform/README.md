@@ -17,9 +17,10 @@ Set all of these environment variables before starting the app:
 The Crank config defaults `branchOrCommit` to `main`; override it when benchmarking an
 unmerged branch.
 
-`DATABASE_CONNECTIONS` sets the Apex and corresponding standard-driver pool size: it defaults
-to 56 for PostgreSQL and 64 for MySQL and SQL Server. `APEX_PIPELINING` applies only to Apex
-PostgreSQL and defaults to 64.
+`DATABASE_CONNECTIONS` sets each job's pool size. The Crank configuration uses two fewer
+connections than database cores except for Npgsql, which uses 256 connections to keep the
+remote database busy while operations await network and query latency. `APEX_PIPELINING`
+applies only to Apex PostgreSQL and defaults to 64.
 
 ## Apex driver strategies
 

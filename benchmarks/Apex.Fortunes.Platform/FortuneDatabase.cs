@@ -34,7 +34,7 @@ internal abstract class FortuneDatabase : IAsyncDisposable
                 ValueTask.FromResult<FortuneDatabase>(
                     new NpgsqlFortuneDatabase(
                         requiredConnectionString,
-                        PositiveEnvironment("DATABASE_CONNECTIONS", 56))),
+                        PositiveEnvironment("DATABASE_CONNECTIONS", 256))),
             ("mysql", "apex") =>
                 ValueTask.FromResult<FortuneDatabase>(
                     new ApexMySqlFortuneDatabase(requiredConnectionString)),
