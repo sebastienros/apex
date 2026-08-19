@@ -34,7 +34,7 @@ internal abstract class FortuneDatabase : IAsyncDisposable
                 ValueTask.FromResult<FortuneDatabase>(
                     new NpgsqlFortuneDatabase(
                         requiredConnectionString,
-                        PositiveEnvironment("APEX_CONNECTIONS", 56))),
+                        PositiveEnvironment("DATABASE_CONNECTIONS", 56))),
             ("mysql", "apex") =>
                 ValueTask.FromResult<FortuneDatabase>(
                     new ApexMySqlFortuneDatabase(requiredConnectionString)),
@@ -160,7 +160,7 @@ internal sealed class ApexPostgreSqlFortuneDatabase : Utf8FortuneDatabase
             options,
             new SqlPipelinePoolOptions
             {
-                ConnectionCount = PositiveEnvironment("APEX_CONNECTIONS", 56),
+                ConnectionCount = PositiveEnvironment("DATABASE_CONNECTIONS", 56),
             });
         try
         {
@@ -216,7 +216,7 @@ internal sealed class ApexMySqlFortuneDatabase : StringFortuneDatabase
             options,
             new SqlPoolOptions
             {
-                MaximumSize = PositiveEnvironment("APEX_CONNECTIONS", 64),
+                MaximumSize = PositiveEnvironment("DATABASE_CONNECTIONS", 64),
             });
     }
 
@@ -246,7 +246,7 @@ internal sealed class ApexSqlServerFortuneDatabase : StringFortuneDatabase
             MsSqlConnectOptions.Parse(connectionString),
             new SqlPoolOptions
             {
-                MaximumSize = PositiveEnvironment("APEX_CONNECTIONS", 64),
+                MaximumSize = PositiveEnvironment("DATABASE_CONNECTIONS", 64),
             });
     }
 
@@ -269,7 +269,7 @@ internal sealed class ApexSqlServerFortuneDatabase : StringFortuneDatabase
     public override ValueTask DisposeAsync() => _pool.DisposeAsync();
 }
 
-internal sealed class NpgsqlFortuneDatabase : StringFortuneDatabase
+internal sealed class NpgsqlFortuneDatabase : Utf8FortuneDatabase
 {
     private readonly NpgsqlDataSource _dataSource;
 
@@ -279,20 +279,22 @@ internal sealed class NpgsqlFortuneDatabase : StringFortuneDatabase
         {
             MaxPoolSize = connectionCount,
         };
-        _dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
+        _dataSource = new NpgsqlSlimDataSourceBuilder(builder.ConnectionString).Build();
     }
 
-    public override async ValueTask<List<Fortune>> LoadAsync(
+    public override async ValueTask<List<Utf8Fortune>> LoadAsync(
         CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(Query, connection);
-        await command.PrepareAsync(cancellationToken);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        List<Fortune> fortunes = [];
+        using var connection = _dataSource.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand(Query, connection);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        List<Utf8Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
-            fortunes.Add(new Fortune(reader.GetInt32(0), reader.GetString(1)));
+            fortunes.Add(new Utf8Fortune(
+                reader.GetInt32(0),
+                reader.GetFieldValue<byte[]>(1)));
         }
 
         return Complete(fortunes);
@@ -309,7 +311,7 @@ internal sealed class MySqlConnectorFortuneDatabase : StringFortuneDatabase
     {
         var builder = new MySqlConnectorDriver.MySqlConnectionStringBuilder(connectionString)
         {
-            MaximumPoolSize = (uint)PositiveEnvironment("APEX_CONNECTIONS", 64),
+            MaximumPoolSize = (uint)PositiveEnvironment("DATABASE_CONNECTIONS", 64),
         };
         _connectionString = builder.ConnectionString;
     }
@@ -342,7 +344,7 @@ internal sealed class MicrosoftDataSqlClientFortuneDatabase : StringFortuneDatab
     {
         var builder = new SqlConnectionStringBuilder(connectionString)
         {
-            MaxPoolSize = PositiveEnvironment("APEX_CONNECTIONS", 64),
+            MaxPoolSize = PositiveEnvironment("DATABASE_CONNECTIONS", 64),
         };
         _connectionString = builder.ConnectionString;
     }
