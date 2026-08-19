@@ -148,7 +148,7 @@ jobs:
   sqlserver:
     source:
       repository: https://github.com/aspnet/Benchmarks.git
-      branchOrCommit: main
+      branchOrCommit: copilot/fix-mssql-techempower-docker-image
       dockerFile: docker/mssql-techempower/Dockerfile
       dockerImageName: mssql_te
       dockerContextDirectory: docker/mssql-techempower
