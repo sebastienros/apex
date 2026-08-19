@@ -32,3 +32,6 @@ hot path. Npgsql uses a slim data source and reads each message as `byte[]` thro
 UTF-8 view. Drivers that expose text as strings use the string-based `Fortune` model and
 `Fortunes` view. MySQL uses the bounded `MySqlPool` query path with its per-connection
 prepared-statement cache enabled. SQL Server uses a bounded `MsSqlPool` and a borrowed row reader.
+
+The SQL Server Crank job uses the repaired `aspnet/Benchmarks` image branch and waits for its
+`Data imported` marker before starting the application.

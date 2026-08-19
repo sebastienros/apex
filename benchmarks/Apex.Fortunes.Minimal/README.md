@@ -36,3 +36,6 @@ activates its per-connection prepared-statement cache. `DATABASE_CONNECTIONS` de
 SQL Server uses `MsSqlPool` with a borrowed row reader and no PostgreSQL-style pipelining.
 `DATABASE_CONNECTIONS` defaults to 64. Standard drivers use matching maximum pool sizes and
 asynchronous commands.
+
+The SQL Server Crank job uses the repaired `aspnet/Benchmarks` image branch and waits for its
+`Data imported` marker before starting the application.
