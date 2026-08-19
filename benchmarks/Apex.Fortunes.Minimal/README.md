@@ -24,7 +24,9 @@ PostgreSQL uses `PgPipelinePool`, a pool-wide prepared statement, and `CollectAs
 path retains each `message` as `ReadOnlyMemory<byte>` and renders the `Utf8Fortunes` view.
 Npgsql uses a slim data source and reads each message as `byte[]` through the same UTF-8 view.
 Drivers that expose text as strings use the string-based `Fortune` model and `Fortunes` view.
-`DATABASE_CONNECTIONS` defaults to 56 and `APEX_PIPELINING` defaults to 16.
+The Crank configuration uses two fewer Apex connections than database cores and 256 Npgsql
+connections; Npgsql needs the additional in-flight operations to hide network and query latency.
+`APEX_PIPELINING` defaults to 16.
 
 MySQL uses `MySqlPool` with `CachePreparedStatements=true` and a parameterized query, which
 activates its per-connection prepared-statement cache. `DATABASE_CONNECTIONS` defaults to 64.

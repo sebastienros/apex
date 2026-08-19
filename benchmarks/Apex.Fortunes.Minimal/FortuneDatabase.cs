@@ -32,7 +32,7 @@ internal abstract class FortuneDatabase : IAsyncDisposable
             ("postgresql", "npgsql") => ValueTask.FromResult<FortuneDatabase>(
                 new NpgsqlFortuneDatabase(
                     connectionString,
-                    PositiveSetting(configuration, "DATABASE_CONNECTIONS", 56))),
+                    PositiveSetting(configuration, "DATABASE_CONNECTIONS", 256))),
             ("mysql", "apex") => ValueTask.FromResult<FortuneDatabase>(
                 new ApexMySqlFortuneDatabase(
                     connectionString,

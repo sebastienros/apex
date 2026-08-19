@@ -4,6 +4,7 @@ imports:
 
 variables:
   serverPort: 5000
+  npgsqlConnections: 256
   # Override this value to benchmark an unmerged branch.
   branchOrCommit: main
 
@@ -45,8 +46,8 @@ jobs:
     environmentVariables:
       DATABASE: postgresql
       DRIVER: npgsql
-      CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size={{ cores | minus: 2 }};NoResetOnClose=true;Enlist=false;Max Auto Prepare=4"
-      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
+      CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size={{ npgsqlConnections }};NoResetOnClose=true;Enlist=false;Max Auto Prepare=4"
+      DATABASE_CONNECTIONS: "{{ npgsqlConnections }}"
 
   minimal-mysql-apex:
     source:
@@ -165,7 +166,7 @@ scenarios:
       variables:
         presetHeaders: html
         path: /fortunes
-        connections: 1024
+        connections: 512
 
   minimal-postgresql-npgsql:
     db:
@@ -177,7 +178,7 @@ scenarios:
       variables:
         presetHeaders: html
         path: /fortunes
-        connections: 1024
+        connections: 512
 
   minimal-mysql-apex:
     db:
