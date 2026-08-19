@@ -32,5 +32,6 @@ MySQL uses `MySqlPool` with `CachePreparedStatements=true` and a parameterized q
 activates its per-connection prepared-statement cache. `DATABASE_CONNECTIONS` defaults to 64.
 
 SQL Server uses `MsSqlPool` with a borrowed row reader and no PostgreSQL-style pipelining.
-`DATABASE_CONNECTIONS` defaults to 64. Standard drivers use matching maximum pool sizes and
-asynchronous commands.
+`DATABASE_CONNECTIONS` defaults to 64. Standard drivers use matching fixed-size pools, disable
+ambient transaction enlistment and command timeouts, and execute an unprepared one-shot command
+per request. MySqlConnector also uses `MySqlDataSource` and skips pooled-connection resets.

@@ -305,25 +305,30 @@ internal sealed class NpgsqlFortuneDatabase : Utf8FortuneDatabase
 
 internal sealed class MySqlConnectorFortuneDatabase : StringFortuneDatabase
 {
-    private readonly string _connectionString;
+    private readonly MySqlConnectorDriver.MySqlDataSource _dataSource;
 
     public MySqlConnectorFortuneDatabase(string connectionString)
     {
+        var connectionCount = PositiveEnvironment("DATABASE_CONNECTIONS", 64);
         var builder = new MySqlConnectorDriver.MySqlConnectionStringBuilder(connectionString)
         {
-            MaximumPoolSize = (uint)PositiveEnvironment("DATABASE_CONNECTIONS", 64),
+            Pooling = true,
+            ConnectionReset = false,
+            AutoEnlist = false,
+            DefaultCommandTimeout = 0,
+            UseAffectedRows = true,
+            MinimumPoolSize = (uint)connectionCount,
+            MaximumPoolSize = (uint)connectionCount,
         };
-        _connectionString = builder.ConnectionString;
+        _dataSource = new MySqlConnectorDriver.MySqlDataSource(builder.ConnectionString);
     }
 
     public override async ValueTask<List<Fortune>> LoadAsync(
         CancellationToken cancellationToken)
     {
-        await using var connection = new MySqlConnectorDriver.MySqlConnection(_connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await using var command = new MySqlConnectorDriver.MySqlCommand(Query, connection);
-        await command.PrepareAsync(cancellationToken);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        using var command = new MySqlConnectorDriver.MySqlCommand(Query, connection);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
         List<Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -333,7 +338,7 @@ internal sealed class MySqlConnectorFortuneDatabase : StringFortuneDatabase
         return Complete(fortunes);
     }
 
-    public override ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    public override ValueTask DisposeAsync() => _dataSource.DisposeAsync();
 }
 
 internal sealed class MicrosoftDataSqlClientFortuneDatabase : StringFortuneDatabase
@@ -342,9 +347,14 @@ internal sealed class MicrosoftDataSqlClientFortuneDatabase : StringFortuneDatab
 
     public MicrosoftDataSqlClientFortuneDatabase(string connectionString)
     {
+        var connectionCount = PositiveEnvironment("DATABASE_CONNECTIONS", 64);
         var builder = new SqlConnectionStringBuilder(connectionString)
         {
-            MaxPoolSize = PositiveEnvironment("DATABASE_CONNECTIONS", 64),
+            Pooling = true,
+            Enlist = false,
+            CommandTimeout = 0,
+            MinPoolSize = connectionCount,
+            MaxPoolSize = connectionCount,
         };
         _connectionString = builder.ConnectionString;
     }
@@ -352,11 +362,10 @@ internal sealed class MicrosoftDataSqlClientFortuneDatabase : StringFortuneDatab
     public override async ValueTask<List<Fortune>> LoadAsync(
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(_connectionString);
+        using var connection = new SqlConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(Query, connection);
-        await command.PrepareAsync(cancellationToken);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        using var command = new SqlCommand(Query, connection);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
         List<Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
