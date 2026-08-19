@@ -8,6 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
 
 await using var database = await FortuneDatabase.CreateAsync(builder.Configuration);
+await database.ValidateAsync(CancellationToken.None);
 builder.Services.AddSingleton(CreateHtmlEncoder());
 
 await using var app = builder.Build();

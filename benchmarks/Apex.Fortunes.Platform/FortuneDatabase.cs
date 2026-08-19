@@ -1,4 +1,5 @@
 using System.Globalization;
+using Apex.Fortunes;
 using Apex.MsSqlClient;
 using Apex.MySqlClient;
 using Apex.PgClient;
@@ -14,6 +15,34 @@ internal abstract class FortuneDatabase : IAsyncDisposable
     internal const string Query = "SELECT id, message FROM fortune";
 
     public abstract ValueTask DisposeAsync();
+
+    public async ValueTask ValidateAsync(CancellationToken cancellationToken)
+    {
+        switch (this)
+        {
+            case Utf8FortuneDatabase utf8Database:
+                FortuneResultValidator.ValidateUtf8(
+                    await utf8Database.LoadAsync(cancellationToken),
+                    static fortune => fortune.Id,
+                    static fortune => fortune.Message,
+                    GetType().Name);
+                break;
+            case StringFortuneDatabase stringDatabase:
+                FortuneResultValidator.Validate(
+                    await stringDatabase.LoadAsync(cancellationToken),
+                    static fortune => fortune.Id,
+                    static fortune => fortune.Message,
+                    GetType().Name);
+                break;
+            default:
+                throw new InvalidOperationException(
+                    $"Unsupported fortune database type '{GetType().Name}'.");
+        }
+
+        Console.WriteLine(
+            $"Fortune validation succeeded for {GetType().Name}: " +
+            "13 canonical results.");
+    }
 
     public static ValueTask<FortuneDatabase> CreateAsync(
         string? database,

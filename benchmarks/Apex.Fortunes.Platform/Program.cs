@@ -15,6 +15,7 @@ await using var database = await FortuneDatabase.CreateAsync(
     configuration["DATABASE"],
     configuration["DRIVER"],
     configuration["CONNECTION_STRING"]);
+await database.ValidateAsync(CancellationToken.None);
 BenchmarkApplication.Database = database;
 DateHeader.SyncDateTimer();
 

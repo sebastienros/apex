@@ -15,6 +15,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="../Apex.Fortunes.Common/FortuneResultValidator.cs"
+             Link="FortuneResultValidator.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Npgsql" />
     <PackageReference Include="MySqlConnector" />
     <PackageReference Include="Microsoft.Data.SqlClient" />

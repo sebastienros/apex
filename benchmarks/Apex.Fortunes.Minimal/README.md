@@ -15,6 +15,8 @@ Set the following configuration values as environment variables or equivalent .N
 | `CONNECTION_STRING` | Connection string for the selected database |
 
 Invalid, unsupported, or missing selections fail application startup with an explicit error.
+Before announcing readiness, the application loads and validates all 12 canonical database
+fortunes plus the request-time fortune, including IDs, exact messages, and sort order.
 The Crank config defaults `branchOrCommit` to `main`; override it when benchmarking an
 unmerged branch.
 

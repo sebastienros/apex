@@ -14,6 +14,8 @@ Set all of these environment variables before starting the app:
 | `DRIVER` | PostgreSQL: `apex` or `npgsql`; MySQL: `apex` or `mysqlconnector`; SQL Server: `apex` or `microsoftdatasqlclient` |
 | `CONNECTION_STRING` | Connection string for the selected database and driver |
 
+Before announcing readiness, the application loads and validates all 12 canonical database
+fortunes plus the request-time fortune, including IDs, exact messages, and sort order.
 The Crank config defaults `branchOrCommit` to `main`; override it when benchmarking an
 unmerged branch.
 
