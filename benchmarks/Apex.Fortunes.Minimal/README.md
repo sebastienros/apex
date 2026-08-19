@@ -22,13 +22,13 @@ unmerged branch.
 
 PostgreSQL uses `PgPipelinePool`, a pool-wide prepared statement, and `CollectAsync`; its hot
 path retains each `message` as `ReadOnlyMemory<byte>` and renders the `Utf8Fortunes` view.
-Drivers that expose text as strings use the string-based `Fortune` model and `Fortunes` view
-without converting the message back to UTF-8. `APEX_CONNECTIONS` defaults to 56 and
-`APEX_PIPELINING` defaults to 16.
+Npgsql uses a slim data source and reads each message as `byte[]` through the same UTF-8 view.
+Drivers that expose text as strings use the string-based `Fortune` model and `Fortunes` view.
+`DATABASE_CONNECTIONS` defaults to 56 and `APEX_PIPELINING` defaults to 16.
 
 MySQL uses `MySqlPool` with `CachePreparedStatements=true` and a parameterized query, which
-activates its per-connection prepared-statement cache. `APEX_CONNECTIONS` defaults to 64.
+activates its per-connection prepared-statement cache. `DATABASE_CONNECTIONS` defaults to 64.
 
 SQL Server uses `MsSqlPool` with a borrowed row reader and no PostgreSQL-style pipelining.
-`APEX_CONNECTIONS` defaults to 64. Standard drivers use matching maximum pool sizes and issue
-prepared, parameterized asynchronous commands.
+`DATABASE_CONNECTIONS` defaults to 64. Standard drivers use matching maximum pool sizes and
+asynchronous commands.

@@ -27,28 +27,28 @@ internal abstract class FortuneDatabase : IAsyncDisposable
         {
             ("postgresql", "apex") => ApexPostgreSqlFortuneDatabase.CreateAsync(
                 connectionString,
-                PositiveSetting(configuration, "APEX_CONNECTIONS", 56),
+                PositiveSetting(configuration, "DATABASE_CONNECTIONS", 56),
                 PositiveSetting(configuration, "APEX_PIPELINING", 16)),
             ("postgresql", "npgsql") => ValueTask.FromResult<FortuneDatabase>(
                 new NpgsqlFortuneDatabase(
                     connectionString,
-                    PositiveSetting(configuration, "APEX_CONNECTIONS", 56))),
+                    PositiveSetting(configuration, "DATABASE_CONNECTIONS", 56))),
             ("mysql", "apex") => ValueTask.FromResult<FortuneDatabase>(
                 new ApexMySqlFortuneDatabase(
                     connectionString,
-                    PositiveSetting(configuration, "APEX_CONNECTIONS", 64))),
+                    PositiveSetting(configuration, "DATABASE_CONNECTIONS", 64))),
             ("mysql", "mysqlconnector") => ValueTask.FromResult<FortuneDatabase>(
                 new MySqlConnectorFortuneDatabase(
                     connectionString,
-                    PositiveSetting(configuration, "APEX_CONNECTIONS", 64))),
+                    PositiveSetting(configuration, "DATABASE_CONNECTIONS", 64))),
             ("sqlserver", "apex") => ValueTask.FromResult<FortuneDatabase>(
                 new ApexSqlServerFortuneDatabase(
                     connectionString,
-                    PositiveSetting(configuration, "APEX_CONNECTIONS", 64))),
+                    PositiveSetting(configuration, "DATABASE_CONNECTIONS", 64))),
             ("sqlserver", "microsoftdatasqlclient") => ValueTask.FromResult<FortuneDatabase>(
                 new MicrosoftDataSqlClientFortuneDatabase(
                     connectionString,
-                    PositiveSetting(configuration, "APEX_CONNECTIONS", 64))),
+                    PositiveSetting(configuration, "DATABASE_CONNECTIONS", 64))),
             _ => throw new InvalidOperationException("The database selection is invalid."),
         };
     }
@@ -289,9 +289,8 @@ internal sealed class ApexSqlServerFortuneDatabase : StringFortuneDatabase
     public override ValueTask DisposeAsync() => _pool.DisposeAsync();
 }
 
-internal sealed class NpgsqlFortuneDatabase : StringFortuneDatabase
+internal sealed class NpgsqlFortuneDatabase : Utf8FortuneDatabase
 {
-    private const string ParameterizedQuery = Query + " WHERE $1 = 1";
     private readonly NpgsqlDataSource _dataSource;
 
     public NpgsqlFortuneDatabase(string connectionString, int connectionCount)
@@ -300,20 +299,22 @@ internal sealed class NpgsqlFortuneDatabase : StringFortuneDatabase
         {
             MaxPoolSize = connectionCount,
         };
-        _dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
+        _dataSource = new NpgsqlSlimDataSourceBuilder(builder.ConnectionString).Build();
     }
 
-    public override async ValueTask<List<Fortune>> LoadAsync(CancellationToken cancellationToken)
+    public override async ValueTask<List<Utf8Fortune>> LoadAsync(
+        CancellationToken cancellationToken)
     {
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(ParameterizedQuery, connection);
-        command.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 1 });
-        await command.PrepareAsync(cancellationToken);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        List<Fortune> fortunes = [];
+        using var connection = _dataSource.CreateConnection();
+        await connection.OpenAsync(cancellationToken);
+        using var command = new NpgsqlCommand(Query, connection);
+        using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        List<Utf8Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
-            fortunes.Add(new Fortune(reader.GetInt32(0), reader.GetString(1)));
+            fortunes.Add(new Utf8Fortune(
+                reader.GetInt32(0),
+                reader.GetFieldValue<byte[]>(1)));
         }
 
         return Complete(fortunes);

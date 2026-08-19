@@ -26,7 +26,7 @@ jobs:
       DATABASE: postgresql
       DRIVER: apex
       CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;Password=benchmarkdbpass"
-      APEX_CONNECTIONS: 56
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
       APEX_PIPELINING: 64
 
   platform-postgresql-npgsql:
@@ -45,8 +45,8 @@ jobs:
     environmentVariables:
       DATABASE: postgresql
       DRIVER: npgsql
-      CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;Password=benchmarkdbpass"
-      APEX_CONNECTIONS: 56
+      CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;Password=benchmarkdbpass;Maximum Pool Size={{ cores | minus: 2 }};NoResetOnClose=true;Enlist=false;Max Auto Prepare=4"
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   platform-mysql-apex:
     source:
@@ -65,7 +65,7 @@ jobs:
       DATABASE: mysql
       DRIVER: apex
       CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;Password=benchmarkdbpass;SslMode=Disabled;AllowPublicKeyRetrieval=true"
-      APEX_CONNECTIONS: 64
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   platform-mysql-mysqlconnector:
     source:
@@ -83,8 +83,8 @@ jobs:
     environmentVariables:
       DATABASE: mysql
       DRIVER: mysqlconnector
-      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;Password=benchmarkdbpass;SslMode=Disabled;AllowPublicKeyRetrieval=true"
-      APEX_CONNECTIONS: 64
+      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;Password=benchmarkdbpass;SslMode=Disabled;AllowPublicKeyRetrieval=true;Connection Reset=false;Auto Enlist=false;Default Command Timeout=0;Use Affected Rows=true;Minimum Pool Size={{ cores | minus: 2 }};Maximum Pool Size={{ cores | minus: 2 }}"
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   platform-sqlserver-apex:
     source:
@@ -103,7 +103,7 @@ jobs:
       DATABASE: sqlserver
       DRIVER: apex
       CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=sa;Password=Benchmarkdbp@55;Encrypt=false;TrustServerCertificate=true"
-      APEX_CONNECTIONS: 64
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   platform-sqlserver-microsoftdatasqlclient:
     source:
@@ -122,7 +122,7 @@ jobs:
       DATABASE: sqlserver
       DRIVER: microsoftdatasqlclient
       CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=sa;Password=Benchmarkdbp@55;Encrypt=false;TrustServerCertificate=true"
-      APEX_CONNECTIONS: 64
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   postgresql:
     source:
