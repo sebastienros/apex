@@ -52,6 +52,9 @@ public sealed partial class MySqlConnection
         private bool _resultEnded;
         private readonly bool _adoResultBoundaries;
         private bool _nextAwaitingStart;
+        private int _lastAdvanceReason;
+        private int _rowGeneration;
+        private int _advanceGeneration;
         private long _recordsAffected = -1;
         private int _disposed;
 
@@ -136,7 +139,15 @@ public sealed partial class MySqlConnection
                 advanceResult = _resultEnded;
             }
 
-            if (advanceRow) _advance.Set();
+            if (advanceRow)
+            {
+                lock (_gate)
+                {
+                    _lastAdvanceReason = 1;
+                    _advanceGeneration = _rowGeneration;
+                }
+                _advance.Set();
+            }
             if (advanceResult) _resultAdvance!.Set();
             return AwaitNextResultAsync(wait, cancellationToken);
         }
@@ -166,6 +177,8 @@ public sealed partial class MySqlConnection
                 {
                     if (_hasCurrent)
                     {
+                        _lastAdvanceReason = 2;
+                        _advanceGeneration = _rowGeneration;
                         _advance.Set();
                     }
 
@@ -205,6 +218,11 @@ public sealed partial class MySqlConnection
 
             if (advance)
             {
+                lock (_gate)
+                {
+                    _lastAdvanceReason = 3;
+                    _advanceGeneration = _rowGeneration;
+                }
                 _advance.Set();
             }
 
@@ -386,6 +404,8 @@ public sealed partial class MySqlConnection
             lock (_gate)
             {
                 _stopped = true;
+                _lastAdvanceReason = 4;
+                _advanceGeneration = _rowGeneration;
             }
 
             _advance.Set();
@@ -538,6 +558,7 @@ public sealed partial class MySqlConnection
                             _current = packet;
                             _hasCurrent = true;
                             _currentDelivered = false;
+                            _rowGeneration++;
                             retained = true;
                         }
                     }
@@ -603,6 +624,11 @@ public sealed partial class MySqlConnection
                   ? _readCancellationToken
                   : _operationCancellationToken;
                 advance = !_hasCurrent || !_currentDelivered;
+                if (advance)
+                {
+                    _lastAdvanceReason = 5;
+                    _advanceGeneration = _rowGeneration;
+                }
                 if (_sent)
                 {
                     _cancelRequest ??= _connection.CancelRunningCommandAsync();
@@ -729,7 +755,12 @@ public sealed partial class MySqlConnection
                 ThrowIfError();
                 if (!_hasCurrent || _decoder is null)
                 {
-                    throw new InvalidOperationException("ReadAsync must return true first.");
+                    throw new InvalidOperationException(
+                        $"ReadAsync must return true first. Current={_hasCurrent}, " +
+                        $"delivered={_currentDelivered}, pending={_readPending}, " +
+                        $"completed={_completed}, stopped={_stopped}, canceled={_canceled}, " +
+                        $"rowGeneration={_rowGeneration}, advanceGeneration={_advanceGeneration}, " +
+                        $"advanceReason={_lastAdvanceReason}.");
                 }
             }
         }
