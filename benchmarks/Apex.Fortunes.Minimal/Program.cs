@@ -17,9 +17,9 @@ switch (database)
     case Utf8FortuneDatabase utf8Database:
         app.MapGet(
             "/fortunes",
-            async (HtmlEncoder htmlEncoder, CancellationToken cancellationToken) =>
+            async (HtmlEncoder htmlEncoder) =>
             {
-                var fortunes = await utf8Database.LoadAsync(cancellationToken);
+                var fortunes = await utf8Database.LoadAsync(CancellationToken.None);
                 var template = Utf8Fortunes.Create(fortunes);
                 template.HtmlEncoder = htmlEncoder;
                 return template;
@@ -28,9 +28,9 @@ switch (database)
     case StringFortuneDatabase stringDatabase:
         app.MapGet(
             "/fortunes",
-            async (HtmlEncoder htmlEncoder, CancellationToken cancellationToken) =>
+            async (HtmlEncoder htmlEncoder) =>
             {
-                var fortunes = await stringDatabase.LoadAsync(cancellationToken);
+                var fortunes = await stringDatabase.LoadAsync(CancellationToken.None);
                 var template = Fortunes.Create(fortunes);
                 template.HtmlEncoder = htmlEncoder;
                 return template;
