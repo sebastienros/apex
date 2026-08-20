@@ -45,7 +45,8 @@ internal abstract class FortuneDatabase : IAsyncDisposable
                 new ApexAdoStringFortuneDatabase(
                     new MySqlDbDataSource(
                         connectionString,
-                        PoolOptions(configuration, 64)))),
+                        PoolOptions(configuration, 64)),
+                    unsignedId: true)),
             ("mysql", "mysqlconnector") => ValueTask.FromResult<FortuneDatabase>(
                 new MySqlConnectorFortuneDatabase(
                     connectionString,
@@ -285,10 +286,12 @@ internal sealed class ApexAdoPostgreSqlFortuneDatabase : Utf8FortuneDatabase
 internal sealed class ApexAdoStringFortuneDatabase : StringFortuneDatabase
 {
     private readonly DbDataSource _dataSource;
+    private readonly bool _unsignedId;
 
-    public ApexAdoStringFortuneDatabase(DbDataSource dataSource)
+    public ApexAdoStringFortuneDatabase(DbDataSource dataSource, bool unsignedId = false)
     {
         _dataSource = dataSource;
+        _unsignedId = unsignedId;
     }
 
     public override async ValueTask<List<Fortune>> LoadAsync(CancellationToken cancellationToken)
@@ -299,7 +302,10 @@ internal sealed class ApexAdoStringFortuneDatabase : StringFortuneDatabase
         List<Fortune> fortunes = [];
         while (await reader.ReadAsync(cancellationToken))
         {
-            fortunes.Add(new Fortune(reader.GetInt32(0), reader.GetString(1)));
+            var id = _unsignedId
+                ? checked((int)reader.GetFieldValue<uint>(0))
+                : reader.GetInt32(0);
+            fortunes.Add(new Fortune(id, reader.GetString(1)));
         }
 
         return Complete(fortunes);
