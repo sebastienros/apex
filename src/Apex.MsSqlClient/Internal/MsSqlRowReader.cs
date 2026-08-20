@@ -783,16 +783,16 @@ internal sealed class MsSqlRowReader :
         lock (_gate)
         {
             if (!_adoResultBoundaries) return;
-            if (hasRows)
-            {
-                _currentDelivered = true;
-            }
             initialization = _initialization;
             _initialization = null;
             nextResult = !_nextAwaitingStart ? _nextResult : null;
             if (nextResult is not null)
             {
                 _nextResult = null;
+            }
+            if (hasRows && (initialization is not null || nextResult is not null))
+            {
+                _currentDelivered = true;
             }
         }
 
@@ -883,7 +883,7 @@ internal sealed class MsSqlRowReader :
         bool signal;
         lock (_gate)
         {
-            signal = _readPending && !_readSignaled;
+            signal = _readPending && !_readSignaled && (!result || !_currentDelivered);
             _readSignaled |= signal;
             if (signal && result)
             {
