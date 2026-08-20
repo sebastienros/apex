@@ -128,10 +128,11 @@ public sealed class PgDbDataSource : DbDataSource
 {
     private readonly string _connectionString;
     private readonly PgPool _pool;
-    public PgDbDataSource(string connectionString)
+    public PgDbDataSource(string connectionString) : this(connectionString, null) { }
+    public PgDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
     {
         _connectionString = connectionString;
-        _pool = PgPool.Create(PgConnectOptions.Parse(connectionString));
+        _pool = PgPool.Create(PgConnectOptions.Parse(connectionString), poolOptions);
     }
 
     public override string ConnectionString => _connectionString;

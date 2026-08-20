@@ -76,6 +76,8 @@ non-boxing `SqlValue`, and borrowed-reader access, prefer the direct Apex APIs a
 Connections created by a data source remain bound to that source's pool and reject
 `ConnectionString` changes. Commands created directly by a data source lease a
 connection for execution and return it when execution or its reader completes.
+The provider data sources accept `SqlPoolOptions` when pool sizing or lifetime settings
+need to be tuned.
 `DbBatch` preserves command order and transaction semantics; it does not imply a
 single wire round trip when the provider cannot represent the batch natively.
 

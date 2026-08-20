@@ -121,10 +121,11 @@ public sealed class MsSqlDbDataSource : DbDataSource
 {
     private readonly string _connectionString;
     private readonly MsSqlPool _pool;
-    public MsSqlDbDataSource(string connectionString)
+    public MsSqlDbDataSource(string connectionString) : this(connectionString, null) { }
+    public MsSqlDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
     {
         _connectionString = connectionString;
-        _pool = MsSqlPool.Create(MsSqlConnectOptions.Parse(connectionString));
+        _pool = MsSqlPool.Create(MsSqlConnectOptions.Parse(connectionString), poolOptions);
     }
 
     public override string ConnectionString => _connectionString;

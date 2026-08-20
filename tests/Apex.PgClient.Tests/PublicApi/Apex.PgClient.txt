@@ -202,6 +202,7 @@ class Apex.PgClient.PgDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Col
   Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
 class Apex.PgClient.PgDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(System.String)
+  Constructor: Void .ctor(System.String, Apex.SqlClient.SqlPoolOptions)
   Method: System.String get_ConnectionString()
   Property: System.String ConnectionString
 class Apex.PgClient.PgDbParameter : Apex.SqlClient.ApexDbParameter, System.Data.IDataParameter, System.Data.IDbDataParameter

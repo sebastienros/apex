@@ -121,10 +121,11 @@ public sealed class MySqlDbDataSource : DbDataSource
 {
     private readonly string _connectionString;
     private readonly MySqlPool _pool;
-    public MySqlDbDataSource(string connectionString)
+    public MySqlDbDataSource(string connectionString) : this(connectionString, null) { }
+    public MySqlDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
     {
         _connectionString = connectionString;
-        _pool = MySqlPool.Create(connectionString);
+        _pool = MySqlPool.Create(connectionString, poolOptions);
     }
 
     public override string ConnectionString => _connectionString;

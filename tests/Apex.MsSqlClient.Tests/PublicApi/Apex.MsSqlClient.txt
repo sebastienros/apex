@@ -82,6 +82,7 @@ class Apex.MsSqlClient.MsSqlDbDataReader : Apex.SqlClient.ApexDbDataReader, Syst
   Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
 class Apex.MsSqlClient.MsSqlDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(System.String)
+  Constructor: Void .ctor(System.String, Apex.SqlClient.SqlPoolOptions)
   Method: System.String get_ConnectionString()
   Property: System.String ConnectionString
 class Apex.MsSqlClient.MsSqlDbParameter : Apex.SqlClient.ApexDbParameter, System.Data.IDataParameter, System.Data.IDbDataParameter
