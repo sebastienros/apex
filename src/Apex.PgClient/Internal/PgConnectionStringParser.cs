@@ -42,8 +42,8 @@ internal static class PgConnectionStringParser
             }
 
             SkipWhitespace(input, ref position);
-            var value = position < input.Length && input[position] == '\''
-              ? ParseQuoted(input, ref position)
+            var value = position < input.Length && input[position] is '\'' or '"'
+              ? ParseQuoted(input, ref position, input[position])
               : ParseUnquoted(input, ref position);
             values[key] = value;
         }
@@ -51,15 +51,25 @@ internal static class PgConnectionStringParser
         return values;
     }
 
-    private static string ParseQuoted(ReadOnlySpan<char> input, ref int position)
+    private static string ParseQuoted(
+        ReadOnlySpan<char> input,
+        ref int position,
+        char quote)
     {
         position++;
         System.Text.StringBuilder value = new();
         while (position < input.Length)
         {
             var current = input[position++];
-            if (current == '\'')
+            if (current == quote)
             {
+                if (position < input.Length && input[position] == quote)
+                {
+                    position++;
+                    value.Append(quote);
+                    continue;
+                }
+
                 return value.ToString();
             }
 

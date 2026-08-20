@@ -77,12 +77,12 @@ public sealed class PgConnectOptionsTests
     {
         PgConnectOptions options = PgConnectOptions.Parse(
           "Host=db.example;Port=5544;Username=app;Pass" +
-          "word=secret;Database=app;sslmode=disable");
+          "word=\"secret value;with \"\"quotes\"\"\";Database=app;sslmode=disable");
 
         Assert.AreEqual("db.example", options.Host);
         Assert.AreEqual(5544, options.Port);
         Assert.AreEqual("app", options.Username);
-        Assert.AreEqual("secret", options.Password);
+        Assert.AreEqual("secret value;with \"quotes\"", options.Password);
         Assert.AreEqual("app", options.Database);
         Assert.AreEqual(PgSslMode.Disable, options.SslMode);
     }
