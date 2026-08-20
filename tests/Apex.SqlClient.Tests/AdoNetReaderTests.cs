@@ -611,8 +611,13 @@ public sealed class AdoNetReaderTests
         public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return ValueTask.FromResult(
-                _result < _results.Length && _results[_result].Length > 0);
+            if (_result >= _results.Length || _results[_result].Length == 0)
+            {
+                return ValueTask.FromResult(false);
+            }
+
+            _currentRow = _nextRow++;
+            return ValueTask.FromResult(true);
         }
         public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
         {
@@ -666,7 +671,6 @@ public sealed class AdoNetReaderTests
         private readonly object?[][][] _results;
         private int _result;
         private int _row = -1;
-        private bool _prefetched;
 
         public TestMultiResultReader(object?[][][] results) => _results = results;
         public IReadOnlyList<SqlColumn> Columns => ColumnDefinitions;
@@ -680,7 +684,6 @@ public sealed class AdoNetReaderTests
             }
 
             _row = 0;
-            _prefetched = true;
             return ValueTask.FromResult(true);
         }
         public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
@@ -688,19 +691,12 @@ public sealed class AdoNetReaderTests
             cancellationToken.ThrowIfCancellationRequested();
             _result++;
             _row = -1;
-            _prefetched = false;
             return ValueTask.FromResult(_result < _results.Length);
         }
         public ValueTask<bool> ReadAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (_result >= _results.Length) return ValueTask.FromResult(false);
-            if (_prefetched)
-            {
-                _prefetched = false;
-                return ValueTask.FromResult(true);
-            }
-
             _row++;
             return ValueTask.FromResult(_row < _results[_result].Length);
         }

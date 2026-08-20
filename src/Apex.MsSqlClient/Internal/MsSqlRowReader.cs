@@ -127,7 +127,11 @@ internal sealed class MsSqlRowReader :
         lock (_gate)
         {
             ThrowIfError();
-            if (_hasCurrent) return ValueTask.FromResult(true);
+            if (_hasCurrent)
+            {
+                _currentDelivered = true;
+                return ValueTask.FromResult(true);
+            }
             if (_resultEnded || _completed) return ValueTask.FromResult(false);
             _initialization ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
             wait = _initialization.Task;
@@ -779,6 +783,10 @@ internal sealed class MsSqlRowReader :
         lock (_gate)
         {
             if (!_adoResultBoundaries) return;
+            if (hasRows)
+            {
+                _currentDelivered = true;
+            }
             initialization = _initialization;
             _initialization = null;
             nextResult = !_nextAwaitingStart ? _nextResult : null;

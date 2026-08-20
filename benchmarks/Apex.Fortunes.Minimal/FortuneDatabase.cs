@@ -266,26 +266,18 @@ internal sealed class ApexAdoPostgreSqlFortuneDatabase : Utf8FortuneDatabase
     public override async ValueTask<List<Utf8Fortune>> LoadAsync(
         CancellationToken cancellationToken)
     {
-        try
+        await using var command = _dataSource.CreateCommand(Query);
+        command.CommandTimeout = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        List<Utf8Fortune> fortunes = [];
+        while (await reader.ReadAsync(cancellationToken))
         {
-            await using var command = _dataSource.CreateCommand(Query);
-            command.CommandTimeout = 0;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            List<Utf8Fortune> fortunes = [];
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                fortunes.Add(new Utf8Fortune(
-                    reader.GetInt32(0),
-                    reader.GetFieldValue<ReadOnlyMemory<byte>>(1)));
-            }
+            fortunes.Add(new Utf8Fortune(
+                reader.GetInt32(0),
+                reader.GetFieldValue<ReadOnlyMemory<byte>>(1)));
+        }
 
-            return Complete(fortunes);
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine(exception);
-            throw;
-        }
+        return Complete(fortunes);
     }
 
     public override ValueTask DisposeAsync() => _dataSource.DisposeAsync();
@@ -304,27 +296,19 @@ internal sealed class ApexAdoStringFortuneDatabase : StringFortuneDatabase
 
     public override async ValueTask<List<Fortune>> LoadAsync(CancellationToken cancellationToken)
     {
-        try
+        await using var command = _dataSource.CreateCommand(Query);
+        command.CommandTimeout = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        List<Fortune> fortunes = [];
+        while (await reader.ReadAsync(cancellationToken))
         {
-            await using var command = _dataSource.CreateCommand(Query);
-            command.CommandTimeout = 0;
-            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-            List<Fortune> fortunes = [];
-            while (await reader.ReadAsync(cancellationToken))
-            {
-                var id = _unsignedId
-                    ? checked((int)reader.GetFieldValue<uint>(0))
-                    : reader.GetInt32(0);
-                fortunes.Add(new Fortune(id, reader.GetString(1)));
-            }
+            var id = _unsignedId
+                ? checked((int)reader.GetFieldValue<uint>(0))
+                : reader.GetInt32(0);
+            fortunes.Add(new Fortune(id, reader.GetString(1)));
+        }
 
-            return Complete(fortunes);
-        }
-        catch (Exception exception)
-        {
-            Console.Error.WriteLine(exception);
-            throw;
-        }
+        return Complete(fortunes);
     }
 
     public override ValueTask DisposeAsync() => _dataSource.DisposeAsync();

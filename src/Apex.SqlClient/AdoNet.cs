@@ -588,7 +588,6 @@ public class ApexDbDataReader : DbDataReader
     private IReadOnlyList<SqlColumn> _columns;
     private bool _hasRowsInResult;
     private bool _prefetchedRow;
-    private bool _prefetchedNeedsDelivery;
     private byte[]?[]? _bytes;
     private string?[]? _chars;
 
@@ -687,33 +686,12 @@ public class ApexDbDataReader : DbDataReader
         if (_returnedSingleRow && (_behavior & CommandBehavior.SingleRow) != 0) return Task.FromResult(false);
         if (_prefetchedRow)
         {
-            if (_prefetchedNeedsDelivery)
-            {
-                return DeliverPrefetchedRowAsync(cancellationToken);
-            }
-
             _prefetchedRow = false;
             _returnedSingleRow = true;
             return Task.FromResult(true);
         }
 
         return ReadCoreAsync(cancellationToken);
-    }
-    private async Task<bool> DeliverPrefetchedRowAsync(CancellationToken cancellationToken)
-    {
-        ArmTimeout();
-        try
-        {
-            var read = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            _prefetchedRow = false;
-            _prefetchedNeedsDelivery = false;
-            _returnedSingleRow |= read;
-            return read;
-        }
-        finally
-        {
-            DisarmTimeout();
-        }
     }
     private async Task<bool> ReadCoreAsync(CancellationToken cancellationToken)
     {
@@ -762,13 +740,11 @@ public class ApexDbDataReader : DbDataReader
             {
                 _hasRowsInResult = await bounded.InitializeAsync(cancellationToken).ConfigureAwait(false);
                 _prefetchedRow = _hasRowsInResult;
-                _prefetchedNeedsDelivery = _prefetchedRow;
             }
             else
             {
                 _prefetchedRow = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
                 _hasRowsInResult = _prefetchedRow;
-                _prefetchedNeedsDelivery = false;
             }
             ClearValueCaches();
             return true;
@@ -783,13 +759,7 @@ public class ApexDbDataReader : DbDataReader
     {
         if (_prefetchedRow)
         {
-            if (_prefetchedNeedsDelivery)
-            {
-                _ = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            }
-
             _prefetchedRow = false;
-            _prefetchedNeedsDelivery = false;
         }
 
         while (await _reader.ReadAsync(cancellationToken).ConfigureAwait(false))
@@ -847,7 +817,6 @@ public class ApexDbDataReader : DbDataReader
         _returnedSingleRow = false;
         _hasRowsInResult = false;
         _prefetchedRow = false;
-        _prefetchedNeedsDelivery = false;
         ClearValueCaches();
     }
 
@@ -860,12 +829,10 @@ public class ApexDbDataReader : DbDataReader
                 _hasRowsInResult = await bounded.InitializeAsync(cancellationToken).ConfigureAwait(false);
                 _columns = _reader.Columns;
                 _prefetchedRow = _hasRowsInResult;
-                _prefetchedNeedsDelivery = _prefetchedRow;
                 return;
             }
 
             _prefetchedRow = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
-            _prefetchedNeedsDelivery = false;
             _hasRowsInResult = _prefetchedRow;
             _columns = _reader.Columns;
         }
