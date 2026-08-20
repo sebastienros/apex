@@ -11,7 +11,7 @@ using Apex.SqlClient.Internal;
 namespace Apex.MySqlClient;
 
 /// <summary>A direct connection to a MySQL or MariaDB server.</summary>
-public sealed partial class MySqlConnection : ISqlConnection
+public sealed partial class MySqlConnection : ISqlConnection, IApexAdoReaderConnection
 {
     private static readonly Encoding s_utf8 = new UTF8Encoding(false, true);
     private readonly MySqlConnectOptions _options;

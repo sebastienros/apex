@@ -169,7 +169,7 @@ class Apex.MySqlClient.MySqlConnectOptions : Apex.SqlClient.SqlConnectOptions, S
   Property: System.Net.Security.RemoteCertificateValidationCallback CertificateValidationCallback
   Property: System.Security.Cryptography.X509Certificates.X509RevocationMode CertificateRevocationCheckMode
   Property: System.String ServerRsaPublicKey
-class Apex.MySqlClient.MySqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+class Apex.MySqlClient.MySqlConnection : Apex.SqlClient.IApexAdoReaderConnection, Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
   Method: Apex.MySqlClient.MySqlCommandInfo get_LastCommandInfo()
   Method: Apex.MySqlClient.MySqlServerStatus get_ServerStatus()
   Method: Apex.MySqlClient.MySqlServerVersion get_ServerVersion()
@@ -197,6 +197,41 @@ class Apex.MySqlClient.MySqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClie
   Property: Boolean IsSecure
   Property: System.Collections.Generic.IReadOnlyList`1[Apex.MySqlClient.MySqlColumnMetadata] LastColumns
   Property: UInt32 ConnectionId
+class Apex.MySqlClient.MySqlDbBatch : Apex.SqlClient.ApexDbBatch, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+class Apex.MySqlClient.MySqlDbBatchCommand : Apex.SqlClient.ApexDbBatchCommand
+  Constructor: Void .ctor()
+class Apex.MySqlClient.MySqlDbBatchCommandCollection : Apex.SqlClient.ApexDbBatchCommandCollection, System.Collections.Generic.ICollection`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IEnumerable`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IList`1[System.Data.Common.DbBatchCommand], System.Collections.IEnumerable
+  Constructor: Void .ctor()
+class Apex.MySqlClient.MySqlDbCommand : Apex.SqlClient.ApexDbCommand, System.ComponentModel.IComponent, System.Data.IDbCommand, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+  Constructor: Void .ctor(Apex.MySqlClient.MySqlDbConnection)
+class Apex.MySqlClient.MySqlDbConnection : Apex.SqlClient.ApexDbConnection, System.ComponentModel.IComponent, System.Data.IDbConnection, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+  Constructor: Void .ctor(System.String)
+class Apex.MySqlClient.MySqlDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
+class Apex.MySqlClient.MySqlDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(System.String)
+  Constructor: Void .ctor(System.String, Apex.SqlClient.SqlPoolOptions)
+  Method: System.String get_ConnectionString()
+  Property: System.String ConnectionString
+class Apex.MySqlClient.MySqlDbParameter : Apex.SqlClient.ApexDbParameter, System.Data.IDataParameter, System.Data.IDbDataParameter
+  Constructor: Void .ctor()
+class Apex.MySqlClient.MySqlDbParameterCollection : Apex.SqlClient.ApexDbParameterCollection, System.Collections.ICollection, System.Collections.IEnumerable, System.Collections.IList, System.Data.IDataParameterCollection
+  Constructor: Void .ctor()
+class Apex.MySqlClient.MySqlDbProviderFactory : System.Data.Common.DbProviderFactory
+  Constructor: Void .ctor()
+  Field: Apex.MySqlClient.MySqlDbProviderFactory Instance
+  Method: Boolean get_CanCreateBatch()
+  Method: System.Data.Common.DbBatch CreateBatch()
+  Method: System.Data.Common.DbBatchCommand CreateBatchCommand()
+  Method: System.Data.Common.DbCommand CreateCommand()
+  Method: System.Data.Common.DbConnection CreateConnection()
+  Method: System.Data.Common.DbDataSource CreateDataSource(System.String)
+  Method: System.Data.Common.DbParameter CreateParameter()
+  Property: Boolean CanCreateBatch
+class Apex.MySqlClient.MySqlDbTransaction : Apex.SqlClient.ApexDbTransaction, System.Data.IDbTransaction, System.IAsyncDisposable, System.IDisposable
 struct Apex.MySqlClient.MySqlDecimal : System.IEquatable`1[Apex.MySqlClient.MySqlDecimal]
   Method: Apex.MySqlClient.MySqlDecimal Create(System.Numerics.BigInteger, Int32)
   Method: Apex.MySqlClient.MySqlDecimal Parse(System.String)

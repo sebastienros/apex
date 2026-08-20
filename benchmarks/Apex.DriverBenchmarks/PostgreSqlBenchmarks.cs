@@ -11,6 +11,8 @@ public class PostgreSqlBenchmarks
 {
     private const string RowsSql = "SELECT generate_series(1, 100)::int4";
     private PgConnection _apex = null!;
+    private PgDbConnection _ado = null!;
+    private System.Data.Common.DbCommand _adoRowsPrepared = null!;
     private ISqlPreparedStatement _apexPrepared = null!;
     private ISqlPreparedStatement _apexRowsPrepared = null!;
     private NpgsqlConnection _npgsql = null!;
@@ -41,6 +43,11 @@ public class PostgreSqlBenchmarks
         });
         _apexPrepared = await _apex.PrepareAsync("SELECT $1::int4");
         _apexRowsPrepared = await _apex.PrepareAsync(RowsSql);
+        _ado = new PgDbConnection(connectionString);
+        await _ado.OpenAsync();
+        _adoRowsPrepared = _ado.CreateCommand();
+        _adoRowsPrepared.CommandText = RowsSql;
+        await _adoRowsPrepared.PrepareAsync();
         _npgsqlPrepared = new NpgsqlCommand("SELECT $1::int4", _npgsql);
         _npgsqlPrepared.Parameters.Add(new NpgsqlParameter<int> { TypedValue = 42 });
         await _npgsqlPrepared.PrepareAsync();
@@ -56,6 +63,8 @@ public class PostgreSqlBenchmarks
         await _npgsqlRowsPrepared.DisposeAsync();
         await _npgsqlPrepared.DisposeAsync();
         await _apex.DisposeAsync();
+        await _adoRowsPrepared.DisposeAsync();
+        await _ado.DisposeAsync();
         await _npgsql.DisposeAsync();
     }
 
@@ -145,6 +154,19 @@ public class PostgreSqlBenchmarks
     {
         int sum = 0;
         await using ISqlRowReader reader = await _apexRowsPrepared.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0);
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public async Task<int> ApexAdoReader100RowsAsync()
+    {
+        await using var reader = await _adoRowsPrepared.ExecuteReaderAsync();
+        var sum = 0;
         while (await reader.ReadAsync())
         {
             sum += reader.GetInt32(0);
