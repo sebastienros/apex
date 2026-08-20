@@ -2,6 +2,8 @@
   <Folder Name="/benchmarks/">
     <Project Path="benchmarks/Apex.ComparisonHarness/Apex.ComparisonHarness.csproj" />
     <Project Path="benchmarks/Apex.DriverBenchmarks/Apex.DriverBenchmarks.csproj" />
+    <Project Path="benchmarks/Apex.Fortunes.Minimal/Apex.Fortunes.Minimal.csproj" />
+    <Project Path="benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj" />
     <Project Path="benchmarks/Apex.PipeliningApplication/Apex.PipeliningApplication.csproj" />
   </Folder>
   <Folder Name="/src/">

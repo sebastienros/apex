@@ -72,6 +72,34 @@ public sealed class PgTextCodecTests
     }
 
     [TestMethod]
+    public void DecodesVectorizedBitArrays()
+    {
+        var text = string.Concat(Enumerable.Range(0, 65).Select(
+            static index => index % 3 == 0 ? '1' : '0'));
+        var value = Encoding.ASCII.GetBytes(text);
+        var expected = Enumerable.Range(0, value.Length)
+            .Select(static index => index % 3 == 0)
+            .ToArray();
+
+        CollectionAssert.AreEqual(
+            expected,
+            ToBooleans(PgTextCodec.DecodeBitArray(value)));
+
+        foreach (var invalidIndex in new[] { 0, 15, 16, 31, 32, 64 })
+        {
+            var invalid = value.ToArray();
+            invalid[invalidIndex] = (byte)'x';
+            Assert.ThrowsExactly<FormatException>(
+                () => PgTextCodec.DecodeBitArray(invalid));
+        }
+
+        var invalidTail = value.ToArray();
+        invalidTail[^1] = (byte)'/';
+        Assert.ThrowsExactly<FormatException>(
+            () => PgTextCodec.DecodeBitArray(invalidTail));
+    }
+
+    [TestMethod]
     public void FormatsBclScalarParameters()
     {
         Assert.AreEqual(
