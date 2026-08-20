@@ -120,6 +120,7 @@ class Apex.SqlClient.ApexDbDataReader : System.Data.Common.DbDataReader, System.
   Method: System.Threading.Tasks.Task`1[T] GetFieldValueAsync[T](Int32, System.Threading.CancellationToken)
   Method: System.Threading.Tasks.ValueTask DisposeAsync()
   Method: System.Type GetFieldType(Int32)
+  Method: T GetFieldValue[T](Int32)
   Method: Void Close()
   Property: Boolean HasRows
   Property: Boolean IsClosed

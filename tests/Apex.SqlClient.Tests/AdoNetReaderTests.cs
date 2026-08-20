@@ -26,6 +26,17 @@ public sealed class AdoNetReaderTests
     }
 
     [TestMethod]
+    public async Task GetFieldValueUsesNativeTypedAccessor()
+    {
+        ReadOnlyMemory<byte> value = "fortune"u8.ToArray();
+        await using var reader = new ApexDbDataReader(
+            new TestRowReader([[value]]), CommandBehavior.Default, null);
+
+        Assert.IsTrue(await reader.ReadAsync(CancellationToken.None));
+        Assert.AreEqual(value, reader.GetFieldValue<ReadOnlyMemory<byte>>(0));
+    }
+
+    [TestMethod]
     public async Task InitializationAndNextResultPreserveRowsAndMetadata()
     {
         await using var reader = new ApexDbDataReader(

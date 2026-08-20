@@ -651,6 +651,7 @@ public class ApexDbDataReader : DbDataReader
     public override string GetString(int ordinal) => _reader.GetString(ordinal);
     public override bool IsDBNull(int ordinal) => _reader.IsNull(ordinal);
     public override object GetValue(int ordinal) => _reader.Get<object>(ordinal) ?? DBNull.Value;
+    public override T GetFieldValue<T>(int ordinal) => _reader.Get<T>(ordinal);
     public override int GetValues(object[] values)
     {
         var count = Math.Min(values.Length, FieldCount);
