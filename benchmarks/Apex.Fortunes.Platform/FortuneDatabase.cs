@@ -96,6 +96,18 @@ internal abstract class FortuneDatabase : IAsyncDisposable
         };
     }
 
+    protected static string CreatePostgreSqlUri(string connectionString)
+    {
+        var options = CreatePostgreSqlOptions(
+            connectionString,
+            new PgConnectOptions().PipeliningLimit);
+        return new UriBuilder("postgresql", options.Host, options.Port, options.Database)
+        {
+            UserName = options.Username,
+            Password = options.Password,
+        }.Uri.AbsoluteUri;
+    }
+
     protected static int PositiveEnvironment(string name, int fallback)
     {
         var value = Environment.GetEnvironmentVariable(name);
@@ -225,7 +237,7 @@ internal sealed class ApexAdoPostgreSqlFortuneDatabase : Utf8FortuneDatabase
     public ApexAdoPostgreSqlFortuneDatabase(string connectionString)
     {
         _dataSource = new PgDbDataSource(
-            connectionString,
+            CreatePostgreSqlUri(connectionString),
             new SqlPoolOptions
             {
                 MaximumSize = PositiveEnvironment("DATABASE_CONNECTIONS", 56),
