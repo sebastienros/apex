@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Apex.SqlClient.Internal;
 
 namespace Apex.SqlClient.Tests;
@@ -16,7 +17,7 @@ public sealed class BoundedOrderedCommandSchedulerTests
     public async Task PipelinesOnlyTheConfiguredNumberInSubmissionOrder()
     {
         await using BoundedOrderedCommandScheduler scheduler = new(3, 4);
-        List<string> events = [];
+        ConcurrentQueue<string> events = [];
         (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
 
         var first = Execute(scheduler, 1, events: events);
@@ -30,31 +31,29 @@ public sealed class BoundedOrderedCommandSchedulerTests
         CollectionAssert.AreEqual(
           new[] { 1, 2, 3, 4 },
           await Task.WhenAll(first.AsTask(), second.AsTask(), third.AsTask(), fourth.AsTask()));
-        CollectionAssert.AreEqual(
-          new[]
-          {
-        "send-1",
-        "send-2",
-        "send-3",
-        "receive-1",
-        "receive-2",
-        "receive-3",
-        "send-4",
-        "receive-4",
-          },
-          events);
+        AssertEventOrder(events, "send-", "send-1", "send-2", "send-3", "send-4");
+        AssertEventOrder(
+          events,
+          "receive-",
+          "receive-1",
+          "receive-2",
+          "receive-3",
+          "receive-4");
+        Assert.IsLessThan(
+          EventIndex(events, "send-4"),
+          EventIndex(events, "receive-3"));
     }
 
     [TestMethod]
     public async Task FlushesOnceAfterEachAdmittedGroup()
     {
-        List<string> events = [];
+        ConcurrentQueue<string> events = [];
         await using BoundedOrderedCommandScheduler scheduler = new(
           3,
           4,
           flushBatchAsync: _ =>
           {
-              events.Add("flush");
+              events.Enqueue("flush");
               return ValueTask.CompletedTask;
           });
         (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
@@ -82,7 +81,7 @@ public sealed class BoundedOrderedCommandSchedulerTests
             "flush",
             "receive-4",
           },
-          events);
+          events.ToArray());
     }
 
     [TestMethod]
@@ -140,10 +139,82 @@ public sealed class BoundedOrderedCommandSchedulerTests
     }
 
     [TestMethod]
+    public async Task ReceivesEarlierResponseWhileLaterCommandIsSending()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(2, 2);
+        var firstReceiveStarted = NewGate();
+        var releaseSecondSend = NewGate();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+
+        var first = scheduler.ExecuteAsync(
+          static _ => ValueTask.CompletedTask,
+          _ =>
+          {
+              firstReceiveStarted.SetResult();
+              return ValueTask.FromResult(1);
+          });
+        var second = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              await firstReceiveStarted.Task.WaitAsync(cancellationToken);
+              await releaseSecondSend.Task.WaitAsync(cancellationToken);
+          },
+          static _ => ValueTask.FromResult(2));
+
+        releasePump.SetResult();
+        await blocker;
+        await firstReceiveStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseSecondSend.SetResult();
+
+        CollectionAssert.AreEqual(
+          new[] { 1, 2 },
+          await Task.WhenAll(first.AsTask(), second.AsTask())
+            .WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [TestMethod]
+    public async Task ReceivesWhileSharedFlushIsInProgress()
+    {
+        var flushStarted = NewGate();
+        var releaseFlush = NewGate();
+        var receiveStarted = NewGate();
+        await using BoundedOrderedCommandScheduler scheduler = new(
+          2,
+          2,
+          flushBatchAsync: async cancellationToken =>
+          {
+              flushStarted.SetResult();
+              await releaseFlush.Task.WaitAsync(cancellationToken);
+          });
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+
+        var first = scheduler.ExecuteAsync(
+          static _ => ValueTask.CompletedTask,
+          _ =>
+          {
+              receiveStarted.SetResult();
+              return ValueTask.FromResult(1);
+          },
+          flushBatch: true);
+        var second = Execute(scheduler, 2, flushBatch: true);
+
+        releasePump.SetResult();
+        await blocker;
+        await flushStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await receiveStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        releaseFlush.SetResult();
+
+        CollectionAssert.AreEqual(
+          new[] { 1, 2 },
+          await Task.WhenAll(first.AsTask(), second.AsTask())
+            .WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [TestMethod]
     public async Task BarrierExecutesAloneBetweenBatches()
     {
         await using BoundedOrderedCommandScheduler scheduler = new(3, 5);
-        List<string> events = [];
+        ConcurrentQueue<string> events = [];
         (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
 
         var first = Execute(scheduler, 1, events: events);
@@ -161,28 +232,35 @@ public sealed class BoundedOrderedCommandSchedulerTests
           barrier.AsTask(),
           fourth.AsTask(),
           fifth.AsTask());
-        CollectionAssert.AreEqual(
-          new[]
-          {
-        "send-1",
-        "send-2",
-        "receive-1",
-        "receive-2",
-        "send-3",
-        "receive-3",
-        "send-4",
-        "send-5",
-        "receive-4",
-        "receive-5",
-          },
-          events);
+        AssertEventOrder(
+          events,
+          "send-",
+          "send-1",
+          "send-2",
+          "send-3",
+          "send-4",
+          "send-5");
+        AssertEventOrder(
+          events,
+          "receive-",
+          "receive-1",
+          "receive-2",
+          "receive-3",
+          "receive-4",
+          "receive-5");
+        Assert.IsLessThan(
+          EventIndex(events, "send-3"),
+          EventIndex(events, "receive-2"));
+        Assert.IsLessThan(
+          EventIndex(events, "send-4"),
+          EventIndex(events, "receive-3"));
     }
 
     [TestMethod]
     public async Task CancellationBeforeSendSkipsTheCommand()
     {
         await using BoundedOrderedCommandScheduler scheduler = new(1, 3);
-        List<string> events = [];
+        ConcurrentQueue<string> events = [];
         using CancellationTokenSource cancellation = new();
         (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
 
@@ -208,7 +286,7 @@ public sealed class BoundedOrderedCommandSchedulerTests
           await Task.WhenAll(first.AsTask(), third.AsTask()));
         CollectionAssert.AreEqual(
           new[] { "send-1", "receive-1", "send-3", "receive-3" },
-          events);
+          events.ToArray());
     }
 
     [TestMethod]
@@ -261,19 +339,19 @@ public sealed class BoundedOrderedCommandSchedulerTests
     {
         await using BoundedOrderedCommandScheduler scheduler =
           new(2, 2, exception => exception is FatalTestException);
-        List<string> events = [];
+        ConcurrentQueue<string> events = [];
         InvalidOperationException nonfatal = new();
         (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
 
         var first = scheduler.ExecuteAsync(
           _ =>
           {
-              events.Add("send-1");
+              events.Enqueue("send-1");
               return ValueTask.CompletedTask;
           },
           _ =>
           {
-              events.Add("receive-1");
+              events.Enqueue("receive-1");
               return ValueTask.FromException<int>(nonfatal);
           });
         var second = Execute(scheduler, 2, events: events);
@@ -284,9 +362,8 @@ public sealed class BoundedOrderedCommandSchedulerTests
           nonfatal,
           await AssertValueTaskThrowsExactlyAsync<InvalidOperationException, int>(first));
         Assert.AreEqual(2, await second);
-        CollectionAssert.AreEqual(
-          new[] { "send-1", "send-2", "receive-1", "receive-2" },
-          events);
+        AssertEventOrder(events, "send-", "send-1", "send-2");
+        AssertEventOrder(events, "receive-", "receive-1", "receive-2");
     }
 
     [TestMethod]
@@ -391,7 +468,7 @@ public sealed class BoundedOrderedCommandSchedulerTests
         BoundedOrderedCommandScheduler scheduler,
         int value,
         Func<CancellationToken, ValueTask>? send = null,
-        List<string>? events = null,
+        ConcurrentQueue<string>? events = null,
         bool barrier = false,
         CancellationToken cancellationToken = default,
         bool flushBatch = false) =>
@@ -399,12 +476,12 @@ public sealed class BoundedOrderedCommandSchedulerTests
         send
         ?? (_ =>
         {
-            events?.Add($"send-{value}");
+            events?.Enqueue($"send-{value}");
             return ValueTask.CompletedTask;
         }),
         _ =>
         {
-            events?.Add($"receive-{value}");
+            events?.Enqueue($"receive-{value}");
             return ValueTask.FromResult(value);
         },
         barrier,
@@ -413,6 +490,17 @@ public sealed class BoundedOrderedCommandSchedulerTests
 
     private static TaskCompletionSource NewGate() =>
       new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static void AssertEventOrder(
+        ConcurrentQueue<string> events,
+        string prefix,
+        params string[] expected) =>
+      CollectionAssert.AreEqual(
+        expected,
+        events.Where(value => value.StartsWith(prefix, StringComparison.Ordinal)).ToArray());
+
+    private static int EventIndex(ConcurrentQueue<string> events, string expected) =>
+      Array.IndexOf(events.ToArray(), expected);
 
     private static async Task<(ValueTask<int> Command, TaskCompletionSource Release)> HoldPumpAsync(
         BoundedOrderedCommandScheduler scheduler)

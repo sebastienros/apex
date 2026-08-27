@@ -246,6 +246,52 @@ public sealed class PgConnectionWireTests
         listener.Stop();
     }
 
+    [TestMethod]
+    public async Task PipelinedSelectAndInsertMakeProgressUnderDuplexBackpressure()
+    {
+        const int payloadLength = 8 * 1024 * 1024;
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        TaskCompletionSource blockerReceived =
+          new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource releaseBlocker =
+          new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = RunDuplexBackpressureServerAsync(
+          listener,
+          blockerReceived,
+          releaseBlocker,
+          payloadLength);
+        await using var connection = await PgClient.ConnectAsync(new PgConnectOptions
+        {
+            Host = "127.0.0.1",
+            Port = port,
+            Username = "user",
+            Password = "pass",
+            Database = "db",
+            PipeliningLimit = 2,
+        });
+        using CancellationTokenSource barrier = new();
+
+        var blocker = connection.QueryAsync(
+          "SELECT 'blocker'::text",
+          barrier.Token).AsTask();
+        await blockerReceived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var select = connection.QueryAsync("SELECT * FROM values").AsTask();
+        var insert = connection.ExecuteAsync(
+          $"INSERT INTO values VALUES ('{new string('i', payloadLength)}')").AsTask();
+        releaseBlocker.SetResult();
+
+        await Task.WhenAll(blocker, select, insert).WaitAsync(TimeSpan.FromSeconds(15));
+        Assert.AreEqual("blocker", blocker.Result[0].GetString(0));
+        Assert.AreEqual(payloadLength, select.Result[0].GetString(0).Length);
+        Assert.AreEqual(1L, insert.Result.AffectedRows);
+
+        await connection.DisposeAsync();
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+        listener.Stop();
+    }
+
     private static async Task RunServerAsync(TcpListener listener)
     {
         using var client = await listener.AcceptTcpClientAsync();
@@ -403,22 +449,80 @@ public sealed class PgConnectionWireTests
         Assert.AreEqual((byte)'Q', type);
     }
 
-    private static async Task ReadStartupAsync(Stream stream)
+    private static async Task RunDuplexBackpressureServerAsync(
+        TcpListener listener,
+        TaskCompletionSource blockerReceived,
+        TaskCompletionSource releaseBlocker,
+        int payloadLength)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        using CancellationTokenSource timeout =
+          new(TimeSpan.FromSeconds(10));
+        client.Client.SendBufferSize = 4 * 1024;
+        client.Client.ReceiveBufferSize = 4 * 1024;
+        await using var stream = client.GetStream();
+        await ReadStartupAsync(stream, timeout.Token);
+        await WriteStartupCompleteAsync(stream, timeout.Token);
+
+        (var type, var payload) = await ReadMessageAsync(stream, timeout.Token);
+        Assert.AreEqual((byte)'Q', type);
+        Assert.AreEqual("SELECT 'blocker'::text", CStringValue(payload));
+        blockerReceived.SetResult();
+        await releaseBlocker.Task.WaitAsync(timeout.Token);
+        await WriteSingleTextResultAsync(stream, "blocker", timeout.Token);
+
+        (type, payload) = await ReadMessageAsync(stream, timeout.Token);
+        Assert.AreEqual((byte)'Q', type);
+        Assert.AreEqual("SELECT * FROM values", CStringValue(payload));
+        await WriteSingleTextResultAsync(
+          stream,
+          new string('s', payloadLength),
+          timeout.Token);
+
+        (type, payload) = await ReadMessageAsync(stream, timeout.Token);
+        Assert.AreEqual((byte)'Q', type);
+        ReadOnlySpan<byte> insertPrefix = "INSERT INTO values VALUES ("u8;
+        Assert.IsTrue(payload.AsSpan().StartsWith(insertPrefix));
+        await WriteMessageAsync(
+          stream,
+          (byte)'C',
+          CString("INSERT 0 1"),
+          timeout.Token);
+        await WriteMessageAsync(stream, (byte)'Z', [(byte)'I'], timeout.Token);
+
+        (type, payload) = await ReadMessageAsync(stream, timeout.Token);
+        Assert.AreEqual((byte)'X', type);
+        Assert.AreEqual(0, payload.Length);
+    }
+
+    private static async Task ReadStartupAsync(
+        Stream stream,
+        CancellationToken cancellationToken = default)
     {
         var startupLength = new byte[4];
-        await stream.ReadExactlyAsync(startupLength);
+        await stream.ReadExactlyAsync(startupLength, cancellationToken);
         var startupPayloadLength = BinaryPrimitives.ReadInt32BigEndian(startupLength) - 4;
         var startup = new byte[startupPayloadLength];
-        await stream.ReadExactlyAsync(startup);
+        await stream.ReadExactlyAsync(startup, cancellationToken);
         Assert.AreEqual(196608, BinaryPrimitives.ReadInt32BigEndian(startup));
     }
 
-    private static async Task WriteStartupCompleteAsync(Stream stream)
+    private static async Task WriteStartupCompleteAsync(
+        Stream stream,
+        CancellationToken cancellationToken = default)
     {
-        await WriteMessageAsync(stream, (byte)'R', Int32(0));
-        await WriteMessageAsync(stream, (byte)'S', Join(CString("server_version"), CString("16.4")));
-        await WriteMessageAsync(stream, (byte)'K', Join(Int32(123), Int32(456)));
-        await WriteMessageAsync(stream, (byte)'Z', [(byte)'I']);
+        await WriteMessageAsync(stream, (byte)'R', Int32(0), cancellationToken);
+        await WriteMessageAsync(
+          stream,
+          (byte)'S',
+          Join(CString("server_version"), CString("16.4")),
+          cancellationToken);
+        await WriteMessageAsync(
+          stream,
+          (byte)'K',
+          Join(Int32(123), Int32(456)),
+          cancellationToken);
+        await WriteMessageAsync(stream, (byte)'Z', [(byte)'I'], cancellationToken);
     }
 
     private static byte[] RowDescription() =>
@@ -462,23 +566,48 @@ public sealed class PgConnectionWireTests
         return Join(parts.ToArray());
     }
 
-    private static async Task WriteMessageAsync(Stream stream, byte type, byte[] payload)
+    private static async Task WriteSingleTextResultAsync(
+        Stream stream,
+        string value,
+        CancellationToken cancellationToken = default)
+    {
+        await WriteMessageAsync(
+          stream,
+          (byte)'T',
+          Join(Int16(1), Column("value", 25, -1)),
+          cancellationToken);
+        await WriteMessageAsync(stream, (byte)'D', DataRow(value), cancellationToken);
+        await WriteMessageAsync(
+          stream,
+          (byte)'C',
+          CString("SELECT 1"),
+          cancellationToken);
+        await WriteMessageAsync(stream, (byte)'Z', [(byte)'I'], cancellationToken);
+    }
+
+    private static async Task WriteMessageAsync(
+        Stream stream,
+        byte type,
+        byte[] payload,
+        CancellationToken cancellationToken = default)
     {
         var frame = new byte[payload.Length + 5];
         frame[0] = type;
         BinaryPrimitives.WriteInt32BigEndian(frame.AsSpan(1), payload.Length + 4);
         payload.CopyTo(frame, 5);
-        await stream.WriteAsync(frame);
-        await stream.FlushAsync();
+        await stream.WriteAsync(frame, cancellationToken);
+        await stream.FlushAsync(cancellationToken);
     }
 
-    private static async Task<(byte Type, byte[] Payload)> ReadMessageAsync(Stream stream)
+    private static async Task<(byte Type, byte[] Payload)> ReadMessageAsync(
+        Stream stream,
+        CancellationToken cancellationToken = default)
     {
         var header = new byte[5];
-        await stream.ReadExactlyAsync(header);
+        await stream.ReadExactlyAsync(header, cancellationToken);
         var payloadLength = BinaryPrimitives.ReadInt32BigEndian(header.AsSpan(1)) - 4;
         var payload = new byte[payloadLength];
-        await stream.ReadExactlyAsync(payload);
+        await stream.ReadExactlyAsync(payload, cancellationToken);
         return (header[0], payload);
     }
 

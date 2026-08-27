@@ -129,12 +129,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                     }
                 }
 
-                if (!await SendBatchAsync(batch).ConfigureAwait(false))
-                {
-                    return;
-                }
-
-                if (!await ReceiveBatchAsync(batch).ConfigureAwait(false))
+                if (!await ProcessBatchAsync(batch).ConfigureAwait(false))
                 {
                     return;
                 }
@@ -179,14 +174,34 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         return null;
     }
 
-    private async ValueTask<bool> SendBatchAsync(List<BatchEntry> batch)
+    private async ValueTask<bool> ProcessBatchAsync(List<BatchEntry> batch)
+    {
+        if (batch.Count == 1)
+        {
+            var sent = await SendBatchAsync(batch, null).ConfigureAwait(false);
+            return sent &&
+              await ReceiveBatchAsync(batch, null).ConfigureAwait(false);
+        }
+
+        using SemaphoreSlim ready = new(0, batch.Count);
+        var receive = ReceiveBatchAsync(batch, ready);
+        var batchSent = await SendBatchAsync(batch, ready).ConfigureAwait(false);
+        var received = await receive.ConfigureAwait(false);
+        return batchSent && received;
+    }
+
+    private async ValueTask<bool> SendBatchAsync(
+        List<BatchEntry> batch,
+        SemaphoreSlim? ready)
     {
         var flushBatch = false;
-        foreach (var entry in batch)
+        for (var index = 0; index < batch.Count; index++)
         {
+            var entry = batch[index];
             if (entry.Command.CancellationToken.IsCancellationRequested)
             {
                 entry.CanceledBeforeSend = true;
+                SignalReady(entry, ready);
                 continue;
             }
 
@@ -196,14 +211,19 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 await entry.Command.SendAsync(cancellation.Token).ConfigureAwait(false);
                 entry.WasSent = true;
                 flushBatch |= entry.Command.FlushBatch;
+                if (!entry.Command.FlushBatch)
+                {
+                    SignalReady(entry, ready);
+                }
             }
             catch (Exception exception)
             {
                 entry.SendError = exception;
+                SignalReady(entry, ready);
                 if (IsFatal(exception))
                 {
                     Stop(exception);
-                    FailBatch(batch, GetTerminalError());
+                    SignalRemaining(batch, index + 1, ready);
                     return false;
                 }
             }
@@ -211,16 +231,38 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
         if (flushBatch && _flushBatchAsync is not null)
         {
-            await _flushBatchAsync(_shutdown.Token).ConfigureAwait(false);
+            try
+            {
+                var flush = _flushBatchAsync(_shutdown.Token);
+                SignalRemaining(batch, 0, ready);
+                await flush.ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                Stop(exception);
+                SignalRemaining(batch, 0, ready);
+                return false;
+            }
+        }
+        else
+        {
+            SignalRemaining(batch, 0, ready);
         }
 
         return true;
     }
 
-    private async ValueTask<bool> ReceiveBatchAsync(List<BatchEntry> batch)
+    private async ValueTask<bool> ReceiveBatchAsync(
+        List<BatchEntry> batch,
+        SemaphoreSlim? ready)
     {
         foreach (var entry in batch)
         {
+            if (ready is not null)
+            {
+                await ready.WaitAsync(_shutdown.Token).ConfigureAwait(false);
+            }
+
             if (entry.CanceledBeforeSend)
             {
                 entry.Command.Cancel(entry.Generation);
@@ -248,7 +290,6 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 if (IsFatal(exception))
                 {
                     Stop(exception);
-                    FailBatch(batch, GetTerminalError());
                     return false;
                 }
 
@@ -257,6 +298,26 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         }
 
         return true;
+    }
+
+    private static void SignalReady(BatchEntry entry, SemaphoreSlim? ready)
+    {
+        if (ready is not null && !entry.IsReady)
+        {
+            entry.IsReady = true;
+            ready.Release();
+        }
+    }
+
+    private static void SignalRemaining(
+        List<BatchEntry> batch,
+        int startIndex,
+        SemaphoreSlim? ready)
+    {
+        for (var index = startIndex; index < batch.Count; index++)
+        {
+            SignalReady(batch[index], ready);
+        }
     }
 
     private DelegateCancellation CreateDelegateCancellation(ICommand command)
@@ -568,6 +629,8 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         public bool WasSent { get; set; }
 
         public Exception? SendError { get; set; }
+
+        public bool IsReady { get; set; }
     }
 
     private readonly struct DelegateCancellation(
