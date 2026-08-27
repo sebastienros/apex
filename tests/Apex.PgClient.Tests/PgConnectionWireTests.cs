@@ -251,6 +251,8 @@ public sealed class PgConnectionWireTests
     {
         const int payloadLength = 8 * 1024 * 1024;
         TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Server.SendBufferSize = 4 * 1024;
+        listener.Server.ReceiveBufferSize = 4 * 1024;
         listener.Start();
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         TaskCompletionSource blockerReceived =
@@ -458,8 +460,6 @@ public sealed class PgConnectionWireTests
         using var client = await listener.AcceptTcpClientAsync();
         using CancellationTokenSource timeout =
           new(TimeSpan.FromSeconds(10));
-        client.Client.SendBufferSize = 4 * 1024;
-        client.Client.ReceiveBufferSize = 4 * 1024;
         await using var stream = client.GetStream();
         await ReadStartupAsync(stream, timeout.Token);
         await WriteStartupCompleteAsync(stream, timeout.Token);
