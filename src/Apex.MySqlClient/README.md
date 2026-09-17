@@ -4,6 +4,15 @@
 
 `Apex.MySqlClient` is a direct MySQL protocol driver for .NET 10 and .NET 11.
 
+## ADO.NET
+
+`MySqlDbConnection`, `MySqlDbCommand`, `MySqlDbDataReader`, `MySqlDbTransaction`,
+`MySqlDbDataSource`, and `MySqlDbBatch` provide an asynchronous-only ADO.NET surface.
+Use async execution methods; synchronous I/O throws `NotSupportedException`.
+`MySqlDbDataSource` leases connections from `MySqlPool`.
+Its `CreateCommand` result leases and returns a pooled connection automatically;
+connections created by the source stay pool-bound and cannot change connection strings.
+
 ## Connect and pool
 
 The driver accepts `mysql://` and `mariadb://` URIs, keyword connection strings,

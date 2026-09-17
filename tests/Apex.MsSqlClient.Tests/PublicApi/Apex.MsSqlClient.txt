@@ -48,7 +48,7 @@ class Apex.MsSqlClient.MsSqlConnectOptions : Apex.SqlClient.SqlConnectOptions, S
   Property: System.String ClientInterfaceName
   Property: System.String TlsHostName
   Property: System.String WorkstationId
-class Apex.MsSqlClient.MsSqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+class Apex.MsSqlClient.MsSqlConnection : Apex.SqlClient.IApexAdoReaderConnection, Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
   Event: System.Action`1[Apex.MsSqlClient.MsSqlInfo] InfoMessage
   Method: Apex.SqlClient.DatabaseMetadata get_DatabaseMetadata()
   Method: Boolean get_IsSecure()
@@ -66,6 +66,41 @@ class Apex.MsSqlClient.MsSqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClie
   Method: Void remove_InfoMessage(System.Action`1[Apex.MsSqlClient.MsSqlInfo])
   Property: Apex.SqlClient.DatabaseMetadata DatabaseMetadata
   Property: Boolean IsSecure
+class Apex.MsSqlClient.MsSqlDbBatch : Apex.SqlClient.ApexDbBatch, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+class Apex.MsSqlClient.MsSqlDbBatchCommand : Apex.SqlClient.ApexDbBatchCommand
+  Constructor: Void .ctor()
+class Apex.MsSqlClient.MsSqlDbBatchCommandCollection : Apex.SqlClient.ApexDbBatchCommandCollection, System.Collections.Generic.ICollection`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IEnumerable`1[System.Data.Common.DbBatchCommand], System.Collections.Generic.IList`1[System.Data.Common.DbBatchCommand], System.Collections.IEnumerable
+  Constructor: Void .ctor()
+class Apex.MsSqlClient.MsSqlDbCommand : Apex.SqlClient.ApexDbCommand, System.ComponentModel.IComponent, System.Data.IDbCommand, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+  Constructor: Void .ctor(Apex.MsSqlClient.MsSqlDbConnection)
+class Apex.MsSqlClient.MsSqlDbConnection : Apex.SqlClient.ApexDbConnection, System.ComponentModel.IComponent, System.Data.IDbConnection, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor()
+  Constructor: Void .ctor(System.String)
+class Apex.MsSqlClient.MsSqlDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
+class Apex.MsSqlClient.MsSqlDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
+  Constructor: Void .ctor(System.String)
+  Constructor: Void .ctor(System.String, Apex.SqlClient.SqlPoolOptions)
+  Method: System.String get_ConnectionString()
+  Property: System.String ConnectionString
+class Apex.MsSqlClient.MsSqlDbParameter : Apex.SqlClient.ApexDbParameter, System.Data.IDataParameter, System.Data.IDbDataParameter
+  Constructor: Void .ctor()
+class Apex.MsSqlClient.MsSqlDbParameterCollection : Apex.SqlClient.ApexDbParameterCollection, System.Collections.ICollection, System.Collections.IEnumerable, System.Collections.IList, System.Data.IDataParameterCollection
+  Constructor: Void .ctor()
+class Apex.MsSqlClient.MsSqlDbProviderFactory : System.Data.Common.DbProviderFactory
+  Constructor: Void .ctor()
+  Field: Apex.MsSqlClient.MsSqlDbProviderFactory Instance
+  Method: Boolean get_CanCreateBatch()
+  Method: System.Data.Common.DbBatch CreateBatch()
+  Method: System.Data.Common.DbBatchCommand CreateBatchCommand()
+  Method: System.Data.Common.DbCommand CreateCommand()
+  Method: System.Data.Common.DbConnection CreateConnection()
+  Method: System.Data.Common.DbDataSource CreateDataSource(System.String)
+  Method: System.Data.Common.DbParameter CreateParameter()
+  Property: Boolean CanCreateBatch
+class Apex.MsSqlClient.MsSqlDbTransaction : Apex.SqlClient.ApexDbTransaction, System.Data.IDbTransaction, System.IAsyncDisposable, System.IDisposable
 enum Apex.MsSqlClient.MsSqlEncryptionMode : System.IComparable, System.IConvertible, System.IFormattable, System.ISpanFormattable
   Field: Apex.MsSqlClient.MsSqlEncryptionMode Disable
   Field: Apex.MsSqlClient.MsSqlEncryptionMode Optional

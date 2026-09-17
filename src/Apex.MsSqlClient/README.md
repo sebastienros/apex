@@ -4,6 +4,15 @@
 
 `Apex.MsSqlClient` is a direct Tabular Data Stream (TDS) driver for .NET 10 and .NET 11.
 
+## ADO.NET
+
+`MsSqlDbConnection`, `MsSqlDbCommand`, `MsSqlDbDataReader`, `MsSqlDbTransaction`,
+`MsSqlDbDataSource`, and `MsSqlDbBatch` provide an asynchronous-only ADO.NET surface.
+Use async execution methods; synchronous I/O throws `NotSupportedException`.
+`MsSqlDbDataSource` leases connections from `MsSqlPool`.
+Its `CreateCommand` result leases and returns a pooled connection automatically;
+connections created by the source stay pool-bound and cannot change connection strings.
+
 ## Connect and pool
 
 Standard Microsoft SQL Server keyword strings, `sqlserver://` URIs, and explicit options

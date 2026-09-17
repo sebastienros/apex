@@ -30,6 +30,25 @@ jobs:
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
       APEX_PIPELINING: 64
 
+  platform-postgresql-apex-ado:
+    source:
+      repository: https://github.com/sebastienros/apex.git
+      branchOrCommit: "{{branchOrCommit}}"
+      project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
+    framework: net11.0
+    patchReferences: true
+    buildArguments:
+      - /p:NoWarn=NU1507%3BCS1591
+    readyStateText: Application started.
+    arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
+    variables:
+      serverScheme: http
+    environmentVariables:
+      DATABASE: postgresql
+      DRIVER: apex-ado
+      CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;******"
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
+
   platform-postgresql-npgsql:
     source:
       repository: https://github.com/sebastienros/apex.git
@@ -68,6 +87,25 @@ jobs:
       CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;Password=benchmarkdbpass;SslMode=Disabled;AllowPublicKeyRetrieval=true"
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
+  platform-mysql-apex-ado:
+    source:
+      repository: https://github.com/sebastienros/apex.git
+      branchOrCommit: "{{branchOrCommit}}"
+      project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
+    framework: net11.0
+    patchReferences: true
+    buildArguments:
+      - /p:NoWarn=NU1507%3BCS1591
+    readyStateText: Application started.
+    arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
+    variables:
+      serverScheme: http
+    environmentVariables:
+      DATABASE: mysql
+      DRIVER: apex-ado
+      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;******;SslMode=Disabled;AllowPublicKeyRetrieval=true"
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
+
   platform-mysql-mysqlconnector:
     source:
       repository: https://github.com/sebastienros/apex.git
@@ -104,6 +142,25 @@ jobs:
       DATABASE: sqlserver
       DRIVER: apex
       CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=sa;Password=Benchmarkdbp@55;Encrypt=false;TrustServerCertificate=true"
+      DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
+
+  platform-sqlserver-apex-ado:
+    source:
+      repository: https://github.com/sebastienros/apex.git
+      branchOrCommit: "{{branchOrCommit}}"
+      project: benchmarks/Apex.Fortunes.Platform/Apex.Fortunes.Platform.csproj
+    framework: net11.0
+    patchReferences: true
+    buildArguments:
+      - /p:NoWarn=NU1507%3BCS1591
+    readyStateText: Application started.
+    arguments: "--urls {{serverScheme}}://{{serverAddress}}:{{serverPort}}"
+    variables:
+      serverScheme: http
+    environmentVariables:
+      DATABASE: sqlserver
+      DRIVER: apex-ado
+      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=sa;******;Encrypt=false;TrustServerCertificate=true"
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   platform-sqlserver-microsoftdatasqlclient:
@@ -168,6 +225,18 @@ scenarios:
         path: /fortunes
         connections: 512
 
+  platform-postgresql-apex-ado:
+    db:
+      job: postgresql
+    application:
+      job: platform-postgresql-apex-ado
+    load:
+      job: wrk
+      variables:
+        presetHeaders: html
+        path: /fortunes
+        connections: 512
+
   platform-postgresql-npgsql:
     db:
       job: postgresql
@@ -192,6 +261,18 @@ scenarios:
         path: /fortunes
         connections: 1024
 
+  platform-mysql-apex-ado:
+    db:
+      job: mysql
+    application:
+      job: platform-mysql-apex-ado
+    load:
+      job: wrk
+      variables:
+        presetHeaders: html
+        path: /fortunes
+        connections: 1024
+
   platform-mysql-mysqlconnector:
     db:
       job: mysql
@@ -209,6 +290,18 @@ scenarios:
       job: sqlserver
     application:
       job: platform-sqlserver-apex
+    load:
+      job: wrk
+      variables:
+        presetHeaders: html
+        path: /fortunes
+        connections: 1024
+
+  platform-sqlserver-apex-ado:
+    db:
+      job: sqlserver
+    application:
+      job: platform-sqlserver-apex-ado
     load:
       job: wrk
       variables:

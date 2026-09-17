@@ -29,7 +29,7 @@ public sealed class PgException : SqlClientException
 
     public string? Severity { get; }
 
-    public string? SqlState { get; }
+    public override string? SqlState { get; }
 
     public string? Detail { get; }
 
@@ -62,7 +62,7 @@ public sealed class PgException : SqlClientException
     /// <summary>
     /// Gets a value indicating whether retrying the operation may succeed without changing it.
     /// </summary>
-    public bool IsTransient => PgErrorClassifier.IsTransient(SqlState);
+    public override bool IsTransient => PgErrorClassifier.IsTransient(SqlState);
 
     /// <summary>
     /// Gets a value indicating whether the server error makes the connection unusable.

@@ -4,6 +4,15 @@
 
 `Apex.PgClient` is a direct PostgreSQL protocol driver for .NET 10 and .NET 11.
 
+## ADO.NET
+
+`PgDbConnection`, `PgDbCommand`, `PgDbDataReader`, `PgDbTransaction`,
+`PgDbDataSource`, and `PgDbBatch` provide an asynchronous-only ADO.NET surface.
+Use `OpenAsync`, `ExecuteReaderAsync`, and `ReadAsync`; synchronous I/O throws
+`NotSupportedException`. `PgDbDataSource` leases connections from `PgPool`.
+Its `CreateCommand` result leases and returns a pooled connection automatically;
+connections created by the source stay pool-bound and cannot change connection strings.
+
 ## Connect and pool
 
 Connection keyword strings, `postgres://` and `postgresql://` URIs, explicit

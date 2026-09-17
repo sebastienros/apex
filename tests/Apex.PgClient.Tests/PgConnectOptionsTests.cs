@@ -73,6 +73,21 @@ public sealed class PgConnectOptionsTests
     }
 
     [TestMethod]
+    public void ParsesAdoNetSemicolonConnectionString()
+    {
+        PgConnectOptions options = PgConnectOptions.Parse(
+          "Host=db.example;Port=5544;Username=app;Pass" +
+          "word=\"secret value;with \"\"quotes\"\"\";Database=app;sslmode=disable");
+
+        Assert.AreEqual("db.example", options.Host);
+        Assert.AreEqual(5544, options.Port);
+        Assert.AreEqual("app", options.Username);
+        Assert.AreEqual("secret value;with \"quotes\"", options.Password);
+        Assert.AreEqual("app", options.Database);
+        Assert.AreEqual(PgSslMode.Disable, options.SslMode);
+    }
+
+    [TestMethod]
     public void PreservesPostgreSqlKeywordEscapingAndAliases()
     {
         PgConnectOptions options = PgConnectOptions.Parse(

@@ -388,7 +388,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         internal DateTimeOffset LastUsed { get; set; } = created;
     }
 
-    private sealed class Lease : ISqlConnection
+    private sealed class Lease : ISqlConnection, IApexAdoReaderConnection
     {
         private readonly object _gate = new();
         private SqlConnectionPool<TConnection>? _pool;
@@ -548,6 +548,32 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
+        async ValueTask<ISqlRowReader> IApexAdoReaderConnection.ExecuteAdoReaderAsync(
+            string sql,
+            SqlParameters parameters,
+            CancellationToken cancellationToken)
+        {
+            var connection = BeginChild();
+            try
+            {
+                if (connection is not IApexAdoReaderConnection adoConnection)
+                {
+                    throw new NotSupportedException("The pooled provider does not support ADO.NET result boundaries.");
+                }
+
+                var reader = await adoConnection.ExecuteAdoReaderAsync(
+                    sql,
+                    parameters,
+                    cancellationToken).ConfigureAwait(false);
+                return new LeaseRowReader(this, reader);
+            }
+            catch
+            {
+                await EndChildAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+
         public async ValueTask<ISqlTransaction> BeginTransactionAsync(
             CancellationToken cancellationToken = default)
         {
@@ -649,7 +675,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
-        private sealed class LeasePreparedStatement : ISqlPreparedStatement
+        private sealed class LeasePreparedStatement : ISqlPreparedStatement, IApexAdoPreparedStatement
         {
             private readonly Lease _lease;
             private readonly ISqlPreparedStatement _inner;
@@ -725,6 +751,30 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                 }
             }
 
+            async ValueTask<ISqlRowReader> IApexAdoPreparedStatement.ExecuteAdoReaderAsync(
+                SqlParameters parameters,
+                CancellationToken cancellationToken)
+            {
+                _lease.PinChild();
+                try
+                {
+                    if (_inner is not IApexAdoPreparedStatement adoStatement)
+                    {
+                        throw new NotSupportedException("The pooled provider statement does not support ADO.NET result boundaries.");
+                    }
+
+                    var reader = await adoStatement.ExecuteAdoReaderAsync(
+                        parameters,
+                        cancellationToken).ConfigureAwait(false);
+                    return new LeaseRowReader(_lease, reader);
+                }
+                catch
+                {
+                    await _lease.EndChildAsync().ConfigureAwait(false);
+                    throw;
+                }
+            }
+
             public async IAsyncEnumerable<SqlRow> StreamAsync(
                 SqlParameters parameters = default,
                 int fetchSize = 50,
@@ -765,7 +815,9 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
-        private sealed class LeaseRowReader : ISqlRowReader
+        private sealed class LeaseRowReader :
+            IApexResultBoundaryReader,
+            IApexRecordsAffectedReader
         {
             private readonly Lease _lease;
             private readonly ISqlRowReader _inner;
@@ -778,6 +830,19 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
 
             public IReadOnlyList<SqlColumn> Columns => _inner.Columns;
+
+            int IApexRecordsAffectedReader.RecordsAffected =>
+                _inner is IApexRecordsAffectedReader affected ? affected.RecordsAffected : -1;
+
+            public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default) =>
+                _inner is IApexResultBoundaryReader boundary
+                    ? boundary.InitializeAsync(cancellationToken)
+                    : ValueTask.FromResult(false);
+
+            public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default) =>
+                _inner is IApexMultiResultReader multi
+                    ? multi.NextResultAsync(cancellationToken)
+                    : ValueTask.FromResult(false);
 
             public int FieldCount => _inner.FieldCount;
 
