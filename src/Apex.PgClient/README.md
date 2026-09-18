@@ -6,12 +6,9 @@
 
 ## ADO.NET
 
-`PgDbConnection`, `PgDbCommand`, `PgDbDataReader`, `PgDbTransaction`,
-`PgDbDataSource`, and `PgDbBatch` provide an asynchronous-only ADO.NET surface.
-Use `OpenAsync`, `ExecuteReaderAsync`, and `ReadAsync`; synchronous I/O throws
-`NotSupportedException`. `PgDbDataSource` leases connections from `PgPool`.
-Its `CreateCommand` result leases and returns a pooled connection automatically;
-connections created by the source stay pool-bound and cannot change connection strings.
+Install the separate [`Apex.PgClient.AdoNet`](../Apex.PgClient.AdoNet/README.md)
+package for `PgDbConnection`, commands, readers, transactions, data sources, and
+batches. This native driver has no dependency on the adapters or `System.Data.Common`.
 
 ## Connect and pool
 

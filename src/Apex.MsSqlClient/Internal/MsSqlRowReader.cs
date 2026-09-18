@@ -5,14 +5,37 @@ using Apex.SqlClient.Internal;
 
 namespace Apex.MsSqlClient.Internal;
 
-internal sealed class MsSqlRowReader :
-    IApexResultBoundaryReader,
-    IApexRecordsAffectedReader,
-    IValueTaskSource<bool>
+internal sealed class MsSqlResultReader :
+    MsSqlRowReader,
+    ISqlResultBoundaryReader,
+    ISqlRecordsAffectedReader
+{
+    internal MsSqlResultReader(
+        MsSqlConnection connection,
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+        : base(connection, sql, parameters, cancellationToken, preserveResultBoundaries: true)
+    {
+    }
+
+    internal MsSqlResultReader(
+        MsSqlConnection connection,
+        MsSqlPreparedStatement statement,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+        : base(connection, statement, parameters, cancellationToken, preserveResultBoundaries: true)
+    {
+    }
+
+    int ISqlRecordsAffectedReader.RecordsAffected => RecordsAffected;
+}
+
+internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 {
     private readonly MsSqlConnection _connection;
     private readonly AsyncAutoResetEvent _advance = new();
-    private readonly AsyncAutoResetEvent? _resultAdvance;
+    private readonly MsSqlResultReaderState? _results;
     private readonly object _gate = new();
     private readonly Action _cancelAction;
     private readonly CancellationTokenRegistration _operationCancellation;
@@ -25,8 +48,6 @@ internal sealed class MsSqlRowReader :
     private CancellationToken _readCancellationToken;
     private CancellationToken _cancellationToken;
     private MsSqlConnection.AttentionState? _attention;
-    private TaskCompletionSource<bool>? _initialization;
-    private TaskCompletionSource<bool>? _nextResult;
     private IReadOnlyList<TdsColumn> _tdsColumns = Array.Empty<TdsColumn>();
     private IReadOnlyList<SqlColumn> _columns = Array.Empty<SqlColumn>();
     private SqlColumnOrdinalMap? _ordinals;
@@ -43,12 +64,7 @@ internal sealed class MsSqlRowReader :
     private bool _canceled;
     private bool _readPending;
     private bool _readSignaled;
-    private bool _resultEnded;
-    private readonly bool _adoResultBoundaries;
-    private bool _nextAwaitingStart;
     private bool _preparesHandle;
-    private bool _countCurrentResult;
-    private long _recordsAffected = -1;
     private int _disposed;
 
     internal MsSqlRowReader(
@@ -56,8 +72,8 @@ internal sealed class MsSqlRowReader :
         string sql,
         SqlParameters parameters,
         CancellationToken cancellationToken,
-        bool adoResultBoundaries = false)
-      : this(connection, sql, statement: null, parameters, cancellationToken, adoResultBoundaries)
+        bool preserveResultBoundaries = false)
+      : this(connection, sql, statement: null, parameters, cancellationToken, preserveResultBoundaries)
     {
     }
 
@@ -66,8 +82,8 @@ internal sealed class MsSqlRowReader :
         MsSqlPreparedStatement statement,
         SqlParameters parameters,
         CancellationToken cancellationToken,
-        bool adoResultBoundaries = false)
-      : this(connection, statement.Sql, statement, parameters, cancellationToken, adoResultBoundaries)
+        bool preserveResultBoundaries = false)
+      : this(connection, statement.Sql, statement, parameters, cancellationToken, preserveResultBoundaries)
     {
     }
 
@@ -77,13 +93,11 @@ internal sealed class MsSqlRowReader :
         MsSqlPreparedStatement? statement,
         SqlParameters parameters,
         CancellationToken cancellationToken,
-        bool adoResultBoundaries)
+        bool preserveResultBoundaries)
     {
         _connection = connection;
         _statement = statement;
-        _adoResultBoundaries = adoResultBoundaries;
-        _resultAdvance = adoResultBoundaries ? new AsyncAutoResetEvent() : null;
-        _countCurrentResult = adoResultBoundaries && StartsWithModifyingKeyword(sql);
+        _results = preserveResultBoundaries ? new MsSqlResultReaderState(sql) : null;
         _operationCancellationToken = cancellationToken;
         _cancelAction = Cancel;
         _readCompletion.RunContinuationsAsynchronously = true;
@@ -119,11 +133,14 @@ internal sealed class MsSqlRowReader :
 
     public int FieldCount => _columns.Count;
 
-    int IApexRecordsAffectedReader.RecordsAffected => GetRecordsAffected();
+    protected int RecordsAffected => _results?.RecordsAffected ?? -1;
 
     public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default)
     {
-        Task<bool>? wait = null;
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        cancellationToken.ThrowIfCancellationRequested();
+        var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+        Task<bool> wait;
         lock (_gate)
         {
             ThrowIfError();
@@ -132,9 +149,8 @@ internal sealed class MsSqlRowReader :
                 _currentDelivered = true;
                 return ValueTask.FromResult(true);
             }
-            if (_resultEnded || _completed) return ValueTask.FromResult(false);
-            _initialization ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
-            wait = _initialization.Task;
+            if (results.Ended || _completed) return ValueTask.FromResult(false);
+            wait = results.Initialize();
         }
 
         return new ValueTask<bool>(wait.WaitAsync(cancellationToken));
@@ -142,27 +158,23 @@ internal sealed class MsSqlRowReader :
 
     public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
     {
-        Task<bool>? wait = null;
-        var advanceRow = false;
-        var advanceResult = false;
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        cancellationToken.ThrowIfCancellationRequested();
+        var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+        Task<bool> wait;
+        bool advanceRow;
+        bool advanceResult;
         lock (_gate)
         {
             ThrowIfError();
             if (_completed) return ValueTask.FromResult(false);
-            if (_nextResult is not null)
-            {
-                throw new InvalidOperationException("Concurrent result transitions are not supported.");
-            }
-
-            _nextResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            _nextAwaitingStart = true;
-            wait = _nextResult.Task;
+            wait = results.NextResult();
             advanceRow = _hasCurrent;
-            advanceResult = _resultEnded;
+            advanceResult = results.Ended;
         }
 
         if (advanceRow) _advance.Set();
-        if (advanceResult) _resultAdvance!.Set();
+        if (advanceResult) results.Advance.Set();
         return AwaitNextResultAsync(wait, cancellationToken);
     }
 
@@ -206,7 +218,7 @@ internal sealed class MsSqlRowReader :
                 return ValueTask.FromResult(false);
             }
 
-            if (_adoResultBoundaries && _resultEnded)
+            if (_results is { Ended: true })
             {
                 return ValueTask.FromResult(false);
             }
@@ -452,7 +464,7 @@ internal sealed class MsSqlRowReader :
 
         Cancel();
         _advance.Set();
-        _resultAdvance?.Set();
+        _results?.Advance.Set();
         try
         {
             await _operation.ConfigureAwait(false);
@@ -537,12 +549,10 @@ internal sealed class MsSqlRowReader :
                                 if (!_stopped)
                                 {
                                     _hasCurrent = true;
-                                    _currentDelivered = false;
+                                    _currentDelivered = _results?.PublishRow() ?? false;
                                     retained = true;
                                 }
                             }
-
-                            CompleteInitialization(hasRows: retained);
 
                             if (retained)
                             {
@@ -559,13 +569,16 @@ internal sealed class MsSqlRowReader :
                             final |= (done.Status & TdsDoneStatus.More) == 0;
                             var hadCurrentResult = _hasCurrentResult;
                             var hasCountResult = (done.Status & TdsDoneStatus.Count) != 0;
-                            if (hasCountResult && (!hadCurrentResult || _countCurrentResult))
+                            if (_results is not null)
                             {
-                                AddRecordsAffected(done.RowCount);
-                            }
-                            if (hadCurrentResult)
-                            {
-                                _countCurrentResult = false;
+                                if (hasCountResult && (!hadCurrentResult || _results.CountCurrentResult))
+                                {
+                                    _results.AddRecordsAffected(done.RowCount);
+                                }
+                                if (hadCurrentResult)
+                                {
+                                    _results.CountCurrentResult = false;
+                                }
                             }
                             var isTerminal = (done.Status & TdsDoneStatus.More) == 0;
                             var hasSyntheticResult = !hadCurrentResult &&
@@ -581,7 +594,7 @@ internal sealed class MsSqlRowReader :
                             }
 
                             _tdsColumns = Array.Empty<TdsColumn>();
-                            if (hasSyntheticResult)
+                            if (_results is not null && hasSyntheticResult)
                             {
                                 _columns = Array.Empty<SqlColumn>();
                                 ResultStarted();
@@ -593,7 +606,7 @@ internal sealed class MsSqlRowReader :
                                 throw new OperationCanceledException(attention.CancellationToken);
                             }
 
-                            if (hadCurrentResult || hasSyntheticResult)
+                            if (_results is not null && (hadCurrentResult || hasSyntheticResult))
                             {
                                 await ResultCompletedAsync().ConfigureAwait(false);
                             }
@@ -701,13 +714,11 @@ internal sealed class MsSqlRowReader :
         }
 
         if (advance) _advance.Set();
-        _resultAdvance?.Set();
+        _results?.Advance.Set();
     }
 
     private void Complete(Exception? error)
     {
-        TaskCompletionSource<bool>? initialization;
-        TaskCompletionSource<bool>? nextResult;
         lock (_gate)
         {
             if (_completed)
@@ -717,87 +728,32 @@ internal sealed class MsSqlRowReader :
 
             _error = error;
             _completed = true;
-            initialization = _initialization;
-            _initialization = null;
-            nextResult = _nextResult;
-            _nextResult = null;
+            _results?.Complete(error);
         }
 
-        if (error is null)
-        {
-            initialization?.TrySetResult(false);
-            nextResult?.TrySetResult(false);
-        }
-        else
-        {
-            initialization?.TrySetException(error);
-            nextResult?.TrySetException(error);
-        }
         SignalRead(result: false, error);
     }
 
     private void ResultStarted()
     {
+        if (_results is null) return;
         lock (_gate)
         {
-            _resultEnded = false;
-            if (_nextResult is not null)
-            {
-                _nextAwaitingStart = false;
-            }
+            _results.Start();
         }
     }
 
-    private async ValueTask ResultCompletedAsync()
+    private ValueTask ResultCompletedAsync()
     {
-        TaskCompletionSource<bool>? initialization;
-        TaskCompletionSource<bool>? nextResult;
-        var waitForNext = false;
+        if (_results is null) return ValueTask.CompletedTask;
+        bool waitForNext;
         lock (_gate)
         {
-            if (!_adoResultBoundaries) return;
-            _resultEnded = true;
-            initialization = _initialization;
-            _initialization = null;
-            nextResult = !_nextAwaitingStart ? _nextResult : null;
-            if (nextResult is not null)
-            {
-                _nextResult = null;
-            }
-            waitForNext = _nextResult is null && !_stopped;
+            waitForNext = _results.End(_stopped);
         }
 
-        initialization?.TrySetResult(false);
-        nextResult?.TrySetResult(true);
         SignalRead(result: false, error: null);
-        if (waitForNext)
-        {
-            await _resultAdvance!.WaitAsync().ConfigureAwait(false);
-        }
-    }
-
-    private void CompleteInitialization(bool hasRows)
-    {
-        TaskCompletionSource<bool>? initialization;
-        TaskCompletionSource<bool>? nextResult;
-        lock (_gate)
-        {
-            if (!_adoResultBoundaries) return;
-            initialization = _initialization;
-            _initialization = null;
-            nextResult = !_nextAwaitingStart ? _nextResult : null;
-            if (nextResult is not null)
-            {
-                _nextResult = null;
-            }
-            if (hasRows && (initialization is not null || nextResult is not null))
-            {
-                _currentDelivered = true;
-            }
-        }
-
-        initialization?.TrySetResult(hasRows);
-        nextResult?.TrySetResult(true);
+        return waitForNext ? _results.Advance.WaitAsync() : ValueTask.CompletedTask;
     }
 
     private void DisposeCurrent()
@@ -832,36 +788,9 @@ internal sealed class MsSqlRowReader :
         }
     }
 
-    private void AddRecordsAffected(long affectedRows)
+    private sealed class MsSqlResultReaderState(string sql) : SqlResultReaderState
     {
-        while (true)
-        {
-            var current = Interlocked.Read(ref _recordsAffected);
-            long updated;
-            try
-            {
-                updated = current < 0
-                    ? affectedRows
-                    : checked(current + affectedRows);
-            }
-            catch (OverflowException)
-            {
-                updated = -1;
-            }
-
-            if (Interlocked.CompareExchange(ref _recordsAffected, updated, current) == current)
-            {
-                return;
-            }
-        }
-    }
-
-    private int GetRecordsAffected()
-    {
-        var affectedRows = Interlocked.Read(ref _recordsAffected);
-        return affectedRows is >= int.MinValue and <= int.MaxValue
-            ? (int)affectedRows
-            : -1;
+        internal bool CountCurrentResult { get; set; } = StartsWithModifyingKeyword(sql);
     }
 
     private static bool StartsWithModifyingKeyword(string sql)

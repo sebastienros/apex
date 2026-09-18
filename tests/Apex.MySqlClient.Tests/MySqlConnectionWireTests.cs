@@ -63,7 +63,7 @@ public sealed class MySqlConnectionWireTests
     }
 
     [TestMethod]
-    public async Task AdoReaderDrainsUnreadRowsAndClosesAfterAnEmptyResult()
+    public async Task ResultReaderPreservesBoundariesAndClosesAfterAnEmptyResult()
     {
         await using var harness = await ServerHarness.StartAsync();
         Task server = Task.Run(async () =>
@@ -104,37 +104,80 @@ public sealed class MySqlConnectionWireTests
             await connection.ExpectCommandAsync(MySqlCommand.Quit);
         });
 
-        await using var client = new MySqlDbConnection(
+        await using var client = await MySqlClient.ConnectAsync(MySqlConnectOptions.Parse(
             $"Server={harness.Host};Port={harness.Port};User ID=user;Password=pass;" +
-            "AllowMultiStatements=true");
-        await client.OpenAsync(CancellationToken.None);
-        await using var command = client.CreateCommand();
-        command.CommandText = "SELECT 1 AS value UNION ALL SELECT 2; SELECT 3 AS value";
+            "AllowMultiStatements=true"));
 
-        await using (var reader = await command.ExecuteReaderAsync(CancellationToken.None))
+        await using (var reader = await client.ExecuteResultReaderAsync(
+            "SELECT 1 AS value UNION ALL SELECT 2; SELECT 3 AS value", default, CancellationToken.None))
         {
-            Assert.IsTrue(await reader.ReadAsync(CancellationToken.None));
+            var results = (ISqlResultBoundaryReader)reader;
+            Assert.IsTrue(await results.InitializeAsync());
             Assert.AreEqual(1, reader.GetInt32(0));
-            Assert.IsTrue(await reader.NextResultAsync(CancellationToken.None));
-            Assert.IsTrue(await reader.ReadAsync(CancellationToken.None));
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(2, reader.GetInt32(0));
+            Assert.IsFalse(await reader.ReadAsync());
+            Assert.IsTrue(await results.NextResultAsync());
+            Assert.IsTrue(await results.InitializeAsync());
             Assert.AreEqual(3, reader.GetInt32(0));
         }
 
-        command.CommandText = "SELECT 1 WHERE FALSE";
-        var empty = await command.ExecuteReaderAsync(CancellationToken.None);
-        await empty.CloseAsync();
+        var empty = await client.ExecuteResultReaderAsync(
+            "SELECT 1 WHERE FALSE", default, CancellationToken.None);
+        Assert.IsFalse(await ((ISqlResultBoundaryReader)empty).InitializeAsync());
+        Assert.AreEqual(1, empty.FieldCount);
+        await empty.DisposeAsync();
 
-        command.CommandText = "SELECT 4 AS value";
-        await command.PrepareAsync(CancellationToken.None);
-        await using (var prepared = await command.ExecuteReaderAsync(CancellationToken.None))
+        await using var statement = await client.PrepareAsync("SELECT 4 AS value");
+        await using (var prepared = await ((ISqlResultPreparedStatement)statement)
+            .ExecuteResultReaderAsync(default, CancellationToken.None))
         {
-            Assert.IsTrue(await prepared.ReadAsync(CancellationToken.None));
+            Assert.IsTrue(await ((ISqlResultBoundaryReader)prepared).InitializeAsync());
             Assert.AreEqual(4, prepared.GetInt32(0));
         }
 
-        await command.DisposeAsync();
-        await client.CloseAsync();
+        await statement.DisposeAsync();
+        await client.DisposeAsync();
         await server;
+    }
+
+    [TestMethod]
+    public async Task ResultReaderFirstRowHandoffDoesNotDuplicateOrSkipRows()
+    {
+        const int executions = 100;
+        await using var harness = await ServerHarness.StartAsync();
+        Task server = Task.Run(async () =>
+        {
+            await using var connection = await harness.AcceptAsync();
+            await connection.CompleteHandshakeAsync("8.4.2");
+            for (var i = 0; i < executions; i++)
+            {
+                await connection.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT value");
+                await connection.WriteColumnCountAsync(1);
+                await connection.WriteColumnAsync("value", MySqlType.Long);
+                await connection.WriteTextRowAsync("1");
+                await connection.WriteTextRowAsync("2");
+                await connection.WriteFinalOkAsync();
+            }
+            await connection.ExpectCommandAsync(MySqlCommand.Quit);
+        });
+
+        await using var client = await MySqlClient.ConnectAsync(harness.CreateOptions());
+        for (var i = 0; i < executions; i++)
+        {
+            await using var reader = await client.ExecuteResultReaderAsync("SELECT value", default, default);
+            if ((i & 1) == 0) await Task.Yield();
+            var results = (ISqlResultBoundaryReader)reader;
+            Assert.IsTrue(await results.InitializeAsync());
+            Assert.AreEqual(1, reader.GetInt32(0));
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(2, reader.GetInt32(0));
+            Assert.IsFalse(await reader.ReadAsync());
+            Assert.IsFalse(await results.NextResultAsync());
+        }
+
+        await client.DisposeAsync();
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     [TestMethod]
@@ -416,6 +459,7 @@ public sealed class MySqlConnectionWireTests
         List<int> values = [];
         await using (var reader = await client.ExecuteReaderAsync("SELECT n FROM sequence"))
         {
+            Assert.IsFalse(reader is ISqlMultiResultReader);
             // Column metadata only becomes available once the pump has read the first result set's
             // header, which is guaranteed after the first ReadAsync call returns.
             Assert.IsTrue(await reader.ReadAsync());

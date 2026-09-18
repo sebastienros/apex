@@ -26,7 +26,7 @@ jobs:
     environmentVariables:
       DATABASE: postgresql
       DRIVER: apex
-      CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;Password=benchmarkdbpass"
+      CONNECTION_STRING: &postgresqlApexConnection "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;Password=benchmarkdbpass"
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
       APEX_PIPELINING: 16
 
@@ -46,7 +46,7 @@ jobs:
     environmentVariables:
       DATABASE: postgresql
       DRIVER: apex-ado
-      CONNECTION_STRING: "Host={{databaseServer}};Database=hello_world;Username=benchmarkdbuser;******"
+      CONNECTION_STRING: *postgresqlApexConnection
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   minimal-postgresql-npgsql:
@@ -84,7 +84,7 @@ jobs:
     environmentVariables:
       DATABASE: mysql
       DRIVER: apex
-      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;Password=benchmarkdbpass;SslMode=Disabled;AllowPublicKeyRetrieval=true"
+      CONNECTION_STRING: &mysqlApexConnection "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;Password=benchmarkdbpass;SslMode=Disabled;AllowPublicKeyRetrieval=true"
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   minimal-mysql-apex-ado:
@@ -103,7 +103,7 @@ jobs:
     environmentVariables:
       DATABASE: mysql
       DRIVER: apex-ado
-      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=benchmarkdbuser;******;SslMode=Disabled;AllowPublicKeyRetrieval=true"
+      CONNECTION_STRING: *mysqlApexConnection
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   minimal-mysql-mysqlconnector:
@@ -141,7 +141,7 @@ jobs:
     environmentVariables:
       DATABASE: sqlserver
       DRIVER: apex
-      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=sa;Password=Benchmarkdbp@55;Encrypt=false;TrustServerCertificate=true"
+      CONNECTION_STRING: &sqlserverApexConnection "Server={{databaseServer}};Database=hello_world;User ID=sa;Password=Benchmarkdbp@55;Encrypt=false;TrustServerCertificate=true"
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   minimal-sqlserver-apex-ado:
@@ -160,7 +160,7 @@ jobs:
     environmentVariables:
       DATABASE: sqlserver
       DRIVER: apex-ado
-      CONNECTION_STRING: "Server={{databaseServer}};Database=hello_world;User ID=sa;******;Encrypt=false;TrustServerCertificate=true"
+      CONNECTION_STRING: *sqlserverApexConnection
       DATABASE_CONNECTIONS: "{{ cores | minus: 2 }}"
 
   minimal-sqlserver-microsoftdatasqlclient:

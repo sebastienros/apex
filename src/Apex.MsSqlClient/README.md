@@ -6,12 +6,9 @@
 
 ## ADO.NET
 
-`MsSqlDbConnection`, `MsSqlDbCommand`, `MsSqlDbDataReader`, `MsSqlDbTransaction`,
-`MsSqlDbDataSource`, and `MsSqlDbBatch` provide an asynchronous-only ADO.NET surface.
-Use async execution methods; synchronous I/O throws `NotSupportedException`.
-`MsSqlDbDataSource` leases connections from `MsSqlPool`.
-Its `CreateCommand` result leases and returns a pooled connection automatically;
-connections created by the source stay pool-bound and cannot change connection strings.
+Install the separate [`Apex.MsSqlClient.AdoNet`](../Apex.MsSqlClient.AdoNet/README.md)
+package for `MsSqlDbConnection`, commands, readers, transactions, data sources, and
+batches. This native driver has no dependency on the adapters or `System.Data.Common`.
 
 ## Connect and pool
 

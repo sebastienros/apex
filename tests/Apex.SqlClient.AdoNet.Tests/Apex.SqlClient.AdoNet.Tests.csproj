@@ -1,0 +1,16 @@
+<Project Sdk="MSTest.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Apex.SqlClient.AdoNet\Apex.SqlClient.AdoNet.csproj" />
+    <ProjectReference Include="..\..\src\Apex.PgClient.AdoNet\Apex.PgClient.AdoNet.csproj" />
+    <ProjectReference Include="..\..\src\Apex.MySqlClient.AdoNet\Apex.MySqlClient.AdoNet.csproj" />
+    <ProjectReference Include="..\..\src\Apex.MsSqlClient.AdoNet\Apex.MsSqlClient.AdoNet.csproj" />
+    <Compile Include="..\PublicApiSnapshot.cs" Link="PublicApiSnapshot.cs" />
+    <None Include="PublicApi\*.txt"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="Never" />
+  </ItemGroup>
+</Project>

@@ -13,6 +13,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         project:
           - tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj
+          - tests/Apex.SqlClient.AdoNet.Tests/Apex.SqlClient.AdoNet.Tests.csproj
           - tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj
           - tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj
           - tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj

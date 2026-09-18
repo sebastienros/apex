@@ -9,6 +9,54 @@ namespace Apex.PgClient.Tests;
 public sealed class PgConnectionWireTests
 {
     [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task StreamingReadersOnlyPreserveResultsWhenRequested(bool preserveResults)
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunReaderServerAsync(listener);
+        await using var connection = await PgClient.ConnectAsync(new PgConnectOptions
+        {
+            Host = "127.0.0.1",
+            Port = port,
+            Username = "user",
+            Password = "pass",
+            Database = "db",
+        });
+
+        for (var result = 0; result < 3; result++)
+        {
+            await using var reader = preserveResults
+                ? await connection.ExecuteResultReaderAsync("SELECT value", default, default)
+                : await connection.ExecuteReaderAsync("SELECT value");
+            Assert.AreEqual(preserveResults, reader is ISqlMultiResultReader);
+            var hasRow = preserveResults
+                ? await ((ISqlResultBoundaryReader)reader).InitializeAsync()
+                : await reader.ReadAsync();
+            Assert.AreEqual(result == 1, hasRow);
+            Assert.AreEqual(result == 2 ? 0 : 1, reader.FieldCount);
+            if (hasRow)
+            {
+                Assert.AreEqual(1, reader.GetInt32(0));
+                Assert.IsTrue(await reader.ReadAsync());
+                Assert.AreEqual(2, reader.GetInt32(0));
+                Assert.IsFalse(await reader.ReadAsync());
+            }
+
+            if (preserveResults)
+            {
+                Assert.IsFalse(await ((ISqlResultBoundaryReader)reader).NextResultAsync());
+                Assert.AreEqual(result == 2 ? 7 : -1, ((ISqlRecordsAffectedReader)reader).RecordsAffected);
+            }
+        }
+
+        await connection.DisposeAsync();
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
     public async Task ConnectsAndExecutesSimpleQueryAgainstProtocolServer()
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
@@ -244,6 +292,43 @@ public sealed class PgConnectionWireTests
         Assert.IsTrue(queries.All(static query => query.IsFaulted || query.IsCanceled));
         await server.WaitAsync(TimeSpan.FromSeconds(5));
         listener.Stop();
+    }
+
+    private static async Task RunReaderServerAsync(TcpListener listener)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        await ReadStartupAsync(stream);
+        await WriteStartupCompleteAsync(stream);
+        for (var result = 0; result < 3; result++)
+        {
+            foreach (var expected in "PBDES")
+            {
+                var (type, _) = await ReadMessageAsync(stream);
+                Assert.AreEqual((byte)expected, type);
+            }
+
+            await WriteMessageAsync(stream, (byte)'1', []);
+            await WriteMessageAsync(stream, (byte)'2', []);
+            if (result < 2)
+            {
+                await WriteMessageAsync(stream, (byte)'T', Join(Int16(1), Column("value", 23, 4)));
+                if (result == 1)
+                {
+                    await WriteMessageAsync(stream, (byte)'D', DataRow("1"));
+                    await WriteMessageAsync(stream, (byte)'D', DataRow("2"));
+                }
+            }
+            else
+            {
+                await WriteMessageAsync(stream, (byte)'n', []);
+            }
+            await WriteMessageAsync(stream, (byte)'C', CString(result == 2 ? "UPDATE 7" : "SELECT 2"));
+            await WriteMessageAsync(stream, (byte)'Z', [(byte)'I']);
+        }
+
+        var (terminate, _) = await ReadMessageAsync(stream);
+        Assert.AreEqual((byte)'X', terminate);
     }
 
     private static async Task RunServerAsync(TcpListener listener)

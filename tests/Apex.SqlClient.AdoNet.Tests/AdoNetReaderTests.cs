@@ -2,7 +2,7 @@ using System.Data;
 using System.Data.Common;
 using Apex.SqlClient;
 
-namespace Apex.SqlClient.Tests;
+namespace Apex.SqlClient.AdoNet.Tests;
 
 [TestClass]
 public sealed class AdoNetReaderTests
@@ -589,8 +589,8 @@ public sealed class AdoNetReaderTests
     }
 
     private sealed class DrainingMultiResultReader :
-        IApexResultBoundaryReader,
-        IApexRecordsAffectedReader
+        ISqlResultBoundaryReader,
+        ISqlRecordsAffectedReader
     {
         private static readonly SqlColumn[] ColumnDefinitions =
             [new("value", 0, 0, 0, SqlDataFormat.Binary)];
@@ -607,7 +607,7 @@ public sealed class AdoNetReaderTests
         }
         public IReadOnlyList<SqlColumn> Columns => ColumnDefinitions;
         public int FieldCount => Columns.Count;
-        int IApexRecordsAffectedReader.RecordsAffected => _recordsAffected;
+        int ISqlRecordsAffectedReader.RecordsAffected => _recordsAffected;
         public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -664,7 +664,7 @@ public sealed class AdoNetReaderTests
         private object? Value(int ordinal) => _results[_result][_currentRow][ordinal];
     }
 
-    private sealed class TestMultiResultReader : IApexResultBoundaryReader
+    private sealed class TestMultiResultReader : ISqlResultBoundaryReader
     {
         private static readonly SqlColumn[] ColumnDefinitions =
             [new("value", 0, 0, 0, SqlDataFormat.Binary)];

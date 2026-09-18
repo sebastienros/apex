@@ -7,6 +7,7 @@ namespace Apex.MySqlClient;
 /// <summary>Asynchronous-only ADO.NET connection adapter for MySQL and MariaDB.</summary>
 public sealed class MySqlDbConnection : ApexDbConnection
 {
+    internal override DbException TranslateException(SqlClientException exception) => MySqlAdoErrors.Translate(exception);
     private MySqlConnectOptions _options;
     private readonly Func<CancellationToken, ValueTask<ISqlConnection>>? _pooledOpen;
     public MySqlDbConnection() : this(string.Empty) { }
@@ -55,6 +56,7 @@ public sealed class MySqlDbConnection : ApexDbConnection
 
 public sealed class MySqlDbCommand : ApexDbCommand
 {
+    internal override DbException TranslateException(SqlClientException exception) => MySqlAdoErrors.Translate(exception);
     public MySqlDbCommand() : base(new MySqlDbParameterCollection(), MySqlAdoReaderFactory.Instance) { }
     public MySqlDbCommand(MySqlDbConnection connection)
         : base(new MySqlDbParameterCollection(), MySqlAdoReaderFactory.Instance)
@@ -89,6 +91,7 @@ public sealed class MySqlDbParameter : ApexDbParameter { }
 public sealed class MySqlDbParameterCollection : ApexDbParameterCollection { }
 public sealed class MySqlDbDataReader : ApexDbDataReader
 {
+    internal override DbException TranslateException(SqlClientException exception) => MySqlAdoErrors.Translate(exception);
     public MySqlDbDataReader(ISqlRowReader reader, CommandBehavior behavior, DbConnection? connection)
         : base(reader, behavior, connection) { }
     internal MySqlDbDataReader(
@@ -160,12 +163,13 @@ public sealed class MySqlDbDataSource : DbDataSource
         };
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _pool.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        if (disposing)
+            ApexExceptionBoundary.RunValueAsync(_pool.DisposeAsync, MySqlAdoErrors.Translate).AsTask().GetAwaiter().GetResult();
         base.Dispose(disposing);
     }
     protected override async ValueTask DisposeAsyncCore()
     {
-        await _pool.DisposeAsync().ConfigureAwait(false);
+        await ApexExceptionBoundary.RunValueAsync(_pool.DisposeAsync, MySqlAdoErrors.Translate).ConfigureAwait(false);
         await base.DisposeAsyncCore().ConfigureAwait(false);
     }
 }
@@ -181,18 +185,26 @@ internal sealed class MySqlAdoReaderFactory : IApexAdoReaderFactory
         ISqlPreparedStatement? preparedStatement,
         CancellationToken cancellationToken)
     {
-        if (connection is not IApexAdoReaderConnection adoConnection)
+        if (connection is not ISqlResultReaderConnection resultConnection)
         {
             throw new ArgumentException("The command connection does not support MySQL ADO.NET readers.", nameof(connection));
         }
 
         return preparedStatement switch
         {
-            null => adoConnection.ExecuteAdoReaderAsync(sql, parameters, cancellationToken),
-            IApexAdoPreparedStatement statement => statement.ExecuteAdoReaderAsync(parameters, cancellationToken),
+            null => resultConnection.ExecuteResultReaderAsync(sql, parameters, cancellationToken),
+            ISqlResultPreparedStatement statement => statement.ExecuteResultReaderAsync(parameters, cancellationToken),
             _ => throw new ArgumentException(
                 "The prepared statement must be created by the MySQL provider.",
                 nameof(preparedStatement)),
         };
     }
+}
+
+internal static class MySqlAdoErrors
+{
+    internal static DbException Translate(SqlClientException exception) =>
+        exception is MySqlException mysql
+            ? new ApexDbException(mysql, mysql.SqlState, errorCode: mysql.ErrorNumber)
+            : new ApexDbException(exception);
 }

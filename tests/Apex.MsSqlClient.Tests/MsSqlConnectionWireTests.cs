@@ -15,6 +15,50 @@ namespace Apex.MsSqlClient.Tests;
 public sealed class MsSqlConnectionWireTests
 {
     [TestMethod]
+    public async Task ResultReaderPreservesRowsAndMetadataAcrossResults()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunMultiResultServerAsync(listener);
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        await using var reader = await connection.ExecuteResultReaderAsync(
+            "SELECT 1; SELECT N'x'", default, default);
+        var results = (ISqlResultBoundaryReader)reader;
+
+        Assert.IsTrue(await results.InitializeAsync());
+        Assert.AreEqual("a", reader.Columns[0].Name);
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsTrue(await results.NextResultAsync());
+        Assert.IsTrue(await results.InitializeAsync());
+        Assert.AreEqual("b", reader.Columns[0].Name);
+        Assert.AreEqual("x", reader.GetString(0));
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsFalse(await results.NextResultAsync());
+        Assert.AreEqual(-1, ((ISqlRecordsAffectedReader)reader).RecordsAffected);
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task EmptyResultReaderEstablishesMetadataWithoutARow()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunRowsServerAsync(listener);
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        await using var reader = await connection.ExecuteResultReaderAsync("SELECT value", default, default);
+        var results = (ISqlResultBoundaryReader)reader;
+
+        Assert.IsFalse(await results.InitializeAsync());
+        Assert.AreEqual(1, reader.FieldCount);
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsFalse(await results.NextResultAsync());
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
     public async Task ConnectsAndExecutesAgainstInMemoryProtocolServer()
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
@@ -143,6 +187,7 @@ public sealed class MsSqlConnectionWireTests
             await using var connection = await MsSqlClient.ConnectAsync(
               TestOptions(readerPort));
             var reader = await connection.ExecuteReaderAsync("SELECT value");
+            Assert.IsFalse(reader is ISqlMultiResultReader);
             Assert.IsTrue(await reader.ReadAsync());
             Assert.AreEqual(1, reader.GetInt32(0));
             Assert.IsTrue(await reader.ReadAsync());

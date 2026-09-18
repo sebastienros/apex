@@ -9,7 +9,7 @@ using Apex.SqlClient.Internal;
 
 namespace Apex.MsSqlClient;
 
-public sealed class MsSqlConnection : ISqlConnection, IApexAdoReaderConnection
+public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
 {
     private readonly MsSqlConnectOptions _options;
     private readonly TdsFedAuthLogin? _fedAuth;
@@ -270,7 +270,7 @@ public sealed class MsSqlConnection : ISqlConnection, IApexAdoReaderConnection
           new MsSqlRowReader(this, sql, parameters, cancellationToken));
     }
 
-    internal ValueTask<ISqlRowReader> ExecuteAdoReaderAsync(
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
         string sql,
         SqlParameters parameters,
         CancellationToken cancellationToken)
@@ -278,19 +278,18 @@ public sealed class MsSqlConnection : ISqlConnection, IApexAdoReaderConnection
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         return ValueTask.FromResult<ISqlRowReader>(
-          new MsSqlRowReader(
+          new MsSqlResultReader(
             this,
             sql,
             parameters,
-            cancellationToken,
-            adoResultBoundaries: true));
+            cancellationToken));
     }
 
-    ValueTask<ISqlRowReader> IApexAdoReaderConnection.ExecuteAdoReaderAsync(
+    ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
         string sql,
         SqlParameters parameters,
         CancellationToken cancellationToken) =>
-        ExecuteAdoReaderAsync(sql, parameters, cancellationToken);
+        ExecuteResultReaderAsync(sql, parameters, cancellationToken);
 
     public async ValueTask<ISqlTransaction> BeginTransactionAsync(
         CancellationToken cancellationToken = default)

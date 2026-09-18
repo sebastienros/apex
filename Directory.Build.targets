@@ -1,4 +1,13 @@
 <Project>
+  <PropertyGroup>
+    <PackageIconProject Condition="'$(PackageIconProject)' == ''">$(MSBuildProjectName)</PackageIconProject>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <None Include="$(MSBuildThisFileDirectory)assets/$(PackageIconProject)/icon.png"
+          Pack="true"
+          PackagePath="\"
+          Link="icon.png" />
+  </ItemGroup>
   <!-- The RC SDK's matching linker pack has not reached the package feed yet. -->
   <ItemGroup Condition="'$(NETCoreSdkVersion)' == '11.0.100-rc.1.26413.103' and '$(TargetFramework)' == 'net11.0'">
     <KnownILLinkPack Update="Microsoft.NET.ILLink.Tasks"

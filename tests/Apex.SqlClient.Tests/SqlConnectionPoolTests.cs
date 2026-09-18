@@ -276,6 +276,65 @@ public sealed class SqlConnectionPoolTests
     }
 
     [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task ResultReaderPinsLeaseAndForwardsResultCapabilities(bool prepared)
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(created);
+        var lease = await pool.GetConnectionAsync();
+        var statement = prepared ? await lease.PrepareAsync("SELECT 1") : null;
+        var reader = prepared
+            ? await ((ISqlResultPreparedStatement)statement!).ExecuteResultReaderAsync(default, default)
+            : await ((ISqlResultReaderConnection)lease).ExecuteResultReaderAsync("SELECT 1", default, default);
+
+        await lease.DisposeAsync();
+        if (statement is not null) await statement.DisposeAsync();
+        var queued = pool.GetConnectionAsync().AsTask();
+        Assert.IsFalse(queued.IsCompleted);
+        Assert.IsTrue(await ((ISqlResultBoundaryReader)reader).InitializeAsync());
+        Assert.IsFalse(await ((ISqlResultBoundaryReader)reader).NextResultAsync());
+        Assert.AreEqual(7, ((ISqlRecordsAffectedReader)reader).RecordsAffected);
+
+        await reader.DisposeAsync();
+        await using var next = await queued.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.HasCount(1, created);
+    }
+
+    [TestMethod]
+    public async Task OrdinaryPooledReadersDoNotAdvertiseResultCapabilities()
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(created);
+        await using var lease = await pool.GetConnectionAsync();
+        await using var reader = await lease.ExecuteReaderAsync("SELECT 1");
+        await using var statement = await lease.PrepareAsync("SELECT 1");
+        await using var prepared = await statement.ExecuteReaderAsync();
+
+        Assert.IsFalse(reader is ISqlMultiResultReader);
+        Assert.IsFalse(reader is ISqlRecordsAffectedReader);
+        Assert.IsFalse(prepared is ISqlMultiResultReader);
+        Assert.IsFalse(prepared is ISqlRecordsAffectedReader);
+    }
+
+    [TestMethod]
+    public async Task InvalidResultReaderReleasesItsLeaseAndIsDisposed()
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(created);
+        var lease = await pool.GetConnectionAsync();
+        var invalid = new FakeRowReader();
+        created[0].ResultReader = invalid;
+
+        await Assert.ThrowsExactlyAsync<NotSupportedException>(() =>
+            ((ISqlResultReaderConnection)lease).ExecuteResultReaderAsync("SELECT 1", default, default).AsTask());
+        Assert.AreEqual(1, invalid.DisposeCount);
+        await lease.DisposeAsync();
+        await using var next = await pool.GetConnectionAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.HasCount(1, created);
+    }
+
+    [TestMethod]
     public async Task PreparedStatementStreamDelegatesToInner()
     {
         List<FakeConnection> created = [];
@@ -387,7 +446,7 @@ public sealed class SqlConnectionPoolTests
         internal void Advance(TimeSpan amount) => _now += amount;
     }
 
-    private sealed class FakeConnection : ISqlConnection
+    private sealed class FakeConnection : ISqlConnection, ISqlResultReaderConnection
     {
         private TaskCompletionSource? _queryRelease;
         private TaskCompletionSource? _streamRelease;
@@ -399,6 +458,8 @@ public sealed class SqlConnectionPoolTests
         internal int QueryCount { get; private set; }
 
         internal FakePreparedStatement? PreparedStatement { get; private set; }
+
+        internal ISqlRowReader ResultReader { get; set; } = new FakeResultRowReader();
 
         internal TaskCompletionSource QueryStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -471,6 +532,10 @@ public sealed class SqlConnectionPoolTests
             CancellationToken cancellationToken = default) =>
           ValueTask.FromResult<ISqlRowReader>(new FakeRowReader());
 
+        public ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+            string sql, SqlParameters parameters, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(ResultReader);
+
         public ValueTask<ISqlTransaction> BeginTransactionAsync(
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<ISqlTransaction>(new FakeTransaction());
@@ -492,7 +557,7 @@ public sealed class SqlConnectionPoolTests
         internal void ReleaseStream() => _streamRelease!.TrySetResult();
     }
 
-    private sealed class FakePreparedStatement(string sql) : ISqlPreparedStatement
+    private sealed class FakePreparedStatement(string sql) : ISqlPreparedStatement, ISqlResultPreparedStatement
     {
         internal int CollectCount { get; private set; }
 
@@ -543,6 +608,10 @@ public sealed class SqlConnectionPoolTests
             CancellationToken cancellationToken = default) =>
           ValueTask.FromResult<ISqlRowReader>(new FakeRowReader());
 
+        public ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+            SqlParameters parameters, CancellationToken cancellationToken) =>
+            ValueTask.FromResult<ISqlRowReader>(new FakeResultRowReader());
+
         public IAsyncEnumerable<SqlRow> StreamAsync(
             SqlParameters parameters = default,
             int fetchSize = 50,
@@ -577,8 +646,17 @@ public sealed class SqlConnectionPoolTests
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
-    private sealed class FakeRowReader : ISqlRowReader
+    private sealed class FakeResultRowReader : FakeRowReader, ISqlResultBoundaryReader, ISqlRecordsAffectedReader
     {
+        public int RecordsAffected => 7;
+        public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default) => ValueTask.FromResult(true);
+        public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default) => ValueTask.FromResult(false);
+    }
+
+    private class FakeRowReader : ISqlRowReader
+    {
+        internal int DisposeCount { get; private set; }
+
         public IReadOnlyList<SqlColumn> Columns => [];
 
         public int FieldCount => 0;
@@ -623,7 +701,11 @@ public sealed class SqlConnectionPoolTests
 
         public byte[] GetBytes(int ordinal) => Get<byte[]>(ordinal);
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
     }
 
     private sealed class FakeTransaction : ISqlTransaction

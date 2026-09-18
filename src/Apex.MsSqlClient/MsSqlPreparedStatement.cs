@@ -4,7 +4,7 @@ using Apex.SqlClient;
 
 namespace Apex.MsSqlClient;
 
-internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, IApexAdoPreparedStatement
+internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResultPreparedStatement
 {
     private readonly MsSqlConnection _connection;
     private readonly object _gate = new();
@@ -130,7 +130,7 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, IApexAdoPr
         }
     }
 
-    internal ValueTask<ISqlRowReader> ExecuteAdoReaderAsync(
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
@@ -139,19 +139,18 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, IApexAdoPr
             ThrowIfDisposed();
             _hasExecution = true;
             return ValueTask.FromResult<ISqlRowReader>(
-              new MsSqlRowReader(
+              new MsSqlResultReader(
                 _connection,
                 this,
                 parameters,
-                cancellationToken,
-                adoResultBoundaries: true));
+                cancellationToken));
         }
     }
 
-    ValueTask<ISqlRowReader> IApexAdoPreparedStatement.ExecuteAdoReaderAsync(
+    ValueTask<ISqlRowReader> ISqlResultPreparedStatement.ExecuteResultReaderAsync(
         SqlParameters parameters,
         CancellationToken cancellationToken) =>
-        ExecuteAdoReaderAsync(parameters, cancellationToken);
+        ExecuteResultReaderAsync(parameters, cancellationToken);
 
     public async IAsyncEnumerable<SqlRow> StreamAsync(
         SqlParameters parameters = default,

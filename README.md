@@ -5,8 +5,8 @@
 Apex is a set of asynchronous .NET 10 and .NET 11 database drivers that implement the
 PostgreSQL, MySQL/MariaDB, and Microsoft SQL Server wire protocols directly. The API is a
 port of the [Vert.x SQL clients](https://github.com/eclipse-vertx/vertx-sql-client)
-for .NET. The direct API remains the lowest-allocation API; each driver also exposes an
-optional asynchronous-only ADO.NET adapter.
+for .NET. The direct API remains the lowest-allocation API. Asynchronous-only ADO.NET
+adapters are available in separate, optional packages.
 
 ## Packages
 
@@ -16,6 +16,10 @@ optional asynchronous-only ADO.NET adapter.
 | `Apex.PgClient` | PostgreSQL | [PostgreSQL](src/Apex.PgClient/README.md) |
 | `Apex.MySqlClient` | MySQL and MariaDB | [MySQL and MariaDB](src/Apex.MySqlClient/README.md) |
 | `Apex.MsSqlClient` | Microsoft SQL Server | [Microsoft SQL Server](src/Apex.MsSqlClient/README.md) |
+| `Apex.SqlClient.AdoNet` | Shared ADO.NET adapter implementation | [ADO.NET](src/Apex.SqlClient.AdoNet/README.md) |
+| `Apex.PgClient.AdoNet` | PostgreSQL ADO.NET adapter | [PostgreSQL ADO.NET](src/Apex.PgClient.AdoNet/README.md) |
+| `Apex.MySqlClient.AdoNet` | MySQL and MariaDB ADO.NET adapter | [MySQL ADO.NET](src/Apex.MySqlClient.AdoNet/README.md) |
+| `Apex.MsSqlClient.AdoNet` | Microsoft SQL Server ADO.NET adapter | [SQL Server ADO.NET](src/Apex.MsSqlClient.AdoNet/README.md) |
 | `Apex.SqlClient.AzureIdentity` | Microsoft Entra authentication for all drivers | [Azure Identity](src/Apex.SqlClient.AzureIdentity/README.md) |
 
 ## Install
@@ -23,6 +27,10 @@ optional asynchronous-only ADO.NET adapter.
 ```bash
 dotnet add package Apex.PgClient
 # or: Apex.MySqlClient / Apex.MsSqlClient
+
+# Optional ADO.NET surface (includes the corresponding native driver):
+dotnet add package Apex.PgClient.AdoNet
+# or: Apex.MySqlClient.AdoNet / Apex.MsSqlClient.AdoNet
 
 # Optional Microsoft Entra authentication:
 dotnet add package Apex.SqlClient.AzureIdentity
@@ -54,6 +62,17 @@ never interpolated into SQL.
 
 ### ADO.NET adapters
 
+Install the corresponding `Apex.*Client.AdoNet` package to opt in. Native driver
+packages do not depend on these adapters or `System.Data.Common`. Adapters use the
+existing protocol readers with an opt-in result-set capability, not separate protocol
+implementations. Existing provider namespaces are unchanged.
+
+Result-boundary state is allocated only when the capability is requested. Native
+streaming readers still carry one nullable state reference, perform null checks, and
+retain a read-notification correctness guard. The ordinary path allocates no
+result-boundary state, events, or tasks and adds no per-row/result locks, but this
+does not imply literal zero overhead.
+
 `PgDbConnection`, `MySqlDbConnection`, and `MsSqlDbConnection` are provider-local
 `DbConnection` wrappers. Their matching commands, readers, transactions, parameters,
 provider factories, data sources, and batches use standard ADO.NET abstractions while
@@ -80,6 +99,14 @@ The provider data sources accept `SqlPoolOptions` when pool sizing or lifetime s
 need to be tuned.
 `DbBatch` preserves command order and transaction semantics; it does not imply a
 single wire round trip when the provider cannot represent the batch natively.
+
+Native `SqlClientException` errors crossing the adapter boundary become
+`ApexDbException : DbException`, retaining the original exception as `InnerException`.
+SQLSTATE is exposed for PostgreSQL and MySQL, error numbers through `ErrorCode` for
+MySQL and SQL Server, and PostgreSQL's transient classification through `IsTransient`.
+Other provider details remain on the native inner exception; this is not a
+type-compatible replacement for other ADO.NET providers' exceptions. Cancellation
+and exceptions not derived from `SqlClientException` pass through unchanged.
 
 ### Transactions
 

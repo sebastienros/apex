@@ -16,7 +16,7 @@ public sealed class MySqlException : SqlClientException
     public int ErrorNumber { get; }
 
     /// <summary>Gets the five character SQLSTATE, when the server sent one.</summary>
-    public override string? SqlState { get; }
+    public string? SqlState { get; }
 
     /// <summary>
     /// Gets a value indicating whether the error terminated the session so the physical

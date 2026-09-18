@@ -388,7 +388,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         internal DateTimeOffset LastUsed { get; set; } = created;
     }
 
-    private sealed class Lease : ISqlConnection, IApexAdoReaderConnection
+    private sealed class Lease : ISqlConnection, ISqlResultReaderConnection
     {
         private readonly object _gate = new();
         private SqlConnectionPool<TConnection>? _pool;
@@ -548,7 +548,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
-        async ValueTask<ISqlRowReader> IApexAdoReaderConnection.ExecuteAdoReaderAsync(
+        async ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
             string sql,
             SqlParameters parameters,
             CancellationToken cancellationToken)
@@ -556,16 +556,16 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             var connection = BeginChild();
             try
             {
-                if (connection is not IApexAdoReaderConnection adoConnection)
+                if (connection is not ISqlResultReaderConnection resultConnection)
                 {
-                    throw new NotSupportedException("The pooled provider does not support ADO.NET result boundaries.");
+                    throw new NotSupportedException("The pooled provider does not support result boundaries.");
                 }
 
-                var reader = await adoConnection.ExecuteAdoReaderAsync(
+                var reader = await resultConnection.ExecuteResultReaderAsync(
                     sql,
                     parameters,
                     cancellationToken).ConfigureAwait(false);
-                return new LeaseRowReader(this, reader);
+                return await WrapResultReaderAsync(this, reader).ConfigureAwait(false);
             }
             catch
             {
@@ -675,7 +675,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
-        private sealed class LeasePreparedStatement : ISqlPreparedStatement, IApexAdoPreparedStatement
+        private sealed class LeasePreparedStatement : ISqlPreparedStatement, ISqlResultPreparedStatement
         {
             private readonly Lease _lease;
             private readonly ISqlPreparedStatement _inner;
@@ -751,22 +751,22 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                 }
             }
 
-            async ValueTask<ISqlRowReader> IApexAdoPreparedStatement.ExecuteAdoReaderAsync(
+            async ValueTask<ISqlRowReader> ISqlResultPreparedStatement.ExecuteResultReaderAsync(
                 SqlParameters parameters,
                 CancellationToken cancellationToken)
             {
                 _lease.PinChild();
                 try
                 {
-                    if (_inner is not IApexAdoPreparedStatement adoStatement)
+                    if (_inner is not ISqlResultPreparedStatement resultStatement)
                     {
-                        throw new NotSupportedException("The pooled provider statement does not support ADO.NET result boundaries.");
+                        throw new NotSupportedException("The pooled provider statement does not support result boundaries.");
                     }
 
-                    var reader = await adoStatement.ExecuteAdoReaderAsync(
+                    var reader = await resultStatement.ExecuteResultReaderAsync(
                         parameters,
                         cancellationToken).ConfigureAwait(false);
-                    return new LeaseRowReader(_lease, reader);
+                    return await WrapResultReaderAsync(_lease, reader).ConfigureAwait(false);
                 }
                 catch
                 {
@@ -815,9 +815,33 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
-        private sealed class LeaseRowReader :
-            IApexResultBoundaryReader,
-            IApexRecordsAffectedReader
+        private static async ValueTask<ISqlRowReader> WrapResultReaderAsync(Lease lease, ISqlRowReader reader)
+        {
+            if (reader is ISqlResultBoundaryReader && reader is ISqlRecordsAffectedReader)
+            {
+                return new LeaseResultReader(lease, reader);
+            }
+
+            await reader.DisposeAsync().ConfigureAwait(false);
+            throw new NotSupportedException("The provider did not return a result-preserving reader.");
+        }
+
+        private sealed class LeaseResultReader(Lease lease, ISqlRowReader inner) :
+            LeaseRowReader(lease, inner),
+            ISqlResultBoundaryReader,
+            ISqlRecordsAffectedReader
+        {
+            int ISqlRecordsAffectedReader.RecordsAffected =>
+                ((ISqlRecordsAffectedReader)Inner).RecordsAffected;
+
+            public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default) =>
+                ((ISqlResultBoundaryReader)Inner).InitializeAsync(cancellationToken);
+
+            public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default) =>
+                ((ISqlResultBoundaryReader)Inner).NextResultAsync(cancellationToken);
+        }
+
+        private class LeaseRowReader : ISqlRowReader
         {
             private readonly Lease _lease;
             private readonly ISqlRowReader _inner;
@@ -831,18 +855,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
 
             public IReadOnlyList<SqlColumn> Columns => _inner.Columns;
 
-            int IApexRecordsAffectedReader.RecordsAffected =>
-                _inner is IApexRecordsAffectedReader affected ? affected.RecordsAffected : -1;
-
-            public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default) =>
-                _inner is IApexResultBoundaryReader boundary
-                    ? boundary.InitializeAsync(cancellationToken)
-                    : ValueTask.FromResult(false);
-
-            public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default) =>
-                _inner is IApexMultiResultReader multi
-                    ? multi.NextResultAsync(cancellationToken)
-                    : ValueTask.FromResult(false);
+            protected ISqlRowReader Inner => _inner;
 
             public int FieldCount => _inner.FieldCount;
 

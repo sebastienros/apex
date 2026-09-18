@@ -210,10 +210,15 @@ public abstract class ApexDbCommand : DbCommand
 
     protected abstract ApexDbParameter CreateParameterCore();
     protected abstract ISqlConnection GetConnection();
+    internal virtual DbException TranslateException(SqlClientException exception) =>
+        _connection is ApexDbConnection connection
+            ? connection.TranslateException(exception)
+            : new ApexDbException(exception);
 
     public override void Cancel() => _activeCancellation?.Cancel();
     public override void Prepare() => throw AsyncOnly();
-    public override Task PrepareAsync(CancellationToken cancellationToken = default) => PrepareCoreAsync(cancellationToken);
+    public override Task PrepareAsync(CancellationToken cancellationToken = default) =>
+        ApexExceptionBoundary.RunAsync(() => PrepareCoreAsync(cancellationToken), TranslateException);
     private async Task PrepareCoreAsync(CancellationToken cancellationToken)
     {
         Validate();
@@ -248,7 +253,12 @@ public abstract class ApexDbCommand : DbCommand
     public override int ExecuteNonQuery() => throw AsyncOnly();
     public override object? ExecuteScalar() => throw AsyncOnly();
 
-    protected override async Task<DbDataReader> ExecuteDbDataReaderAsync(
+    protected override Task<DbDataReader> ExecuteDbDataReaderAsync(
+        CommandBehavior behavior,
+        CancellationToken cancellationToken) =>
+        ApexExceptionBoundary.RunAsync(() => ExecuteReaderCoreAsync(behavior, cancellationToken), TranslateException);
+
+    private async Task<DbDataReader> ExecuteReaderCoreAsync(
         CommandBehavior behavior,
         CancellationToken cancellationToken)
     {
@@ -321,7 +331,10 @@ public abstract class ApexDbCommand : DbCommand
         }
     }
 
-    public override async Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken)
+    public override Task<int> ExecuteNonQueryAsync(CancellationToken cancellationToken) =>
+        ApexExceptionBoundary.RunAsync(() => ExecuteNonQueryCoreAsync(cancellationToken), TranslateException);
+
+    private async Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
     {
         if (_adoReaderFactory is null)
         {
@@ -516,7 +529,8 @@ public abstract class ApexDbCommand : DbCommand
         _preparedConnectionOwner = null;
         try
         {
-            statement.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException)
+                .AsTask().GetAwaiter().GetResult();
         }
         finally
         {
@@ -544,7 +558,7 @@ public abstract class ApexDbCommand : DbCommand
         _preparedConnectionOwner = null;
         try
         {
-            await statement.DisposeAsync().ConfigureAwait(false);
+            await ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException).ConfigureAwait(false);
         }
         finally
         {
@@ -616,9 +630,13 @@ public class ApexDbDataReader : DbDataReader
     public override int Depth => 0;
     public override bool IsClosed => _closed;
     public override int RecordsAffected =>
-        _reader is IApexRecordsAffectedReader recordsAffected
-            ? recordsAffected.RecordsAffected
-            : -1;
+        ApexExceptionBoundary.Invoke(
+            () => _reader is ISqlRecordsAffectedReader recordsAffected ? recordsAffected.RecordsAffected : -1,
+            TranslateException);
+    internal virtual DbException TranslateException(SqlClientException exception) =>
+        _connection is ApexDbConnection connection
+            ? connection.TranslateException(exception)
+            : new ApexDbException(exception);
     public override object this[int ordinal] => GetValue(ordinal);
     public override object this[string name] => GetValue(GetOrdinal(name));
     public override string GetName(int ordinal) => _columns[ordinal].Name;
@@ -636,21 +654,33 @@ public class ApexDbDataReader : DbDataReader
     public override Type GetFieldType(int ordinal) => typeof(object);
 #pragma warning restore IL2093
     public override string GetDataTypeName(int ordinal) => _columns[ordinal].TypeId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-    public override bool GetBoolean(int ordinal) => _reader.GetBoolean(ordinal);
-    public override byte GetByte(int ordinal) => _reader.Get<byte>(ordinal);
-    public override char GetChar(int ordinal) => _reader.Get<char>(ordinal);
-    public override DateTime GetDateTime(int ordinal) => _reader.GetDateTime(ordinal);
-    public override decimal GetDecimal(int ordinal) => _reader.GetDecimal(ordinal);
-    public override double GetDouble(int ordinal) => _reader.GetDouble(ordinal);
-    public override float GetFloat(int ordinal) => _reader.GetFloat(ordinal);
-    public override Guid GetGuid(int ordinal) => _reader.GetGuid(ordinal);
-    public override short GetInt16(int ordinal) => _reader.GetInt16(ordinal);
-    public override int GetInt32(int ordinal) => _reader.GetInt32(ordinal);
-    public override long GetInt64(int ordinal) => _reader.GetInt64(ordinal);
-    public override string GetString(int ordinal) => _reader.GetString(ordinal);
-    public override bool IsDBNull(int ordinal) => _reader.IsNull(ordinal);
-    public override object GetValue(int ordinal) => _reader.Get<object>(ordinal) ?? DBNull.Value;
-    public override T GetFieldValue<T>(int ordinal) => _reader.Get<T>(ordinal);
+    public override bool GetBoolean(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetBoolean(ordinal), TranslateException);
+    public override byte GetByte(int ordinal) => GetFieldValue<byte>(ordinal);
+    public override char GetChar(int ordinal) => GetFieldValue<char>(ordinal);
+    public override DateTime GetDateTime(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetDateTime(ordinal), TranslateException);
+    public override decimal GetDecimal(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetDecimal(ordinal), TranslateException);
+    public override double GetDouble(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetDouble(ordinal), TranslateException);
+    public override float GetFloat(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetFloat(ordinal), TranslateException);
+    public override Guid GetGuid(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetGuid(ordinal), TranslateException);
+    public override short GetInt16(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetInt16(ordinal), TranslateException);
+    public override int GetInt32(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetInt32(ordinal), TranslateException);
+    public override long GetInt64(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetInt64(ordinal), TranslateException);
+    public override string GetString(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.GetString(ordinal), TranslateException);
+    public override bool IsDBNull(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.IsNull(ordinal), TranslateException);
+    public override object GetValue(int ordinal) => GetFieldValue<object>(ordinal) ?? DBNull.Value;
+    public override T GetFieldValue<T>(int ordinal) =>
+        ApexExceptionBoundary.Invoke(() => _reader.Get<T>(ordinal), TranslateException);
     public override int GetValues(object[] values)
     {
         var count = Math.Min(values.Length, FieldCount);
@@ -691,7 +721,7 @@ public class ApexDbDataReader : DbDataReader
             return Task.FromResult(true);
         }
 
-        return ReadCoreAsync(cancellationToken);
+        return ApexExceptionBoundary.RunAsync(() => ReadCoreAsync(cancellationToken), TranslateException);
     }
     private async Task<bool> ReadCoreAsync(CancellationToken cancellationToken)
     {
@@ -714,13 +744,13 @@ public class ApexDbDataReader : DbDataReader
         }
     }
     public override Task<bool> NextResultAsync(CancellationToken cancellationToken) =>
-        NextResultCoreAsync(cancellationToken);
+        ApexExceptionBoundary.RunAsync(() => NextResultCoreAsync(cancellationToken), TranslateException);
 
     private async Task<bool> NextResultCoreAsync(CancellationToken cancellationToken)
     {
         if ((_behavior & CommandBehavior.SingleResult) != 0) return false;
         if (_closed) throw new InvalidOperationException("The reader is closed.");
-        if (_reader is not IApexMultiResultReader multiResultReader)
+        if (_reader is not ISqlMultiResultReader multiResultReader)
         {
             return false;
         }
@@ -736,7 +766,7 @@ public class ApexDbDataReader : DbDataReader
 
             _columns = _reader.Columns;
             _returnedSingleRow = false;
-            if (_reader is IApexResultBoundaryReader bounded)
+            if (_reader is ISqlResultBoundaryReader bounded)
             {
                 _hasRowsInResult = await bounded.InitializeAsync(cancellationToken).ConfigureAwait(false);
                 _prefetchedRow = _hasRowsInResult;
@@ -769,9 +799,11 @@ public class ApexDbDataReader : DbDataReader
     public override Task<bool> IsDBNullAsync(int ordinal, CancellationToken cancellationToken) =>
         Task.FromResult(IsDBNull(ordinal));
     public override Task<T> GetFieldValueAsync<T>(int ordinal, CancellationToken cancellationToken) =>
-        Task.FromResult(_reader.Get<T>(ordinal));
+        Task.FromResult(GetFieldValue<T>(ordinal));
     public override void Close() => CloseAsync().GetAwaiter().GetResult();
-    public override async Task CloseAsync()
+    public override Task CloseAsync() =>
+        ApexExceptionBoundary.RunAsync(CloseCoreAsync, TranslateException);
+    private async Task CloseCoreAsync()
     {
         if (_closed) return;
         _closed = true;
@@ -809,7 +841,10 @@ public class ApexDbDataReader : DbDataReader
         await base.DisposeAsync().ConfigureAwait(false);
     }
 
-    protected async ValueTask ReplaceReaderAsync(ISqlRowReader reader)
+    protected ValueTask ReplaceReaderAsync(ISqlRowReader reader) =>
+        ApexExceptionBoundary.RunValueAsync(() => ReplaceReaderCoreAsync(reader), TranslateException);
+
+    private async ValueTask ReplaceReaderCoreAsync(ISqlRowReader reader)
     {
         await _reader.DisposeAsync().ConfigureAwait(false);
         _reader = reader;
@@ -820,11 +855,14 @@ public class ApexDbDataReader : DbDataReader
         ClearValueCaches();
     }
 
-    internal async ValueTask InitializeAsync(CancellationToken cancellationToken)
+    internal ValueTask InitializeAsync(CancellationToken cancellationToken) =>
+        ApexExceptionBoundary.RunValueAsync(() => InitializeCoreAsync(cancellationToken), TranslateException);
+
+    private async ValueTask InitializeCoreAsync(CancellationToken cancellationToken)
     {
         try
         {
-            if (_reader is IApexResultBoundaryReader bounded)
+            if (_reader is ISqlResultBoundaryReader bounded)
             {
                 _hasRowsInResult = await bounded.InitializeAsync(cancellationToken).ConfigureAwait(false);
                 _columns = _reader.Columns;
@@ -857,13 +895,13 @@ public class ApexDbDataReader : DbDataReader
     private byte[] GetCachedBytes(int ordinal)
     {
         EnsureValueCacheCapacity();
-        return _bytes![ordinal] ??= _reader.GetBytes(ordinal);
+        return _bytes![ordinal] ??= ApexExceptionBoundary.Invoke(() => _reader.GetBytes(ordinal), TranslateException);
     }
 
     private string GetCachedChars(int ordinal)
     {
         EnsureValueCacheCapacity();
-        return _chars![ordinal] ??= _reader.GetString(ordinal);
+        return _chars![ordinal] ??= GetString(ordinal);
     }
 
     private void EnsureValueCacheCapacity()
@@ -897,21 +935,6 @@ public class ApexDbDataReader : DbDataReader
     }
 }
 
-/// <summary>Optional bridge for drivers that expose result-set transitions.</summary>
-public interface IApexMultiResultReader : ISqlRowReader
-{
-    ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default);
-}
-
-/// <summary>
-/// A multi-result reader that can establish the first result's metadata and row availability
-/// before it is exposed through ADO.NET.
-/// </summary>
-public interface IApexResultBoundaryReader : IApexMultiResultReader
-{
-    ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default);
-}
-
 internal interface IApexAdoReaderFactory
 {
     ValueTask<ISqlRowReader> ExecuteReaderAsync(
@@ -920,26 +943,6 @@ internal interface IApexAdoReaderFactory
         SqlParameters parameters,
         ISqlPreparedStatement? preparedStatement,
         CancellationToken cancellationToken);
-}
-
-internal interface IApexAdoReaderConnection
-{
-    ValueTask<ISqlRowReader> ExecuteAdoReaderAsync(
-        string sql,
-        SqlParameters parameters,
-        CancellationToken cancellationToken);
-}
-
-internal interface IApexAdoPreparedStatement
-{
-    ValueTask<ISqlRowReader> ExecuteAdoReaderAsync(
-        SqlParameters parameters,
-        CancellationToken cancellationToken);
-}
-
-internal interface IApexRecordsAffectedReader
-{
-    int RecordsAffected { get; }
 }
 
 /// <summary>Async-only ADO.NET transaction wrapper.</summary>
@@ -959,15 +962,20 @@ public class ApexDbTransaction : DbTransaction
     public override void Commit() => throw ApexDbCommand.AsyncOnly();
     public override void Rollback() => throw ApexDbCommand.AsyncOnly();
     public override Task CommitAsync(CancellationToken cancellationToken = default) =>
-        _transaction.CommitAsync(cancellationToken).AsTask();
+        ApexExceptionBoundary.RunValueAsync(() => _transaction.CommitAsync(cancellationToken), TranslateException).AsTask();
     public override Task RollbackAsync(CancellationToken cancellationToken = default) =>
-        _transaction.RollbackAsync(cancellationToken).AsTask();
+        ApexExceptionBoundary.RunValueAsync(() => _transaction.RollbackAsync(cancellationToken), TranslateException).AsTask();
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _transaction.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        if (disposing) DisposeAsync().AsTask().GetAwaiter().GetResult();
         base.Dispose(disposing);
     }
-    public override ValueTask DisposeAsync() => _transaction.DisposeAsync();
+    public override ValueTask DisposeAsync() =>
+        ApexExceptionBoundary.RunValueAsync(_transaction.DisposeAsync, TranslateException);
+    private DbException TranslateException(SqlClientException exception) =>
+        _connection is ApexDbConnection connection
+            ? connection.TranslateException(exception)
+            : new ApexDbException(exception);
 }
 
 /// <summary>Base connection implementation for provider-local asynchronous ADO.NET adapters.</summary>
@@ -1027,6 +1035,7 @@ public abstract class ApexDbConnection : DbConnection
         _connection ?? throw new InvalidOperationException("The connection is not open.");
 
     protected abstract Task<ISqlConnection> OpenCoreAsync(CancellationToken cancellationToken);
+    internal virtual DbException TranslateException(SqlClientException exception) => new ApexDbException(exception);
     protected abstract DbCommand CreateCommandCore();
     protected abstract void SetConnectionStringCore(string connectionString);
     protected void SetConnectionMetadata(
@@ -1065,7 +1074,10 @@ public abstract class ApexDbConnection : DbConnection
         IsolationLevel isolationLevel) => new ApexDbTransaction(transaction, this, isolationLevel);
 
     public override void Open() => throw ApexDbCommand.AsyncOnly();
-    public override async Task OpenAsync(CancellationToken cancellationToken)
+    public override Task OpenAsync(CancellationToken cancellationToken) =>
+        ApexExceptionBoundary.RunAsync(() => OpenConnectionAsync(cancellationToken), TranslateException);
+
+    private async Task OpenConnectionAsync(CancellationToken cancellationToken)
     {
         if (_state == ConnectionState.Open) return;
         var previous = _state;
@@ -1086,17 +1098,11 @@ public abstract class ApexDbConnection : DbConnection
             throw;
         }
     }
-    public override void Close()
-    {
-        if (_connection is null) return;
-        var connection = _connection;
-        _connection = null;
-        var previous = _state;
-        _state = ConnectionState.Closed;
-        OnStateChange(new StateChangeEventArgs(previous, _state));
-        connection.DisposeAsync().AsTask().GetAwaiter().GetResult();
-    }
-    public override async Task CloseAsync()
+    public override void Close() => CloseAsync().GetAwaiter().GetResult();
+    public override Task CloseAsync() =>
+        ApexExceptionBoundary.RunAsync(CloseConnectionAsync, TranslateException);
+
+    private async Task CloseConnectionAsync()
     {
         if (_connection is null) return;
         var connection = _connection;
@@ -1124,7 +1130,8 @@ public abstract class ApexDbConnection : DbConnection
     {
         if (isolationLevel is not (IsolationLevel.Unspecified or IsolationLevel.ReadCommitted))
             throw new NotSupportedException($"Isolation level '{isolationLevel}' is not supported.");
-        var transaction = await NativeConnection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var transaction = await ApexExceptionBoundary.RunValueAsync(
+            () => NativeConnection.BeginTransactionAsync(cancellationToken), TranslateException).ConfigureAwait(false);
         return CreateTransaction(transaction, isolationLevel);
     }
     public override void ChangeDatabase(string databaseName) =>

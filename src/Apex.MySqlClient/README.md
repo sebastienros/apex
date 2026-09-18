@@ -6,12 +6,9 @@
 
 ## ADO.NET
 
-`MySqlDbConnection`, `MySqlDbCommand`, `MySqlDbDataReader`, `MySqlDbTransaction`,
-`MySqlDbDataSource`, and `MySqlDbBatch` provide an asynchronous-only ADO.NET surface.
-Use async execution methods; synchronous I/O throws `NotSupportedException`.
-`MySqlDbDataSource` leases connections from `MySqlPool`.
-Its `CreateCommand` result leases and returns a pooled connection automatically;
-connections created by the source stay pool-bound and cannot change connection strings.
+Install the separate [`Apex.MySqlClient.AdoNet`](../Apex.MySqlClient.AdoNet/README.md)
+package for `MySqlDbConnection`, commands, readers, transactions, data sources, and
+batches. This native driver has no dependency on the adapters or `System.Data.Common`.
 
 ## Connect and pool
 

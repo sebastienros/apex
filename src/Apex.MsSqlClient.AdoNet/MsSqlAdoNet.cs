@@ -7,6 +7,7 @@ namespace Apex.MsSqlClient;
 /// <summary>Asynchronous-only ADO.NET connection adapter for SQL Server.</summary>
 public sealed class MsSqlDbConnection : ApexDbConnection
 {
+    internal override DbException TranslateException(SqlClientException exception) => MsSqlAdoErrors.Translate(exception);
     private MsSqlConnectOptions _options;
     private readonly Func<CancellationToken, ValueTask<ISqlConnection>>? _pooledOpen;
     public MsSqlDbConnection() : this(string.Empty) { }
@@ -55,6 +56,7 @@ public sealed class MsSqlDbConnection : ApexDbConnection
 
 public sealed class MsSqlDbCommand : ApexDbCommand
 {
+    internal override DbException TranslateException(SqlClientException exception) => MsSqlAdoErrors.Translate(exception);
     public MsSqlDbCommand() : base(new MsSqlDbParameterCollection(), MsSqlAdoReaderFactory.Instance) { }
     public MsSqlDbCommand(MsSqlDbConnection connection)
         : base(new MsSqlDbParameterCollection(), MsSqlAdoReaderFactory.Instance)
@@ -89,6 +91,7 @@ public sealed class MsSqlDbParameter : ApexDbParameter { }
 public sealed class MsSqlDbParameterCollection : ApexDbParameterCollection { }
 public sealed class MsSqlDbDataReader : ApexDbDataReader
 {
+    internal override DbException TranslateException(SqlClientException exception) => MsSqlAdoErrors.Translate(exception);
     public MsSqlDbDataReader(ISqlRowReader reader, CommandBehavior behavior, DbConnection? connection)
         : base(reader, behavior, connection) { }
     internal MsSqlDbDataReader(
@@ -160,12 +163,13 @@ public sealed class MsSqlDbDataSource : DbDataSource
         };
     protected override void Dispose(bool disposing)
     {
-        if (disposing) _pool.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        if (disposing)
+            ApexExceptionBoundary.RunValueAsync(_pool.DisposeAsync, MsSqlAdoErrors.Translate).AsTask().GetAwaiter().GetResult();
         base.Dispose(disposing);
     }
     protected override async ValueTask DisposeAsyncCore()
     {
-        await _pool.DisposeAsync().ConfigureAwait(false);
+        await ApexExceptionBoundary.RunValueAsync(_pool.DisposeAsync, MsSqlAdoErrors.Translate).ConfigureAwait(false);
         await base.DisposeAsyncCore().ConfigureAwait(false);
     }
 }
@@ -181,18 +185,26 @@ internal sealed class MsSqlAdoReaderFactory : IApexAdoReaderFactory
         ISqlPreparedStatement? preparedStatement,
         CancellationToken cancellationToken)
     {
-        if (connection is not IApexAdoReaderConnection adoConnection)
+        if (connection is not ISqlResultReaderConnection resultConnection)
         {
             throw new ArgumentException("The command connection does not support SQL Server ADO.NET readers.", nameof(connection));
         }
 
         return preparedStatement switch
         {
-            null => adoConnection.ExecuteAdoReaderAsync(sql, parameters, cancellationToken),
-            IApexAdoPreparedStatement statement => statement.ExecuteAdoReaderAsync(parameters, cancellationToken),
+            null => resultConnection.ExecuteResultReaderAsync(sql, parameters, cancellationToken),
+            ISqlResultPreparedStatement statement => statement.ExecuteResultReaderAsync(parameters, cancellationToken),
             _ => throw new ArgumentException(
                 "The prepared statement must be created by the SQL Server provider.",
                 nameof(preparedStatement)),
         };
     }
+}
+
+internal static class MsSqlAdoErrors
+{
+    internal static DbException Translate(SqlClientException exception) =>
+        exception is MsSqlException sqlServer
+            ? new ApexDbException(sqlServer, errorCode: sqlServer.Number)
+            : new ApexDbException(exception);
 }
