@@ -9,6 +9,73 @@ namespace Apex.PgClient.Tests;
 public sealed class PgConnectionWireTests
 {
     [TestMethod]
+    public async Task CachedPreparedStatementIsPreparedOnceAndReused()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunCachedPreparedServerAsync(listener);
+        await using (var connection = await PgClient.ConnectAsync(new PgConnectOptions
+        {
+            Host = "127.0.0.1",
+            Port = port,
+            Username = "user",
+            Password = "pass",
+            Database = "db",
+            CachePreparedStatements = true,
+        }))
+        {
+            for (var value = 1; value <= 2; value++)
+            {
+                var rows = await connection.QueryAsync("SELECT $1::int4", SqlParameters.Create(value))
+                    .AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.AreEqual(value, rows[0].GetInt32(0));
+            }
+        }
+
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private static async Task RunCachedPreparedServerAsync(TcpListener listener)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        await ReadStartupAsync(stream);
+        await WriteStartupCompleteAsync(stream);
+
+        // First use: Parse + Describe(statement) + Sync, answered like a real server.
+        foreach (var expected in "PDS")
+        {
+            var (type, _) = await ReadMessageAsync(stream);
+            Assert.AreEqual((byte)expected, type);
+        }
+
+        await WriteMessageAsync(stream, (byte)'1', []);
+        await WriteMessageAsync(stream, (byte)'t', Join(Int16(1), Int32(23)));
+        await WriteMessageAsync(stream, (byte)'T', Join(Int16(1), Column("int4", 23, 4)));
+        await WriteMessageAsync(stream, (byte)'Z', [(byte)'I']);
+
+        // Both executions then reuse the cached statement without another Parse.
+        for (var value = 1; value <= 2; value++)
+        {
+            foreach (var expected in "BDES")
+            {
+                var (type, _) = await ReadMessageAsync(stream);
+                Assert.AreEqual((byte)expected, type);
+            }
+
+            await WriteMessageAsync(stream, (byte)'2', []);
+            await WriteMessageAsync(stream, (byte)'T', Join(Int16(1), Column("int4", 23, 4)));
+            await WriteMessageAsync(stream, (byte)'D', DataRow(value.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            await WriteMessageAsync(stream, (byte)'C', CString("SELECT 1"));
+            await WriteMessageAsync(stream, (byte)'Z', [(byte)'I']);
+        }
+
+        var (terminate, _) = await ReadMessageAsync(stream);
+        Assert.AreEqual((byte)'X', terminate);
+    }
+
+    [TestMethod]
     [DataRow(false)]
     [DataRow(true)]
     public async Task StreamingReadersOnlyPreserveResultsWhenRequested(bool preserveResults)

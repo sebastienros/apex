@@ -867,10 +867,7 @@ internal static class PgTextCodec
           value.Get<TimeOnly>().ToString(
             "HH:mm:ss.fffffff",
             CultureInfo.InvariantCulture),
-          SqlValueKind.DateTime =>
-          value.Get<DateTime>().ToString(
-            "yyyy-MM-dd HH:mm:ss.fffffff",
-            CultureInfo.InvariantCulture),
+          SqlValueKind.DateTime => FormatDateTime(value.Get<DateTime>()),
           SqlValueKind.DateTimeOffset =>
           value.Get<DateTimeOffset>().ToString(
             "yyyy-MM-dd HH:mm:ss.fffffffzzz",
@@ -965,9 +962,7 @@ internal static class PgTextCodec
           SqlValueKind.Object when value.ToObject() is DateOnly[] values =>
           FormatArray(values, item => item.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)),
           SqlValueKind.Object when value.ToObject() is DateTime[] values =>
-          FormatArray(values, item => item.ToString(
-            "yyyy-MM-dd HH:mm:ss.fffffff",
-            CultureInfo.InvariantCulture)),
+          FormatArray(values, FormatDateTime),
           SqlValueKind.Object when value.ToObject() is DateTimeOffset[] values =>
           FormatArray(values, item => item.ToString(
             "yyyy-MM-dd HH:mm:ss.fffffffzzz",
@@ -1040,6 +1035,13 @@ internal static class PgTextCodec
     private static string FormatInterval(PgInterval value) =>
       FormattableString.Invariant(
         $"{value.Years} years {value.Months} mons {value.Days} days {value.Hours} hours {value.Minutes} mins {value.Seconds}.{Math.Abs(value.Microseconds):D6} secs");
+
+    // A UTC DateTime carries an explicit zone so timestamptz comparisons don't depend on the
+    // session TimeZone; PostgreSQL ignores the zone for timestamp without time zone.
+    private static string FormatDateTime(DateTime value) =>
+      value.ToString(
+        value.Kind == DateTimeKind.Utc ? "yyyy-MM-dd HH:mm:ss.fffffff'Z'" : "yyyy-MM-dd HH:mm:ss.fffffff",
+        CultureInfo.InvariantCulture);
 
     private static string FormatTimeSpan(TimeSpan value)
     {

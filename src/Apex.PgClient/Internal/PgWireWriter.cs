@@ -103,13 +103,23 @@ internal sealed class PgWireWriter
             return;
         }
 
-        ArrayBufferWriter<byte> parse = new();
-        parse.WriteByte(0);
-        parse.WriteCString(sql);
-        parse.WriteInt16(0);
-        WriteTyped((byte)'P', parse.WrittenSpan);
+        var mark = _writer.WrittenCount;
+        try
+        {
+            ArrayBufferWriter<byte> parse = new();
+            parse.WriteByte(0);
+            parse.WriteCString(sql);
+            parse.WriteInt16(0);
+            WriteTyped((byte)'P', parse.WrittenSpan);
 
-        WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
+            WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
+        }
+        catch
+        {
+            RollbackTo(mark);
+            throw;
+        }
+
         await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -118,8 +128,18 @@ internal sealed class PgWireWriter
         PgParameters parameters,
         CancellationToken cancellationToken)
     {
-        WriteTypedParse(sql, parameters);
-        WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
+        var mark = _writer.WrittenCount;
+        try
+        {
+            WriteTypedParse(sql, parameters);
+            WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
+        }
+        catch
+        {
+            RollbackTo(mark);
+            throw;
+        }
+
         await FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -127,16 +147,25 @@ internal sealed class PgWireWriter
         PgBatch batch,
         CancellationToken cancellationToken)
     {
-        for (var i = 0; i < batch.Count; i++)
+        var mark = _writer.WrittenCount;
+        try
         {
-            var command = batch[i];
-            WriteTypedParse(command.Sql, command.Parameters);
-            WriteBindDescribeExecute(
-                string.Empty,
-                string.Empty,
-                command.Parameters,
-                fetchSize: 0,
-                sync: false);
+            for (var i = 0; i < batch.Count; i++)
+            {
+                var command = batch[i];
+                WriteTypedParse(command.Sql, command.Parameters);
+                WriteBindDescribeExecute(
+                    string.Empty,
+                    string.Empty,
+                    command.Parameters,
+                    fetchSize: 0,
+                    sync: false);
+            }
+        }
+        catch
+        {
+            RollbackTo(mark);
+            throw;
         }
 
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
@@ -189,6 +218,21 @@ internal sealed class PgWireWriter
         }
     }
 
+    // Drops messages appended after mark when building a command fails (for example a
+    // parameter that cannot be encoded), so no half-written command reaches the server with the
+    // next flush. Earlier unflushed pipelined messages before mark are kept: ResetWrittenCount
+    // leaves the buffer contents in place, so re-advancing restores exactly that prefix.
+    private void RollbackTo(int mark)
+    {
+        if (_writer.WrittenCount == mark)
+        {
+            return;
+        }
+
+        _writer.ResetWrittenCount();
+        _writer.Advance(mark);
+    }
+
     public async ValueTask FlushAsync(CancellationToken cancellationToken)
     {
         if (_writer.WrittenCount == 0)
@@ -199,7 +243,8 @@ internal sealed class PgWireWriter
         await _stream.WriteAsync(
             _writer.WrittenMemory,
             cancellationToken).ConfigureAwait(false);
-        _writer.Clear();
+        // Clear() would zero every written byte on each flush; the bytes are overwritten anyway.
+        _writer.ResetWrittenCount();
     }
 
     public async ValueTask WriteCopyDataAsync(

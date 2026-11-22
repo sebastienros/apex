@@ -940,7 +940,9 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         if (existing is null)
         {
             await _writer.WritePrepareAsync(name, sql, CancellationToken.None).ConfigureAwait(false);
-            await ReadReadyAsync((byte)'1', CancellationToken.None).ConfigureAwait(false);
+            // WritePrepareAsync sends Parse, Describe (statement), and Sync, so the reply carries
+            // ParameterDescription and RowDescription/NoData besides ParseComplete.
+            _ = await ReadPreparedAsync(CancellationToken.None).ConfigureAwait(false);
             string? evicted;
             lock (_statementCacheGate)
             {
@@ -2251,7 +2253,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         InvalidDataException or
         AuthenticationException or
         ObjectDisposedException or
-        PgException { SqlState: "57P01" or "57P02" or "57P03" or "08006" };
+        PgException { IsFatal: true } or
+        PgException { Severity: "FATAL" or "PANIC" };
 
     private static long ParseAffectedRows(string commandTag)
     {
