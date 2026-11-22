@@ -22,6 +22,11 @@ while (await reader.ReadAsync())
     Console.WriteLine(reader.GetInt32(0));
 ```
 
+Connection strings may use ADO.NET `Key=Value;` syntax (values quoted with `'` or `"`,
+the quote doubled to include it) as well as the libpq keyword strings and
+`postgres://` URIs accepted by `PgConnectOptions.Parse`. The ADO.NET syntax is
+translated by this adapter; the native parser keeps libpq semantics.
+
 `PgDbDataSource` uses `PgPool` and accepts optional `SqlPoolOptions`. Reader result
 boundaries use the native protocol implementation. Server failures become
 `ApexDbException : DbException`, retaining `PgException` as the inner exception and

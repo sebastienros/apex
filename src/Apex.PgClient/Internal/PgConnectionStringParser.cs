@@ -10,21 +10,13 @@ internal static class PgConnectionStringParser
         while (position < input.Length)
         {
             SkipWhitespace(input, ref position);
-            while (position < input.Length && input[position] == ';')
-            {
-                position++;
-                SkipWhitespace(input, ref position);
-            }
             if (position == input.Length)
             {
                 break;
             }
 
             var keyStart = position;
-            while (position < input.Length &&
-                input[position] != '=' &&
-                input[position] != ';' &&
-                !char.IsWhiteSpace(input[position]))
+            while (position < input.Length && input[position] != '=' && !char.IsWhiteSpace(input[position]))
             {
                 position++;
             }
@@ -42,8 +34,8 @@ internal static class PgConnectionStringParser
             }
 
             SkipWhitespace(input, ref position);
-            var value = position < input.Length && input[position] is '\'' or '"'
-              ? ParseQuoted(input, ref position, input[position])
+            var value = position < input.Length && input[position] == '\''
+              ? ParseQuoted(input, ref position)
               : ParseUnquoted(input, ref position);
             values[key] = value;
         }
@@ -51,25 +43,15 @@ internal static class PgConnectionStringParser
         return values;
     }
 
-    private static string ParseQuoted(
-        ReadOnlySpan<char> input,
-        ref int position,
-        char quote)
+    private static string ParseQuoted(ReadOnlySpan<char> input, ref int position)
     {
         position++;
         System.Text.StringBuilder value = new();
         while (position < input.Length)
         {
             var current = input[position++];
-            if (current == quote)
+            if (current == '\'')
             {
-                if (position < input.Length && input[position] == quote)
-                {
-                    position++;
-                    value.Append(quote);
-                    continue;
-                }
-
                 return value.ToString();
             }
 
@@ -92,9 +74,7 @@ internal static class PgConnectionStringParser
     private static string ParseUnquoted(ReadOnlySpan<char> input, ref int position)
     {
         System.Text.StringBuilder value = new();
-        while (position < input.Length &&
-            input[position] != ';' &&
-            !char.IsWhiteSpace(input[position]))
+        while (position < input.Length && !char.IsWhiteSpace(input[position]))
         {
             var current = input[position++];
             if (current == '\\')

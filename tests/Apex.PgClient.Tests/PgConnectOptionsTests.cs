@@ -73,18 +73,17 @@ public sealed class PgConnectOptionsTests
     }
 
     [TestMethod]
-    public void ParsesAdoNetSemicolonConnectionString()
+    public void KeepsLibpqSemanticsForSemicolonsAndDoubleQuotes()
     {
+        // ADO.NET-style strings are translated by Apex.PgClient.AdoNet; the native parser keeps
+        // libpq semantics, where ';' and '"' are ordinary value characters.
         PgConnectOptions options = PgConnectOptions.Parse(
-          "Host=db.example;Port=5544;Username=app;Pass" +
-          "word=\"secret value;with \"\"quotes\"\"\";Database=app;sslmode=disable");
+          "host=db.example user=app password=ab;cd\"ef dbname=app");
 
         Assert.AreEqual("db.example", options.Host);
-        Assert.AreEqual(5544, options.Port);
         Assert.AreEqual("app", options.Username);
-        Assert.AreEqual("secret value;with \"quotes\"", options.Password);
+        Assert.AreEqual("ab;cd\"ef", options.Password);
         Assert.AreEqual("app", options.Database);
-        Assert.AreEqual(PgSslMode.Disable, options.SslMode);
     }
 
     [TestMethod]

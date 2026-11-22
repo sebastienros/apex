@@ -15,12 +15,12 @@ public sealed class PgDbConnection : ApexDbConnection
     public PgDbConnection(string connectionString)
         : this(
             connectionString,
-            string.IsNullOrWhiteSpace(connectionString) ? new PgConnectOptions() : PgConnectOptions.Parse(connectionString),
+            PgAdoConnectionString.Parse(connectionString),
             null) { }
     internal PgDbConnection(
         string connectionString,
         Func<CancellationToken, ValueTask<ISqlConnection>> pooledOpen)
-        : this(connectionString, PgConnectOptions.Parse(connectionString), pooledOpen) { }
+        : this(connectionString, PgAdoConnectionString.Parse(connectionString), pooledOpen) { }
     internal PgDbConnection(
         string connectionString,
         PgConnectOptions options,
@@ -43,9 +43,7 @@ public sealed class PgDbConnection : ApexDbConnection
             : await PgClient.ConnectAsync(_options, cancellationToken).ConfigureAwait(false);
     protected override void SetConnectionStringCore(string connectionString)
     {
-        _options = string.IsNullOrWhiteSpace(connectionString)
-            ? new PgConnectOptions()
-            : PgConnectOptions.Parse(connectionString);
+        _options = PgAdoConnectionString.Parse(connectionString);
         SetConnectionMetadata(connectionString, _options.Database, _options.Host, _options.ConnectTimeout);
     }
     protected override DbCommand CreateCommandCore() => new PgDbCommand(this);
@@ -136,7 +134,7 @@ public sealed class PgDbDataSource : DbDataSource
     public PgDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
     {
         _connectionString = connectionString;
-        _options = PgConnectOptions.Parse(connectionString);
+        _options = PgAdoConnectionString.Parse(connectionString);
         _pool = PgPool.Create(_options, poolOptions);
     }
 
