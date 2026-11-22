@@ -408,14 +408,14 @@ public sealed class PgRowDecoderTests
           Guid.Parse("12345678-1234-5678-9012-123456789abc");
         TypedDecodeLoop loop = new(expected);
 
-        // Warm up by running the same loop that is measured. The loop starts as
-        // Tier0 code, and once it is hot the runtime compiles an optimized
-        // on-stack replacement (OSR) version synchronously on this thread. That
-        // compile can allocate here: its type-cast queries fill the runtime's
-        // shared cast cache, and the thread whose insert makes the cache grow
-        // allocates the new table (a one-off 98,352-byte Int32[] on net11.0).
-        // OSR code is compiled once per loop and reused by later calls, so the
-        // measured call below only runs steady-state code.
+        // Warm up by running the same loop that is measured, so nothing runs for
+        // the first time inside the measured window. In particular, the loop
+        // starts as Tier0 code and, once it is hot, the runtime compiles an
+        // optimized on-stack replacement (OSR) version synchronously on this
+        // thread. On net11.0 that compile sometimes allocates a 98,352-byte
+        // Int32[] here, the size of the runtime's cast cache table when it grows
+        // to its maximum. OSR code is compiled once per loop and reused by later
+        // calls, so the measured call below only runs steady-state code.
         _ = loop.Run(10_000);
 
         var before = GC.GetAllocatedBytesForCurrentThread();
