@@ -35,7 +35,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 {
     private readonly MsSqlConnection _connection;
     private readonly AsyncAutoResetEvent _advance = new();
-    private readonly MsSqlResultReaderState? _results;
+    private readonly SqlResultReaderState? _results;
     private readonly object _gate = new();
     private readonly Action _cancelAction;
     private readonly CancellationTokenRegistration _operationCancellation;
@@ -97,7 +97,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     {
         _connection = connection;
         _statement = statement;
-        _results = preserveResultBoundaries ? new MsSqlResultReaderState(sql) : null;
+        _results = preserveResultBoundaries ? new SqlResultReaderState() : null;
         _operationCancellationToken = cancellationToken;
         _cancelAction = Cancel;
         _readCompletion.RunContinuationsAsynchronously = true;
@@ -153,7 +153,9 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
             wait = results.Initialize();
         }
 
-        return new ValueTask<bool>(wait.WaitAsync(cancellationToken));
+        // Cancel the operation, not just the wait, so an abandoned initializer cannot later
+        // consume the first row of the result.
+        return AwaitResultTransitionAsync(wait, cancellationToken);
     }
 
     public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
@@ -175,10 +177,10 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 
         if (advanceRow) _advance.Set();
         if (advanceResult) results.Advance.Set();
-        return AwaitNextResultAsync(wait, cancellationToken);
+        return AwaitResultTransitionAsync(wait, cancellationToken);
     }
 
-    private async ValueTask<bool> AwaitNextResultAsync(
+    private async ValueTask<bool> AwaitResultTransitionAsync(
         Task<bool> wait,
         CancellationToken cancellationToken)
     {
@@ -462,7 +464,15 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
             _stopped = true;
         }
 
-        Cancel();
+        // Result-preserving (ADO.NET) readers drain like the PostgreSQL and MySQL readers so the
+        // remaining statements of a batch still execute and a reader parked at its final result
+        // boundary does not pay an attention round trip. Explicit cancellation and timeouts still
+        // reach Cancel() through the operation token.
+        if (_results is null)
+        {
+            Cancel();
+        }
+
         _advance.Set();
         _results?.Advance.Set();
         try
@@ -569,16 +579,14 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             final |= (done.Status & TdsDoneStatus.More) == 0;
                             var hadCurrentResult = _hasCurrentResult;
                             var hasCountResult = (done.Status & TdsDoneStatus.Count) != 0;
-                            if (_results is not null)
+                            // Like SqlClient, count every DONE_COUNT except those reported for SELECT
+                            // statements, so OUTPUT clauses and multi-statement batches are classified
+                            // by the server rather than by the batch text.
+                            if (_results is not null &&
+                                hasCountResult &&
+                                done.CurrentCommand != TdsSelectCommand)
                             {
-                                if (hasCountResult && (!hadCurrentResult || _results.CountCurrentResult))
-                                {
-                                    _results.AddRecordsAffected(done.RowCount);
-                                }
-                                if (hadCurrentResult)
-                                {
-                                    _results.CountCurrentResult = false;
-                                }
+                                _results.AddRecordsAffected(done.RowCount);
                             }
                             var isTerminal = (done.Status & TdsDoneStatus.More) == 0;
                             var hasSyntheticResult = !hadCurrentResult &&
@@ -594,7 +602,12 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             }
 
                             _tdsColumns = Array.Empty<TdsColumn>();
-                            if (_results is not null && hasSyntheticResult)
+                            // A failed statement must not surface as an empty result: that would park the
+                            // pump at the boundary and defer the server error until NextResult or dispose.
+                            var publishSyntheticResult = _results is not null &&
+                                hasSyntheticResult &&
+                                (done.Status & TdsDoneStatus.Error) == 0;
+                            if (publishSyntheticResult)
                             {
                                 _columns = Array.Empty<SqlColumn>();
                                 ResultStarted();
@@ -606,7 +619,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                                 throw new OperationCanceledException(attention.CancellationToken);
                             }
 
-                            if (_results is not null && (hadCurrentResult || hasSyntheticResult))
+                            if (_results is not null && (hadCurrentResult || publishSyntheticResult))
                             {
                                 await ResultCompletedAsync().ConfigureAwait(false);
                             }
@@ -788,24 +801,8 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         }
     }
 
-    private sealed class MsSqlResultReaderState(string sql) : SqlResultReaderState
-    {
-        internal bool CountCurrentResult { get; set; } = StartsWithModifyingKeyword(sql);
-    }
-
-    private static bool StartsWithModifyingKeyword(string sql)
-    {
-        var statement = sql.AsSpan().TrimStart();
-        return StartsWithKeyword(statement, "INSERT") ||
-            StartsWithKeyword(statement, "UPDATE") ||
-            StartsWithKeyword(statement, "DELETE") ||
-            StartsWithKeyword(statement, "MERGE");
-    }
-
-    private static bool StartsWithKeyword(ReadOnlySpan<char> statement, ReadOnlySpan<char> keyword) =>
-        statement.StartsWith(keyword, StringComparison.OrdinalIgnoreCase) &&
-        (statement.Length == keyword.Length ||
-            !(char.IsLetterOrDigit(statement[keyword.Length]) || statement[keyword.Length] == '_'));
+    // TDS DONE CurCmd value for SELECT statements (TdsEnums.SELECT in SqlClient).
+    private const ushort TdsSelectCommand = 0xC1;
 
     private void SignalRead(bool result, Exception? error)
     {

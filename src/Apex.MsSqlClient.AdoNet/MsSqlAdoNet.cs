@@ -123,17 +123,19 @@ public sealed class MsSqlDbProviderFactory : DbProviderFactory
 public sealed class MsSqlDbDataSource : DbDataSource
 {
     private readonly string _connectionString;
+    private readonly MsSqlConnectOptions _options;
     private readonly MsSqlPool _pool;
     public MsSqlDbDataSource(string connectionString) : this(connectionString, null) { }
     public MsSqlDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
     {
         _connectionString = connectionString;
-        _pool = MsSqlPool.Create(MsSqlConnectOptions.Parse(connectionString), poolOptions);
+        _options = MsSqlConnectOptions.Parse(connectionString);
+        _pool = MsSqlPool.Create(_options, poolOptions);
     }
 
     public override string ConnectionString => _connectionString;
     protected override DbConnection CreateDbConnection() =>
-        new MsSqlDbConnection(_connectionString, _pool.GetConnectionAsync);
+        new MsSqlDbConnection(_connectionString, _options, _pool.GetConnectionAsync);
     protected override DbConnection OpenDbConnection() => throw ApexDbCommand.AsyncOnly();
     protected override async ValueTask<DbConnection> OpenDbConnectionAsync(CancellationToken cancellationToken = default)
     {
@@ -146,7 +148,7 @@ public sealed class MsSqlDbDataSource : DbDataSource
     {
         var command = new MsSqlDbCommand(new MsSqlDbConnection(
             _connectionString,
-            MsSqlConnectOptions.Parse(_connectionString),
+            _options,
             _pool.GetConnectionAsync,
             autoOpenForCommands: true));
         command.CommandText = commandText;
@@ -157,7 +159,7 @@ public sealed class MsSqlDbDataSource : DbDataSource
         {
             Connection = new MsSqlDbConnection(
                 _connectionString,
-                MsSqlConnectOptions.Parse(_connectionString),
+                _options,
                 _pool.GetConnectionAsync,
                 autoOpenForCommands: true),
         };
@@ -174,31 +176,9 @@ public sealed class MsSqlDbDataSource : DbDataSource
     }
 }
 
-internal sealed class MsSqlAdoReaderFactory : IApexAdoReaderFactory
+internal static class MsSqlAdoReaderFactory
 {
-    internal static readonly MsSqlAdoReaderFactory Instance = new();
-
-    public ValueTask<ISqlRowReader> ExecuteReaderAsync(
-        ISqlConnection connection,
-        string sql,
-        SqlParameters parameters,
-        ISqlPreparedStatement? preparedStatement,
-        CancellationToken cancellationToken)
-    {
-        if (connection is not ISqlResultReaderConnection resultConnection)
-        {
-            throw new ArgumentException("The command connection does not support SQL Server ADO.NET readers.", nameof(connection));
-        }
-
-        return preparedStatement switch
-        {
-            null => resultConnection.ExecuteResultReaderAsync(sql, parameters, cancellationToken),
-            ISqlResultPreparedStatement statement => statement.ExecuteResultReaderAsync(parameters, cancellationToken),
-            _ => throw new ArgumentException(
-                "The prepared statement must be created by the SQL Server provider.",
-                nameof(preparedStatement)),
-        };
-    }
+    internal static readonly IApexAdoReaderFactory Instance = new ApexResultReaderFactory("SQL Server");
 }
 
 internal static class MsSqlAdoErrors

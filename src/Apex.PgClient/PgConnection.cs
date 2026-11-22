@@ -2750,7 +2750,9 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                 wait = results.Initialize();
             }
 
-            return new ValueTask<bool>(wait.WaitAsync(cancellationToken));
+            // Cancel the operation, not just the wait, so an abandoned initializer cannot later
+            // consume the first row of the result.
+            return AwaitResultTransitionAsync(wait, cancellationToken);
         }
 
         public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
@@ -2772,10 +2774,10 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
             if (advanceRow) _advance.Set();
             if (advanceResult) results.Advance.Set();
-            return AwaitNextResultAsync(wait, cancellationToken);
+            return AwaitResultTransitionAsync(wait, cancellationToken);
         }
 
-        private async ValueTask<bool> AwaitNextResultAsync(
+        private async ValueTask<bool> AwaitResultTransitionAsync(
             Task<bool> wait,
             CancellationToken cancellationToken)
         {

@@ -123,17 +123,19 @@ public sealed class MySqlDbProviderFactory : DbProviderFactory
 public sealed class MySqlDbDataSource : DbDataSource
 {
     private readonly string _connectionString;
+    private readonly MySqlConnectOptions _options;
     private readonly MySqlPool _pool;
     public MySqlDbDataSource(string connectionString) : this(connectionString, null) { }
     public MySqlDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
     {
         _connectionString = connectionString;
-        _pool = MySqlPool.Create(connectionString, poolOptions);
+        _options = MySqlConnectOptions.Parse(connectionString);
+        _pool = MySqlPool.Create(_options, poolOptions);
     }
 
     public override string ConnectionString => _connectionString;
     protected override DbConnection CreateDbConnection() =>
-        new MySqlDbConnection(_connectionString, _pool.GetConnectionAsync);
+        new MySqlDbConnection(_connectionString, _options, _pool.GetConnectionAsync);
     protected override DbConnection OpenDbConnection() => throw ApexDbCommand.AsyncOnly();
     protected override async ValueTask<DbConnection> OpenDbConnectionAsync(CancellationToken cancellationToken = default)
     {
@@ -146,7 +148,7 @@ public sealed class MySqlDbDataSource : DbDataSource
     {
         var command = new MySqlDbCommand(new MySqlDbConnection(
             _connectionString,
-            MySqlConnectOptions.Parse(_connectionString),
+            _options,
             _pool.GetConnectionAsync,
             autoOpenForCommands: true));
         command.CommandText = commandText;
@@ -157,7 +159,7 @@ public sealed class MySqlDbDataSource : DbDataSource
         {
             Connection = new MySqlDbConnection(
                 _connectionString,
-                MySqlConnectOptions.Parse(_connectionString),
+                _options,
                 _pool.GetConnectionAsync,
                 autoOpenForCommands: true),
         };
@@ -174,31 +176,9 @@ public sealed class MySqlDbDataSource : DbDataSource
     }
 }
 
-internal sealed class MySqlAdoReaderFactory : IApexAdoReaderFactory
+internal static class MySqlAdoReaderFactory
 {
-    internal static readonly MySqlAdoReaderFactory Instance = new();
-
-    public ValueTask<ISqlRowReader> ExecuteReaderAsync(
-        ISqlConnection connection,
-        string sql,
-        SqlParameters parameters,
-        ISqlPreparedStatement? preparedStatement,
-        CancellationToken cancellationToken)
-    {
-        if (connection is not ISqlResultReaderConnection resultConnection)
-        {
-            throw new ArgumentException("The command connection does not support MySQL ADO.NET readers.", nameof(connection));
-        }
-
-        return preparedStatement switch
-        {
-            null => resultConnection.ExecuteResultReaderAsync(sql, parameters, cancellationToken),
-            ISqlResultPreparedStatement statement => statement.ExecuteResultReaderAsync(parameters, cancellationToken),
-            _ => throw new ArgumentException(
-                "The prepared statement must be created by the MySQL provider.",
-                nameof(preparedStatement)),
-        };
-    }
+    internal static readonly IApexAdoReaderFactory Instance = new ApexResultReaderFactory("MySQL");
 }
 
 internal static class MySqlAdoErrors

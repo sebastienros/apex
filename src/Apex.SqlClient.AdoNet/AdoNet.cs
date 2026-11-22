@@ -96,14 +96,14 @@ public abstract class ApexDbParameterCollection : DbParameterCollection
         _parameters.Clear();
         Changed();
     }
-    public override bool Contains(object value) => _parameters.Contains((DbParameter)value);
+    public override bool Contains(object value) => value is DbParameter parameter && _parameters.Contains(parameter);
     public override bool Contains(string value) => IndexOf(value) >= 0;
     public override void CopyTo(Array array, int index) => ((ICollection)_parameters).CopyTo(array, index);
     public override IEnumerator GetEnumerator() => _parameters.GetEnumerator();
     protected override DbParameter GetParameter(int index) => _parameters[index];
     protected override DbParameter GetParameter(string parameterName) =>
         _parameters[IndexOf(parameterName)];
-    public override int IndexOf(object value) => _parameters.IndexOf((DbParameter)value);
+    public override int IndexOf(object value) => value is DbParameter parameter ? _parameters.IndexOf(parameter) : -1;
     public override int IndexOf(string parameterName) =>
         _parameters.FindIndex(x => string.Equals(x.ParameterName, parameterName, StringComparison.OrdinalIgnoreCase));
     public override void Insert(int index, object value)
@@ -215,7 +215,7 @@ public abstract class ApexDbCommand : DbCommand
             ? connection.TranslateException(exception)
             : new ApexDbException(exception);
 
-    public override void Cancel() => _activeCancellation?.Cancel();
+    public override void Cancel() => ApexCancellation.TryCancel(_activeCancellation);
     public override void Prepare() => throw AsyncOnly();
     public override Task PrepareAsync(CancellationToken cancellationToken = default) =>
         ApexExceptionBoundary.RunAsync(() => PrepareCoreAsync(cancellationToken), TranslateException);
@@ -935,6 +935,23 @@ public class ApexDbDataReader : DbDataReader
     }
 }
 
+internal static class ApexCancellation
+{
+    // DbCommand.Cancel must be a no-op when nothing is running; the operation may complete and
+    // dispose its source concurrently with a Cancel call from another thread.
+    internal static void TryCancel(CancellationTokenSource? cancellation)
+    {
+        if (cancellation is null) return;
+        try
+        {
+            cancellation.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+}
+
 internal interface IApexAdoReaderFactory
 {
     ValueTask<ISqlRowReader> ExecuteReaderAsync(
@@ -943,6 +960,34 @@ internal interface IApexAdoReaderFactory
         SqlParameters parameters,
         ISqlPreparedStatement? preparedStatement,
         CancellationToken cancellationToken);
+}
+
+/// <summary>Executes commands through the native result-preserving reader capabilities.</summary>
+internal sealed class ApexResultReaderFactory(string providerName) : IApexAdoReaderFactory
+{
+    public ValueTask<ISqlRowReader> ExecuteReaderAsync(
+        ISqlConnection connection,
+        string sql,
+        SqlParameters parameters,
+        ISqlPreparedStatement? preparedStatement,
+        CancellationToken cancellationToken)
+    {
+        if (connection is not ISqlResultReaderConnection resultConnection)
+        {
+            throw new ArgumentException(
+                $"The command connection does not support {providerName} ADO.NET readers.",
+                nameof(connection));
+        }
+
+        return preparedStatement switch
+        {
+            null => resultConnection.ExecuteResultReaderAsync(sql, parameters, cancellationToken),
+            ISqlResultPreparedStatement statement => statement.ExecuteResultReaderAsync(parameters, cancellationToken),
+            _ => throw new ArgumentException(
+                $"The prepared statement must be created by the {providerName} provider.",
+                nameof(preparedStatement)),
+        };
+    }
 }
 
 /// <summary>Async-only ADO.NET transaction wrapper.</summary>
@@ -1360,7 +1405,19 @@ internal sealed class ApexDbBatchDataReader : DbDataReader
 
         await ReleaseCurrentAsync(drain: false, cancellationToken).ConfigureAwait(false);
         _index++;
-        var next = await _create(_index, cancellationToken).ConfigureAwait(false);
+        (ApexDbBatchCommand BatchCommand, ApexDbCommand Command, DbDataReader Reader) next;
+        try
+        {
+            next = await _create(_index, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // The batch stops at the failed command; closing must not re-drain the released
+            // reader or execute the commands that follow it.
+            _allCommandsDrained = true;
+            throw;
+        }
+
         _batchCommand = next.BatchCommand;
         _command = next.Command;
         _reader = next.Reader;
@@ -1422,6 +1479,7 @@ internal sealed class ApexDbBatchDataReader : DbDataReader
 
     private async ValueTask ReleaseCurrentAsync(bool drain, CancellationToken cancellationToken)
     {
+        if (_currentReleased) return;
         try
         {
             if (drain)
@@ -1432,10 +1490,10 @@ internal sealed class ApexDbBatchDataReader : DbDataReader
             var current = _reader.RecordsAffected;
             _batchCommand.SetRecordsAffected(current);
             _recordsAffected = CombineRecordsAffected(_recordsAffected, current);
-            _currentReleased = true;
         }
         finally
         {
+            _currentReleased = true;
             try
             {
                 await _reader.DisposeAsync().ConfigureAwait(false);
@@ -1474,6 +1532,7 @@ public abstract class ApexDbBatch : DbBatch
     private DbConnection? _connection;
     private DbTransaction? _transaction;
     private CancellationTokenSource? _activeCancellation;
+    private ApexDbCommand? _executingCommand;
     private List<ApexDbCommand>? _preparedCommands;
     private PreparedBatchState? _preparedState;
 
@@ -1509,7 +1568,13 @@ public abstract class ApexDbBatch : DbBatch
     protected virtual void ValidateProviderConnection(DbConnection connection) { }
     protected virtual void ValidateProviderTransaction(DbTransaction transaction) { }
     protected override DbBatchCommand CreateDbBatchCommand() => CreateBatchCommandCore();
-    public override void Cancel() => _activeCancellation?.Cancel();
+    public override void Cancel()
+    {
+        ApexCancellation.TryCancel(_activeCancellation);
+        // Reader commands after the first run under the NextResultAsync caller's token, so the
+        // batch also cancels whichever command is currently executing.
+        Volatile.Read(ref _executingCommand)?.Cancel();
+    }
     public override void Prepare() => throw ApexDbCommand.AsyncOnly();
     public override async Task PrepareAsync(CancellationToken cancellationToken = default)
     {
@@ -1684,6 +1749,7 @@ public abstract class ApexDbBatch : DbBatch
                     var command = await CreateCommandForExecutionAsync(index, batchCommand)
                         .ConfigureAwait(false);
                     command.CommandTimeout = Timeout;
+                    Volatile.Write(ref _executingCommand, command);
                     try
                     {
                         var reader = await command.ExecuteReaderAsync(
@@ -1808,6 +1874,7 @@ public abstract class ApexDbBatch : DbBatch
 
     private void CompleteReaderOperation()
     {
+        Volatile.Write(ref _executingCommand, null);
         var cancellation = Interlocked.Exchange(ref _activeCancellation, null);
         cancellation?.Dispose();
     }

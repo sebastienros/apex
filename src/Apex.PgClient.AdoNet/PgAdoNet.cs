@@ -130,17 +130,19 @@ public sealed class PgDbProviderFactory : DbProviderFactory
 public sealed class PgDbDataSource : DbDataSource
 {
     private readonly string _connectionString;
+    private readonly PgConnectOptions _options;
     private readonly PgPool _pool;
     public PgDbDataSource(string connectionString) : this(connectionString, null) { }
     public PgDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
     {
         _connectionString = connectionString;
-        _pool = PgPool.Create(PgConnectOptions.Parse(connectionString), poolOptions);
+        _options = PgConnectOptions.Parse(connectionString);
+        _pool = PgPool.Create(_options, poolOptions);
     }
 
     public override string ConnectionString => _connectionString;
     protected override DbConnection CreateDbConnection() =>
-        new PgDbConnection(_connectionString, _pool.GetConnectionAsync);
+        new PgDbConnection(_connectionString, _options, _pool.GetConnectionAsync);
     protected override DbConnection OpenDbConnection() => throw ApexDbCommand.AsyncOnly();
     protected override async ValueTask<DbConnection> OpenDbConnectionAsync(CancellationToken cancellationToken = default)
     {
@@ -153,7 +155,7 @@ public sealed class PgDbDataSource : DbDataSource
     {
         var command = new PgDbCommand(new PgDbConnection(
             _connectionString,
-            PgConnectOptions.Parse(_connectionString),
+            _options,
             _pool.GetConnectionAsync,
             autoOpenForCommands: true));
         command.CommandText = commandText;
@@ -164,7 +166,7 @@ public sealed class PgDbDataSource : DbDataSource
         {
             Connection = new PgDbConnection(
                 _connectionString,
-                PgConnectOptions.Parse(_connectionString),
+                _options,
                 _pool.GetConnectionAsync,
                 autoOpenForCommands: true),
         };
@@ -181,31 +183,9 @@ public sealed class PgDbDataSource : DbDataSource
     }
 }
 
-internal sealed class PgAdoReaderFactory : IApexAdoReaderFactory
+internal static class PgAdoReaderFactory
 {
-    internal static readonly PgAdoReaderFactory Instance = new();
-
-    public ValueTask<ISqlRowReader> ExecuteReaderAsync(
-        ISqlConnection connection,
-        string sql,
-        SqlParameters parameters,
-        ISqlPreparedStatement? preparedStatement,
-        CancellationToken cancellationToken)
-    {
-        if (connection is not ISqlResultReaderConnection resultConnection)
-        {
-            throw new ArgumentException("The command connection does not support PostgreSQL ADO.NET readers.", nameof(connection));
-        }
-
-        return preparedStatement switch
-        {
-            null => resultConnection.ExecuteResultReaderAsync(sql, parameters, cancellationToken),
-            ISqlResultPreparedStatement statement => statement.ExecuteResultReaderAsync(parameters, cancellationToken),
-            _ => throw new ArgumentException(
-                "The prepared statement must be created by the PostgreSQL provider.",
-                nameof(preparedStatement)),
-        };
-    }
+    internal static readonly IApexAdoReaderFactory Instance = new ApexResultReaderFactory("PostgreSQL");
 }
 
 internal static class PgAdoErrors
