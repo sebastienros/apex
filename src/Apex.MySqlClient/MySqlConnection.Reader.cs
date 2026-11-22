@@ -437,6 +437,8 @@ public sealed partial class MySqlConnection
                                 header.Sequence,
                                 CancellationToken.None)
                               .ConfigureAwait(false);
+                            // The rows loaded are reported by the OK packet that follows the file.
+                            affectedRows = _connection._lastCommandInfo.AffectedRows;
                         }
 
                         columnCount = result.IsCompletion ? 0 : result.ColumnCount;
