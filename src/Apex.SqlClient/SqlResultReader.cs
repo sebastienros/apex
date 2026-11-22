@@ -1,14 +1,14 @@
 namespace Apex.SqlClient;
 
 /// <summary>A streaming reader that preserves individual result sets.</summary>
-public interface ISqlMultiResultReader : ISqlRowReader
+internal interface ISqlMultiResultReader : ISqlRowReader
 {
     /// <summary>Advances to the next result after the current result has been drained.</summary>
     ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>A result reader that can establish metadata without losing its first row.</summary>
-public interface ISqlResultBoundaryReader : ISqlMultiResultReader
+internal interface ISqlResultBoundaryReader : ISqlMultiResultReader
 {
     /// <summary>
     /// Establishes the current result's metadata and positions on its first row, if any.

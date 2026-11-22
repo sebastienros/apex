@@ -48,9 +48,6 @@ shared ADO.NET adapter implementation.
   lower-allocation borrowed `ISqlRowReader`; its current row is valid only until
   the next `ReadAsync` or disposal.
 - `SqlParameters` stores ordered `SqlValue` instances. Common scalar `SqlValue` conversions avoid boxing at parameter construction.
-- Optional `ISqlMultiResultReader` and `ISqlResultBoundaryReader` capabilities
-  describe result-set transitions and initial metadata/row availability without
-  adding ADO.NET concepts to `ISqlRowReader`.
 - PostgreSQL uses `$1` placeholders, MySQL uses `?`, and Microsoft SQL Server uses `@P1`,
   `@P2`, and so on. Microsoft SQL Server parameters are sent with `sp_executesql`, not
   interpolated into SQL.
