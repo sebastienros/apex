@@ -103,11 +103,25 @@ public sealed class MsSqlConnectionWireTests
         var server = RunResponseServerAsync(listener, response.WrittenMemory.ToArray());
         await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
         var reader = await connection.ExecuteResultReaderAsync("SELEC bad", default, default);
+        try
+        {
+            // Bounded so a regression (an empty synthetic result parking the pump) fails fast.
+            await Assert.ThrowsAsync<SqlClientException>(
+                () => ((ISqlResultBoundaryReader)reader).InitializeAsync().AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            // The native reader's disposal rethrows the faulted operation it already reported.
+            try
+            {
+                await reader.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (SqlClientException)
+            {
+            }
+        }
 
-        await Assert.ThrowsAsync<SqlClientException>(
-            async () => await ((ISqlResultBoundaryReader)reader).InitializeAsync());
-        // The native reader's disposal rethrows the faulted operation it already reported.
-        await Assert.ThrowsAsync<SqlClientException>(async () => await reader.DisposeAsync());
         await server.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
