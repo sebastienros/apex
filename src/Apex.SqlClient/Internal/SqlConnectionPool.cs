@@ -167,12 +167,14 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             _idle.Clear();
         }
 
-        foreach (var pooled in idle)
+        try
         {
-            await DisposeConnectionAsync(pooled.Connection).ConfigureAwait(false);
+            await DisposeConnectionsAsync(idle).ConfigureAwait(false);
         }
-
-        _disposeCancellation.Dispose();
+        finally
+        {
+            _disposeCancellation.Dispose();
+        }
     }
 
     internal async Task CleanAsync()
@@ -203,15 +205,42 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                 }
             }
 
-            foreach (var pooled in reusable)
+            // Popping reversed the stack; push back from the coldest so the hottest connection
+            // stays on top and idle pruning keeps its LIFO order.
+            for (var i = reusable.Count - 1; i >= 0; i--)
             {
-                _idle.Push(pooled);
+                _idle.Push(reusable[i]);
             }
         }
 
-        foreach (var pooled in expired)
+        await DisposeConnectionsAsync(expired).ConfigureAwait(false);
+    }
+
+    // Disposes every connection even when some fail, so one bad connection can't leak the rest
+    // or leave the size count stale; failures are reported after all have been attempted.
+    private async ValueTask DisposeConnectionsAsync(List<PooledConnection> connections)
+    {
+        List<Exception>? errors = null;
+        foreach (var pooled in connections)
         {
-            await DisposeConnectionAsync(pooled.Connection).ConfigureAwait(false);
+            try
+            {
+                await DisposeConnectionAsync(pooled.Connection).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                (errors ??= []).Add(exception);
+            }
+        }
+
+        if (errors is not null)
+        {
+            if (errors.Count == 1)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(errors[0]).Throw();
+            }
+
+            throw new AggregateException(errors);
         }
     }
 

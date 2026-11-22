@@ -34,4 +34,25 @@ public abstract record SqlConnectOptions
     public int PreparedStatementCacheSize { get; init; } = 256;
 
     public int PreparedStatementCacheSqlLengthLimit { get; init; } = 2048;
+
+    // Replaces the compiler-generated member printer so ToString(), logs, and debugger views
+    // never expose the password. Derived option records append their members after these.
+    protected virtual bool PrintMembers(System.Text.StringBuilder builder)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        builder.Append("Host = ").Append(Host)
+            .Append(", Port = ").Append(Port)
+            .Append(", Username = ").Append(Username)
+            .Append(", Password = ").Append(Password.Length == 0 ? string.Empty : "***")
+            .Append(", AuthenticationProvider = ").Append(AuthenticationProvider)
+            .Append(", Database = ").Append(Database)
+            .Append(", ConnectTimeout = ").Append(ConnectTimeout)
+            .Append(", ReconnectAttempts = ").Append(ReconnectAttempts)
+            .Append(", ReconnectInterval = ").Append(ReconnectInterval)
+            .Append(", UseExperimentalLowLevelTls = ").Append(UseExperimentalLowLevelTls)
+            .Append(", CachePreparedStatements = ").Append(CachePreparedStatements)
+            .Append(", PreparedStatementCacheSize = ").Append(PreparedStatementCacheSize)
+            .Append(", PreparedStatementCacheSqlLengthLimit = ").Append(PreparedStatementCacheSqlLengthLimit);
+        return true;
+    }
 }

@@ -80,4 +80,37 @@ public sealed class SqlParametersTests
         Assert.AreEqual(0, parameters.Count);
         Assert.AreEqual(0, parameters.Count());
     }
+
+    [TestMethod]
+    public void NullReferenceValuesBecomeSqlNull()
+    {
+        string? text = null;
+        byte[]? bytes = null;
+        System.Text.Json.JsonDocument? document = null;
+
+        SqlParameters parameters = SqlParameters.Create(text, bytes, document);
+
+        Assert.IsTrue(parameters[0].IsNull);
+        Assert.IsTrue(parameters[1].IsNull);
+        Assert.IsTrue(parameters[2].IsNull);
+        Assert.IsFalse(((SqlValue)"x").IsNull);
+    }
+
+    [TestMethod]
+    public void ConnectOptionsToStringRedactsThePassword()
+    {
+        var options = new TestConnectOptions { Host = "db", Username = "app", Password = "s3cret!" };
+
+        var text = options.ToString();
+
+        Assert.DoesNotContain("s3cret!", text);
+        Assert.Contains("Password = ***", text);
+        Assert.Contains("Host = db", text);
+        Assert.Contains("Extra = 7", text);
+    }
+
+    private sealed record TestConnectOptions : SqlConnectOptions
+    {
+        public int Extra { get; init; } = 7;
+    }
 }
