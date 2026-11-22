@@ -26,11 +26,10 @@ internal sealed class MsSqlStringCache
 
     internal string GetString(ReadOnlySpan<byte> value, int codePage)
     {
-        var encoding = TdsCollationCodec.GetEncoding(codePage);
         var table = Volatile.Read(ref _table);
         if (table is null || value.Length > _maximumByteLength)
         {
-            return encoding.GetString(value);
+            return TdsCollationCodec.Decode(value, codePage);
         }
 
         var hash = XxHash3.HashToUInt64(value, codePage);
@@ -46,7 +45,7 @@ internal sealed class MsSqlStringCache
             return entry.Value!;
         }
 
-        var decoded = encoding.GetString(value);
+        var decoded = TdsCollationCodec.Decode(value, codePage);
         if (unchecked((ulong)Volatile.Read(ref table.CandidateHashes[index])) == hash)
         {
             Volatile.Write(

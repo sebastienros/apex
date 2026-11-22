@@ -16,6 +16,13 @@ internal sealed class MsSqlTransaction : ISqlTransaction
     public async ValueTask CommitAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfCompleted();
+        if (!_connection.HasActiveTransaction)
+        {
+            IsCompleted = true;
+            throw new InvalidOperationException(
+              "The transaction has already been rolled back by SQL Server.");
+        }
+
         await _connection.ExecuteTransactionControlAsync(
           "COMMIT TRANSACTION",
           cancellationToken).ConfigureAwait(false);
@@ -26,6 +33,15 @@ internal sealed class MsSqlTransaction : ISqlTransaction
     {
         if (IsCompleted)
         {
+            return;
+        }
+
+        // Nothing to roll back when the server already ended the transaction, and nothing can be
+        // sent on a broken connection (the server rolls back when the session closes). Sending
+        // ROLLBACK anyway fails with error 3903 and masks the error that ended the transaction.
+        if (!_connection.HasActiveTransaction || !_connection.IsUsable)
+        {
+            IsCompleted = true;
             return;
         }
 

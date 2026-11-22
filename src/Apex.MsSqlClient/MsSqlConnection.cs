@@ -72,6 +72,10 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
 
     internal bool IsReadyForPool => IsUsable && _transactionDescriptor == 0;
 
+    // The server clears the descriptor (ENVCHANGE) when it rolls a transaction back on its own,
+    // for example for a deadlock victim (1205) or an XACT_ABORT error.
+    internal bool HasActiveTransaction => Interlocked.Read(ref _transactionDescriptor) != 0;
+
     internal BoundedOrderedCommandScheduler Scheduler => _scheduler;
 
     internal TdsPacketReader Reader => _reader;

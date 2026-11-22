@@ -10,6 +10,8 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
     private readonly object _gate = new();
     private Task? _disposeTask;
     private int _handle;
+    private string? _handleDefinitions;
+    private string? _preparingDefinitions;
     private bool _hasExecution;
     private bool _preparing;
 
@@ -201,16 +203,21 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
             if (_handle > 0)
             {
                 preparesHandle = false;
-                return TdsRequestWriter.BuildExecute(
-                  _handle,
-                  parameters,
-                  transactionDescriptor);
+                // The handle is bound to the declarations it was prepared with (decimal scale,
+                // string/binary length class, type). Values that need different declarations
+                // run unprepared instead of being rounded, truncated, or overflowed.
+                return TdsRequestWriter.DefinitionsMatch(_handleDefinitions!, parameters)
+                  ? TdsRequestWriter.BuildExecute(_handle, parameters, transactionDescriptor)
+                  : TdsRequestWriter.BuildExecuteSql(Sql, parameters, transactionDescriptor);
             }
 
+            var definitions = TdsRequestWriter.BuildDefinitions(parameters);
             var request = TdsRequestWriter.BuildPrepareExecute(
               Sql,
+              definitions,
               parameters,
               transactionDescriptor);
+            _preparingDefinitions = definitions;
             _preparing = true;
             preparesHandle = true;
             return request;
@@ -230,6 +237,7 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
             }
 
             _handle = returnValue.GetPreparedHandle();
+            _handleDefinitions = _preparingDefinitions;
             _preparing = false;
         }
     }

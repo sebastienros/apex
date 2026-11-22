@@ -145,6 +145,34 @@ public sealed class TdsRequestWriterTests
     }
 
     [TestMethod]
+    public void DefinitionsMatchOnlyParametersWithTheSameDeclarations()
+    {
+        var prepared = TdsRequestWriter.BuildDefinitions(
+          SqlParameters.Create(10.5m, "short", 1, new DateOnly(2026, 1, 1)));
+        Assert.AreEqual("@P1 numeric(38,1),@P2 nvarchar(4000),@P3 int,@P4 date", prepared);
+
+        Assert.IsTrue(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(99.9m, "other", 2, new DateOnly(2027, 2, 2))));
+        // NULL converts to any declared type, so it keeps using the prepared handle.
+        Assert.IsTrue(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(SqlValue.Null, SqlValue.Null, SqlValue.Null, SqlValue.Null)));
+
+        Assert.IsFalse(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(9.99m, "other", 2, new DateOnly(2027, 2, 2))));
+        Assert.IsFalse(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(10.5m, new string('x', 4001), 2, new DateOnly(2027, 2, 2))));
+        Assert.IsFalse(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(10.5m, "other", 3L, new DateOnly(2027, 2, 2))));
+        Assert.IsFalse(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(10.5m, "other", 2, new DateTime(2027, 2, 2))));
+        Assert.IsFalse(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(10.5m, "other", 2)));
+        Assert.IsFalse(TdsRequestWriter.DefinitionsMatch(
+          prepared, SqlParameters.Create(10.5m, "other", 2, new DateOnly(2027, 2, 2), 5)));
+        Assert.IsTrue(TdsRequestWriter.DefinitionsMatch(string.Empty, SqlParameters.Empty));
+    }
+
+    [TestMethod]
     public void ExecuteUsesProcedureIdHandleThenValues()
     {
         var payload = TdsRequestWriter.BuildExecute(

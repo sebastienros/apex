@@ -49,12 +49,19 @@ internal static class TdsRequestWriter
     internal static ReadOnlyMemory<byte> BuildPrepareExecute(
         string sql,
         SqlParameters parameters,
+        long transactionDescriptor) =>
+        BuildPrepareExecute(sql, BuildDefinitions(parameters), parameters, transactionDescriptor);
+
+    internal static ReadOnlyMemory<byte> BuildPrepareExecute(
+        string sql,
+        string definitions,
+        SqlParameters parameters,
         long transactionDescriptor)
     {
         ArrayBufferWriter<byte> payload = new();
         WriteRpcHeader(payload, TdsProcedureId.PrepExec, transactionDescriptor);
         WriteIntParameter(payload, string.Empty, 0, output: true);
-        WriteNVarCharParameter(payload, string.Empty, BuildDefinitions(parameters));
+        WriteNVarCharParameter(payload, string.Empty, definitions);
         WriteNVarCharParameter(payload, string.Empty, sql);
         WriteParameters(payload, parameters);
         return payload.WrittenMemory;
@@ -97,6 +104,97 @@ internal static class TdsRequestWriter
         }
 
         return definitions.ToString();
+    }
+
+    /// <summary>
+    /// Reports whether <paramref name="parameters"/> would produce the same declarations as
+    /// <paramref name="definitions"/> (built by <see cref="BuildDefinitions"/>), without
+    /// allocating. A NULL value matches any declared type because the server converts it.
+    /// </summary>
+    internal static bool DefinitionsMatch(string definitions, SqlParameters parameters)
+    {
+        var remaining = definitions.AsSpan();
+        Span<char> digits = stackalloc char[11];
+        for (var i = 0; i < parameters.Count; i++)
+        {
+            if (i > 0)
+            {
+                if (remaining.IsEmpty || remaining[0] != ',')
+                {
+                    return false;
+                }
+
+                remaining = remaining[1..];
+            }
+
+            if (!remaining.StartsWith("@P", StringComparison.Ordinal) ||
+                !(i + 1).TryFormat(digits, out var written, provider: CultureInfo.InvariantCulture) ||
+                !remaining[2..].StartsWith(digits[..written], StringComparison.Ordinal) ||
+                remaining.Length <= 2 + written ||
+                remaining[2 + written] != ' ')
+            {
+                return false;
+            }
+
+            remaining = remaining[(3 + written)..];
+            var value = parameters[i];
+            if (value.IsNull)
+            {
+                remaining = remaining[DefinitionLength(remaining)..];
+                continue;
+            }
+
+            if (value.Kind == SqlValueKind.Decimal)
+            {
+                const string prefix = "numeric(38,";
+                if (!remaining.StartsWith(prefix, StringComparison.Ordinal) ||
+                    !GetDecimalScale(value.GetRequired<decimal>()).TryFormat(
+                      digits,
+                      out written,
+                      provider: CultureInfo.InvariantCulture) ||
+                    !remaining[prefix.Length..].StartsWith(digits[..written], StringComparison.Ordinal) ||
+                    remaining.Length <= prefix.Length + written ||
+                    remaining[prefix.Length + written] != ')')
+                {
+                    return false;
+                }
+
+                remaining = remaining[(prefix.Length + written + 1)..];
+                continue;
+            }
+
+            var definition = GetDefinition(value);
+            if (!remaining.StartsWith(definition, StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            remaining = remaining[definition.Length..];
+        }
+
+        return remaining.IsEmpty;
+    }
+
+    // Length of the declaration at the start of value: up to the next ',' outside parentheses.
+    private static int DefinitionLength(ReadOnlySpan<char> value)
+    {
+        var depth = 0;
+        for (var i = 0; i < value.Length; i++)
+        {
+            switch (value[i])
+            {
+                case '(':
+                    depth++;
+                    break;
+                case ')':
+                    depth--;
+                    break;
+                case ',' when depth == 0:
+                    return i;
+            }
+        }
+
+        return value.Length;
     }
 
     private static void WriteParameters(
