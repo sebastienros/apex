@@ -3,7 +3,7 @@ using Apex.SqlClient;
 
 namespace Apex.PgClient;
 
-internal sealed class PgPreparedStatement : ISqlPreparedStatement
+internal sealed class PgPreparedStatement : ISqlPreparedStatement, ISqlResultPreparedStatement
 {
     private readonly PgConnection _connection;
     private readonly string _name;
@@ -114,6 +114,22 @@ internal sealed class PgPreparedStatement : ISqlPreparedStatement
           parameters,
           cancellationToken);
     }
+
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _connection.ExecuteResultPreparedReaderAsync(
+          _name,
+          parameters,
+          cancellationToken);
+    }
+
+    ValueTask<ISqlRowReader> ISqlResultPreparedStatement.ExecuteResultReaderAsync(
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteResultReaderAsync(parameters, cancellationToken);
 
     public async IAsyncEnumerable<SqlRow> StreamAsync(
         SqlParameters parameters = default,

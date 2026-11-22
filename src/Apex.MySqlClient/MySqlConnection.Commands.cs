@@ -342,10 +342,48 @@ public sealed partial class MySqlConnection
           cancellationToken));
     }
 
-    private async ValueTask<ISqlRowReader> ExecutePreparedReaderCoreAsync(
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
         string sql,
         SqlParameters parameters,
         CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        return parameters.Count == 0
+          ? ValueTask.FromResult<ISqlRowReader>(
+            CreateTextReader(sql, cancellationToken, preserveResultBoundaries: true))
+          : ExecutePreparedReaderCoreAsync(
+            sql,
+            parameters,
+            cancellationToken,
+            preserveResultBoundaries: true);
+    }
+
+    ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteResultReaderAsync(sql, parameters, cancellationToken);
+
+    internal ValueTask<ISqlRowReader> ExecuteResultPreparedReaderAsync(
+        MySqlStatement statement,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return ValueTask.FromResult<ISqlRowReader>(CreatePreparedReader(
+          statement,
+          parameters,
+          ownsStatement: false,
+          cancellationToken,
+          preserveResultBoundaries: true));
+    }
+
+    private async ValueTask<ISqlRowReader> ExecutePreparedReaderCoreAsync(
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken,
+        bool preserveResultBoundaries = false)
     {
         var statement = await GetOrPrepareViaSchedulerAsync(sql, cancellationToken)
           .ConfigureAwait(false);
@@ -353,28 +391,33 @@ public sealed partial class MySqlConnection
           statement,
           parameters,
           ownsStatement: !statement.IsCached,
-          cancellationToken);
+          cancellationToken,
+          preserveResultBoundaries);
     }
 
     private MySqlRowReader CreatePreparedReader(
         MySqlStatement statement,
         SqlParameters parameters,
         bool ownsStatement,
-        CancellationToken cancellationToken) =>
-      new(
-        this,
-        writeCommand: () => WriteExecute(statement, parameters, MySqlCursorType.NoCursor),
-        binary: true,
-        cancellationToken,
-        statement,
-        ownsStatement);
+        CancellationToken cancellationToken,
+        bool preserveResultBoundaries = false)
+    {
+        Action writeCommand = () => WriteExecute(statement, parameters, MySqlCursorType.NoCursor);
+        return preserveResultBoundaries
+            ? new MySqlResultReader(this, writeCommand, binary: true, cancellationToken, statement, ownsStatement)
+            : new MySqlRowReader(this, writeCommand, binary: true, cancellationToken, statement, ownsStatement);
+    }
 
-    private MySqlRowReader CreateTextReader(string sql, CancellationToken cancellationToken) =>
-      new(
-        this,
-        writeCommand: () => _writer.WriteTextCommand(MySqlCommand.Query, sql),
-        binary: false,
-        cancellationToken);
+    private MySqlRowReader CreateTextReader(
+        string sql,
+        CancellationToken cancellationToken,
+        bool preserveResultBoundaries = false)
+    {
+        Action writeCommand = () => _writer.WriteTextCommand(MySqlCommand.Query, sql);
+        return preserveResultBoundaries
+            ? new MySqlResultReader(this, writeCommand, binary: false, cancellationToken)
+            : new MySqlRowReader(this, writeCommand, binary: false, cancellationToken);
+    }
 
     private async IAsyncEnumerable<SqlRow> StreamTextRowsAsync(
         string sql,

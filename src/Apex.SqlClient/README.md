@@ -2,6 +2,10 @@
 
 # Apex SQL client API contract
 
+This package contains native, ADO.NET-independent contracts. The optional
+[`Apex.SqlClient.AdoNet`](../Apex.SqlClient.AdoNet/README.md) package contains the
+shared ADO.NET adapter implementation.
+
 ## Ownership and lifetime
 
 - `ISqlClient`, `ISqlConnection`, `ISqlPool`, `ISqlPreparedStatement`, `ISqlCursor`, and `ISqlTransaction` are async-disposable.
@@ -55,7 +59,9 @@
 
 ## Errors and diagnostics
 
-- Database errors derive from `SqlClientException`; PostgreSQL errors expose
+- Native database errors derive from `SqlClientException : Exception`, not
+  `DbException`. The separate ADO.NET adapters translate them only at their boundary.
+  PostgreSQL errors expose
   SQLSTATE and structured server fields through `PgException`, MySQL errors
   expose the numeric server code and SQLSTATE through `MySqlException`, and SQL
   Server errors expose number, state, class, server, procedure, and line through

@@ -5,10 +5,37 @@ using Apex.SqlClient.Internal;
 
 namespace Apex.MsSqlClient.Internal;
 
-internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
+internal sealed class MsSqlResultReader :
+    MsSqlRowReader,
+    ISqlResultBoundaryReader,
+    ISqlRecordsAffectedReader
+{
+    internal MsSqlResultReader(
+        MsSqlConnection connection,
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+        : base(connection, sql, parameters, cancellationToken, preserveResultBoundaries: true)
+    {
+    }
+
+    internal MsSqlResultReader(
+        MsSqlConnection connection,
+        MsSqlPreparedStatement statement,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+        : base(connection, statement, parameters, cancellationToken, preserveResultBoundaries: true)
+    {
+    }
+
+    int ISqlRecordsAffectedReader.RecordsAffected => RecordsAffected;
+}
+
+internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 {
     private readonly MsSqlConnection _connection;
     private readonly AsyncAutoResetEvent _advance = new();
+    private readonly SqlResultReaderState? _results;
     private readonly object _gate = new();
     private readonly Action _cancelAction;
     private readonly CancellationTokenRegistration _operationCancellation;
@@ -36,6 +63,7 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     private bool _stopped;
     private bool _canceled;
     private bool _readPending;
+    private bool _readSignaled;
     private bool _preparesHandle;
     private int _disposed;
 
@@ -43,8 +71,9 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         MsSqlConnection connection,
         string sql,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
-      : this(connection, sql, statement: null, parameters, cancellationToken)
+        CancellationToken cancellationToken,
+        bool preserveResultBoundaries = false)
+      : this(connection, sql, statement: null, parameters, cancellationToken, preserveResultBoundaries)
     {
     }
 
@@ -52,8 +81,9 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         MsSqlConnection connection,
         MsSqlPreparedStatement statement,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
-      : this(connection, statement.Sql, statement, parameters, cancellationToken)
+        CancellationToken cancellationToken,
+        bool preserveResultBoundaries = false)
+      : this(connection, statement.Sql, statement, parameters, cancellationToken, preserveResultBoundaries)
     {
     }
 
@@ -62,10 +92,12 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         string sql,
         MsSqlPreparedStatement? statement,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool preserveResultBoundaries)
     {
         _connection = connection;
         _statement = statement;
+        _results = preserveResultBoundaries ? new SqlResultReaderState() : null;
         _operationCancellationToken = cancellationToken;
         _cancelAction = Cancel;
         _readCompletion.RunContinuationsAsynchronously = true;
@@ -101,6 +133,63 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 
     public int FieldCount => _columns.Count;
 
+    protected int RecordsAffected => _results?.RecordsAffected ?? -1;
+
+    public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        cancellationToken.ThrowIfCancellationRequested();
+        var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+        Task<bool> wait;
+        lock (_gate)
+        {
+            ThrowIfError();
+            if (_hasCurrent)
+            {
+                _currentDelivered = true;
+                return ValueTask.FromResult(true);
+            }
+            if (results.Ended || _completed) return ValueTask.FromResult(false);
+            wait = results.Initialize();
+        }
+
+        // Cancel the operation, not just the wait, so an abandoned initializer cannot later
+        // consume the first row of the result.
+        return AwaitResultTransitionAsync(wait, cancellationToken);
+    }
+
+    public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed != 0, this);
+        cancellationToken.ThrowIfCancellationRequested();
+        var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+        Task<bool> wait;
+        bool advanceRow;
+        bool advanceResult;
+        lock (_gate)
+        {
+            ThrowIfError();
+            if (_completed) return ValueTask.FromResult(false);
+            wait = results.NextResult();
+            advanceRow = _hasCurrent;
+            advanceResult = results.Ended;
+        }
+
+        if (advanceRow) _advance.Set();
+        if (advanceResult) results.Advance.Set();
+        return AwaitResultTransitionAsync(wait, cancellationToken);
+    }
+
+    private async ValueTask<bool> AwaitResultTransitionAsync(
+        Task<bool> wait,
+        CancellationToken cancellationToken)
+    {
+        using var registration = cancellationToken.CanBeCanceled
+            ? cancellationToken.Register(_cancelAction)
+            : default;
+        return await wait.ConfigureAwait(false);
+    }
+
     internal int ResultSetGeneration => _resultSetGeneration;
 
     internal int CurrentResultIndex => _currentResultIndex;
@@ -127,6 +216,11 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         {
             ThrowIfError();
             if (_completed)
+            {
+                return ValueTask.FromResult(false);
+            }
+
+            if (_results is { Ended: true })
             {
                 return ValueTask.FromResult(false);
             }
@@ -177,6 +271,7 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                 _readCancellation = default;
                 _readCancellationToken = default;
                 _readPending = false;
+                _readSignaled = false;
             }
 
             registration.Dispose();
@@ -369,8 +464,17 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
             _stopped = true;
         }
 
-        Cancel();
+        // Result-preserving (ADO.NET) readers drain like the PostgreSQL and MySQL readers so the
+        // remaining statements of a batch still execute and a reader parked at its final result
+        // boundary does not pay an attention round trip. Explicit cancellation and timeouts still
+        // reach Cancel() through the operation token.
+        if (_results is null)
+        {
+            Cancel();
+        }
+
         _advance.Set();
+        _results?.Advance.Set();
         try
         {
             await _operation.ConfigureAwait(false);
@@ -435,6 +539,7 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             _currentResultIndex = _resultCount;
                             _hasCurrentResult = true;
                             _resultSetGeneration++;
+                            ResultStarted();
                             break;
                         case TdsTokenType.Row:
                         case TdsTokenType.NbcRow:
@@ -454,7 +559,7 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                                 if (!_stopped)
                                 {
                                     _hasCurrent = true;
-                                    _currentDelivered = false;
+                                    _currentDelivered = _results?.PublishRow() ?? false;
                                     retained = true;
                                 }
                             }
@@ -472,24 +577,51 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                         case TdsTokenType.DoneInProc:
                             var done = await tokens.ReadDoneAsync().ConfigureAwait(false);
                             final |= (done.Status & TdsDoneStatus.More) == 0;
-                            if (_hasCurrentResult)
+                            var hadCurrentResult = _hasCurrentResult;
+                            var hasCountResult = (done.Status & TdsDoneStatus.Count) != 0;
+                            // Like SqlClient, count every DONE_COUNT except those reported for SELECT
+                            // statements, so OUTPUT clauses and multi-statement batches are classified
+                            // by the server rather than by the batch text.
+                            if (_results is not null &&
+                                hasCountResult &&
+                                done.CurrentCommand != TdsSelectCommand)
+                            {
+                                _results.AddRecordsAffected(done.RowCount);
+                            }
+                            var isTerminal = (done.Status & TdsDoneStatus.More) == 0;
+                            var hasSyntheticResult = !hadCurrentResult &&
+                                (hasCountResult || (_resultCount == 0 && isTerminal));
+                            if (hadCurrentResult)
                             {
                                 _resultCount++;
                                 _hasCurrentResult = false;
                             }
-                            else if ((done.Status & TdsDoneStatus.Count) != 0 ||
-                                     (_resultCount == 0 &&
-                                      (done.Status & TdsDoneStatus.More) == 0))
+                            else if (hasSyntheticResult)
                             {
                                 _resultCount++;
                             }
 
                             _tdsColumns = Array.Empty<TdsColumn>();
+                            // A failed statement must not surface as an empty result: that would park the
+                            // pump at the boundary and defer the server error until NextResult or dispose.
+                            var publishSyntheticResult = _results is not null &&
+                                hasSyntheticResult &&
+                                (done.Status & TdsDoneStatus.Error) == 0;
+                            if (publishSyntheticResult)
+                            {
+                                _columns = Array.Empty<SqlColumn>();
+                                ResultStarted();
+                            }
                             if ((done.Status & TdsDoneStatus.Attention) != 0)
                             {
                                 attention.Acknowledge();
                                 await attention.GetSendTask().ConfigureAwait(false);
                                 throw new OperationCanceledException(attention.CancellationToken);
+                            }
+
+                            if (_results is not null && (hadCurrentResult || publishSyntheticResult))
+                            {
+                                await ResultCompletedAsync().ConfigureAwait(false);
                             }
 
                             break;
@@ -594,10 +726,8 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
             }
         }
 
-        if (advance)
-        {
-            _advance.Set();
-        }
+        if (advance) _advance.Set();
+        _results?.Advance.Set();
     }
 
     private void Complete(Exception? error)
@@ -611,9 +741,32 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 
             _error = error;
             _completed = true;
+            _results?.Complete(error);
         }
 
         SignalRead(result: false, error);
+    }
+
+    private void ResultStarted()
+    {
+        if (_results is null) return;
+        lock (_gate)
+        {
+            _results.Start();
+        }
+    }
+
+    private ValueTask ResultCompletedAsync()
+    {
+        if (_results is null) return ValueTask.CompletedTask;
+        bool waitForNext;
+        lock (_gate)
+        {
+            waitForNext = _results.End(_stopped);
+        }
+
+        SignalRead(result: false, error: null);
+        return waitForNext ? _results.Advance.WaitAsync() : ValueTask.CompletedTask;
     }
 
     private void DisposeCurrent()
@@ -648,12 +801,16 @@ internal sealed class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         }
     }
 
+    // TDS DONE CurCmd value for SELECT statements (TdsEnums.SELECT in SqlClient).
+    private const ushort TdsSelectCommand = 0xC1;
+
     private void SignalRead(bool result, Exception? error)
     {
         bool signal;
         lock (_gate)
         {
-            signal = _readPending;
+            signal = _readPending && !_readSignaled && (!result || !_currentDelivered);
+            _readSignaled |= signal;
             if (signal && result)
             {
                 _currentDelivered = true;

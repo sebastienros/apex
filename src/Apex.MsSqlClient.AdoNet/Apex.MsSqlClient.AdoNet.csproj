@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
+    <Features Condition="'$(TargetFramework)' == 'net11.0'">runtime-async=on</Features>
+    <Description>Optional asynchronous SQL Server ADO.NET adapter for Apex.MsSqlClient.</Description>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <PackageIconProject>Apex.MsSqlClient</PackageIconProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Apex.SqlClient.AdoNet\Apex.SqlClient.AdoNet.csproj" />
+    <ProjectReference Include="..\Apex.MsSqlClient\Apex.MsSqlClient.csproj" />
+  </ItemGroup>
+</Project>

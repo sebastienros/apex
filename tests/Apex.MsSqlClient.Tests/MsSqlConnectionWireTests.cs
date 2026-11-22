@@ -15,6 +15,205 @@ namespace Apex.MsSqlClient.Tests;
 public sealed class MsSqlConnectionWireTests
 {
     [TestMethod]
+    public async Task ResultReaderPreservesRowsAndMetadataAcrossResults()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunMultiResultServerAsync(listener);
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        await using var reader = await connection.ExecuteResultReaderAsync(
+            "SELECT 1; SELECT N'x'", default, default);
+        var results = (ISqlResultBoundaryReader)reader;
+
+        Assert.IsTrue(await results.InitializeAsync());
+        Assert.AreEqual("a", reader.Columns[0].Name);
+        Assert.AreEqual(1, reader.GetInt32(0));
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsTrue(await results.NextResultAsync());
+        Assert.IsTrue(await results.InitializeAsync());
+        Assert.AreEqual("b", reader.Columns[0].Name);
+        Assert.AreEqual("x", reader.GetString(0));
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsFalse(await results.NextResultAsync());
+        Assert.AreEqual(-1, ((ISqlRecordsAffectedReader)reader).RecordsAffected);
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task EmptyResultReaderEstablishesMetadataWithoutARow()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunRowsServerAsync(listener);
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        await using var reader = await connection.ExecuteResultReaderAsync("SELECT value", default, default);
+        var results = (ISqlResultBoundaryReader)reader;
+
+        Assert.IsFalse(await results.InitializeAsync());
+        Assert.AreEqual(1, reader.FieldCount);
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsFalse(await results.NextResultAsync());
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task ResultReaderCountsDoneTokensByServerCommandNotBatchText()
+    {
+        ArrayBufferWriter<byte> response = new();
+        WriteSingleIntResult(response, "a", 1);
+        WriteDone(response, (ushort)(TdsDoneStatus.More | TdsDoneStatus.Count), TdsSelectCommand, 1);
+        WriteSingleIntResult(response, "id", 7);
+        WriteDone(response, (ushort)(TdsDoneStatus.More | TdsDoneStatus.Count), TdsUpdateCommand, 2);
+        WriteDone(response, (ushort)TdsDoneStatus.Count, TdsDeleteCommand, 3);
+
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunResponseServerAsync(listener, response.WrittenMemory.ToArray());
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        await using var reader = await connection.ExecuteResultReaderAsync(
+            "SELECT a; UPDATE t SET x = 1 OUTPUT inserted.id; DELETE t", default, default);
+        var results = (ISqlResultBoundaryReader)reader;
+
+        Assert.IsTrue(await results.InitializeAsync());
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsTrue(await results.NextResultAsync());
+        Assert.IsTrue(await results.InitializeAsync());
+        Assert.AreEqual(7, reader.GetInt32(0));
+        Assert.IsFalse(await reader.ReadAsync());
+        Assert.IsTrue(await results.NextResultAsync());
+        Assert.IsFalse(await results.InitializeAsync());
+        Assert.IsFalse(await results.NextResultAsync());
+        Assert.AreEqual(5, ((ISqlRecordsAffectedReader)reader).RecordsAffected);
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task ResultReaderSurfacesStatementErrorBeforeAnyResult()
+    {
+        ArrayBufferWriter<byte> response = new();
+        WriteError(response, "Incorrect syntax");
+        WriteDone(response, (ushort)TdsDoneStatus.Error);
+
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunResponseServerAsync(listener, response.WrittenMemory.ToArray());
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        var reader = await connection.ExecuteResultReaderAsync("SELEC bad", default, default);
+        try
+        {
+            // Bounded so a regression (an empty synthetic result parking the pump) fails fast.
+            await Assert.ThrowsAsync<SqlClientException>(
+                () => ((ISqlResultBoundaryReader)reader).InitializeAsync().AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            // The native reader's disposal rethrows the faulted operation it already reported.
+            try
+            {
+                await reader.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+            catch (SqlClientException)
+            {
+            }
+        }
+
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task DisposingDrainedResultReaderDoesNotSendAttention()
+    {
+        ArrayBufferWriter<byte> response = new();
+        WriteSingleIntResult(response, "a", 1);
+        WriteDone(response, 0);
+
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunResponseServerAsync(
+            listener,
+            response.WrittenMemory.ToArray(),
+            expectCloseWithoutAttention: true);
+        await using (var connection = await MsSqlClient.ConnectAsync(TestOptions(port)))
+        {
+            var reader = await connection.ExecuteResultReaderAsync("SELECT a", default, default);
+            Assert.IsTrue(await ((ISqlResultBoundaryReader)reader).InitializeAsync());
+            Assert.IsFalse(await reader.ReadAsync());
+            await reader.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private const ushort TdsSelectCommand = 0xC1;
+    private const ushort TdsDeleteCommand = 0xC4;
+    private const ushort TdsUpdateCommand = 0xC5;
+
+    private static async Task RunResponseServerAsync(
+        TcpListener listener,
+        byte[] response,
+        bool expectCloseWithoutAttention = false)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        await LoginAsync(stream);
+        var query = await new TdsPacketReader(stream).ReadMessageAsync(default);
+        Assert.AreEqual(TdsMessageType.SqlBatch, query.Type);
+        using TdsPacketWriter writer = new(stream, 4096);
+        await writer.WriteMessageAsync(TdsMessageType.TabularResult, response, default);
+        if (expectCloseWithoutAttention)
+        {
+            var next = new byte[1];
+            Assert.AreEqual(0, await stream.ReadAsync(next), "The client sent data (an attention) after the response.");
+        }
+    }
+
+    private static void WriteSingleIntResult(ArrayBufferWriter<byte> response, string name, int value)
+    {
+        response.WriteByte(TdsTokenType.ColumnMetadata);
+        response.WriteUInt16LittleEndian(1);
+        response.WriteUInt32LittleEndian(0);
+        response.WriteUInt16LittleEndian(0);
+        response.WriteByte(TdsDataType.Int4);
+        response.WriteBVarChar(name);
+        response.WriteByte(TdsTokenType.Row);
+        response.WriteInt32LittleEndian(value);
+    }
+
+    private static void WriteError(ArrayBufferWriter<byte> response, string message)
+    {
+        ArrayBufferWriter<byte> body = new();
+        body.WriteInt32LittleEndian(102);
+        body.WriteByte(1);
+        body.WriteByte(15);
+        body.WriteUInt16LittleEndian(checked((ushort)message.Length));
+        body.WriteUtf16(message);
+        body.WriteBVarChar("server");
+        body.WriteBVarChar(string.Empty);
+        body.WriteInt32LittleEndian(1);
+        response.WriteByte(TdsTokenType.Error);
+        response.WriteUInt16LittleEndian(checked((ushort)body.WrittenCount));
+        response.Write(body.WrittenSpan);
+    }
+
+    private static void WriteDone(
+        ArrayBufferWriter<byte> response,
+        ushort status,
+        ushort currentCommand,
+        long rowCount)
+    {
+        response.WriteByte(TdsTokenType.Done);
+        response.WriteUInt16LittleEndian(status);
+        response.WriteUInt16LittleEndian(currentCommand);
+        response.WriteInt64LittleEndian(rowCount);
+    }
+
+    [TestMethod]
     public async Task ConnectsAndExecutesAgainstInMemoryProtocolServer()
     {
         TcpListener listener = new(IPAddress.Loopback, 0);
@@ -143,6 +342,7 @@ public sealed class MsSqlConnectionWireTests
             await using var connection = await MsSqlClient.ConnectAsync(
               TestOptions(readerPort));
             var reader = await connection.ExecuteReaderAsync("SELECT value");
+            Assert.IsFalse(reader is ISqlMultiResultReader);
             Assert.IsTrue(await reader.ReadAsync());
             Assert.AreEqual(1, reader.GetInt32(0));
             Assert.IsTrue(await reader.ReadAsync());

@@ -9,15 +9,31 @@ namespace Apex.MySqlClient;
 
 public sealed partial class MySqlConnection
 {
+    private sealed class MySqlResultReader(
+        MySqlConnection connection,
+        Action writeCommand,
+        bool binary,
+        CancellationToken cancellationToken,
+        MySqlStatement? statement = null,
+        bool ownsStatement = false) :
+        MySqlRowReader(connection, writeCommand, binary, cancellationToken, statement, ownsStatement,
+            preserveResultBoundaries: true),
+        ISqlResultBoundaryReader,
+        ISqlRecordsAffectedReader
+    {
+        int ISqlRecordsAffectedReader.RecordsAffected => RecordsAffected;
+    }
+
     /// <summary>
     /// Streams rows without buffering them. The current row points straight at the pooled wire
     /// buffer, so its values are only valid until the next read. The pump and the consumer meet
     /// through an auto reset event instead of a channel, which keeps the hand off allocation free.
     /// </summary>
-    internal sealed class MySqlRowReader : ISqlRowReader, IValueTaskSource<bool>
+    internal class MySqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     {
         private readonly MySqlConnection _connection;
         private readonly AsyncAutoResetEvent _advance = new();
+        private readonly SqlResultReaderState? _results;
         private readonly object _gate = new();
         private readonly Action _cancelAction;
         private readonly CancellationTokenRegistration _operationCancellation;
@@ -42,6 +58,7 @@ public sealed partial class MySqlConnection
         private bool _canceled;
         private bool _sent;
         private bool _readPending;
+        private bool _readSignaled;
         private int _disposed;
 
         internal MySqlRowReader(
@@ -50,9 +67,11 @@ public sealed partial class MySqlConnection
             bool binary,
             CancellationToken cancellationToken,
             MySqlStatement? statement = null,
-            bool ownsStatement = false)
+            bool ownsStatement = false,
+            bool preserveResultBoundaries = false)
         {
             _connection = connection;
+            _results = preserveResultBoundaries ? new SqlResultReaderState() : null;
             _binary = binary;
             _statement = statement;
             _ownedStatement = ownsStatement ? statement : null;
@@ -84,6 +103,63 @@ public sealed partial class MySqlConnection
 
         public int FieldCount => _columns.Count;
 
+        protected int RecordsAffected => _results?.RecordsAffected ?? -1;
+
+        public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            ObjectDisposedException.ThrowIf(_disposed != 0, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+            Task<bool> wait;
+            lock (_gate)
+            {
+                ThrowIfError();
+                if (_hasCurrent)
+                {
+                    _currentDelivered = true;
+                    return ValueTask.FromResult(true);
+                }
+                if (results.Ended || _completed) return ValueTask.FromResult(false);
+                wait = results.Initialize();
+            }
+
+            // Cancel the operation, not just the wait, so an abandoned initializer cannot later
+            // consume the first row of the result.
+            return AwaitResultTransitionAsync(wait, cancellationToken);
+        }
+
+        public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
+        {
+            ObjectDisposedException.ThrowIf(_disposed != 0, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+            Task<bool> wait;
+            bool advanceRow;
+            bool advanceResult;
+            lock (_gate)
+            {
+                ThrowIfError();
+                if (_completed) return ValueTask.FromResult(false);
+                wait = results.NextResult();
+                advanceRow = _hasCurrent;
+                advanceResult = results.Ended;
+            }
+
+            if (advanceRow) _advance.Set();
+            if (advanceResult) results.Advance.Set();
+            return AwaitResultTransitionAsync(wait, cancellationToken);
+        }
+
+        private async ValueTask<bool> AwaitResultTransitionAsync(
+            Task<bool> wait,
+            CancellationToken cancellationToken)
+        {
+            using var registration = cancellationToken.CanBeCanceled
+                ? cancellationToken.Register(_cancelAction)
+                : default;
+            return await wait.ConfigureAwait(false);
+        }
+
         internal MySqlRowDecoder Decoder =>
           _decoder ?? throw new InvalidOperationException("ReadAsync must return true first.");
 
@@ -107,6 +183,11 @@ public sealed partial class MySqlConnection
                 }
 
                 if (_completed)
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                if (_results is { Ended: true })
                 {
                     return ValueTask.FromResult(false);
                 }
@@ -157,6 +238,7 @@ public sealed partial class MySqlConnection
                     _readCancellation = default;
                     _readCancellationToken = default;
                     _readPending = false;
+                    _readSignaled = false;
                 }
 
                 registration.Dispose();
@@ -316,6 +398,7 @@ public sealed partial class MySqlConnection
             }
 
             _advance.Set();
+            _results?.Advance.Set();
             try
             {
                 await _operation.ConfigureAwait(false);
@@ -341,6 +424,7 @@ public sealed partial class MySqlConnection
                 while (true)
                 {
                     int columnCount;
+                    long affectedRows = -1;
                     using (var header =
                       await _connection._reader.ReadAsync(CancellationToken.None).ConfigureAwait(false))
                     {
@@ -356,11 +440,22 @@ public sealed partial class MySqlConnection
                         }
 
                         columnCount = result.IsCompletion ? 0 : result.ColumnCount;
+                        if (result.IsCompletion)
+                        {
+                            affectedRows = result.AffectedRows;
+                        }
                     }
 
                     if (columnCount > 0)
                     {
                         await PumpResultSetAsync(columnCount).ConfigureAwait(false);
+                    }
+                    else if (_results is not null)
+                    {
+                        _results.AddRecordsAffected(affectedRows);
+                        _columns = Array.Empty<SqlColumn>();
+                        ResultStarted();
+                        await ResultCompletedAsync().ConfigureAwait(false);
                     }
 
                     if ((_connection._status & MySqlServerStatus.MoreResultsExist) == 0)
@@ -421,6 +516,7 @@ public sealed partial class MySqlConnection
               CancellationToken.None).ConfigureAwait(false);
             _decoder = decoder;
             _columns = decoder.Columns;
+            ResultStarted();
             while (true)
             {
                 var packet = await _connection._reader.ReadAsync(CancellationToken.None)
@@ -430,6 +526,10 @@ public sealed partial class MySqlConnection
                 {
                     if (_connection.TryCompleteResultSet(packet.Span))
                     {
+                        if (_results is not null)
+                        {
+                            await ResultCompletedAsync().ConfigureAwait(false);
+                        }
                         return;
                     }
 
@@ -440,7 +540,7 @@ public sealed partial class MySqlConnection
                         {
                             _current = packet;
                             _hasCurrent = true;
-                            _currentDelivered = false;
+                            _currentDelivered = _results?.PublishRow() ?? false;
                             retained = true;
                         }
                     }
@@ -510,10 +610,8 @@ public sealed partial class MySqlConnection
                 }
             }
 
-            if (advance)
-            {
-                _advance.Set();
-            }
+            if (advance) _advance.Set();
+            _results?.Advance.Set();
         }
 
         private void Complete(Exception? error)
@@ -527,9 +625,32 @@ public sealed partial class MySqlConnection
 
                 _error = error;
                 _completed = true;
+                _results?.Complete(error);
             }
 
             SignalRead(result: false, error);
+        }
+
+        private void ResultStarted()
+        {
+            if (_results is null) return;
+            lock (_gate)
+            {
+                _results.Start();
+            }
+        }
+
+        private ValueTask ResultCompletedAsync()
+        {
+            if (_results is null) return ValueTask.CompletedTask;
+            bool waitForNext;
+            lock (_gate)
+            {
+                waitForNext = _results.End(_stopped);
+            }
+
+            SignalRead(result: false, error: null);
+            return waitForNext ? _results.Advance.WaitAsync() : ValueTask.CompletedTask;
         }
 
         private void DisposeCurrent()
@@ -574,7 +695,8 @@ public sealed partial class MySqlConnection
             bool signal;
             lock (_gate)
             {
-                signal = _readPending;
+                signal = _readPending && !_readSignaled && (!result || !_currentDelivered);
+                _readSignaled |= signal;
                 if (signal && result)
                 {
                     _currentDelivered = true;

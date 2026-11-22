@@ -5,7 +5,7 @@ using Apex.SqlClient;
 namespace Apex.MySqlClient;
 
 /// <summary>A statement prepared with COM_STMT_PREPARE and bound to one connection.</summary>
-internal sealed class MySqlPreparedStatement : ISqlPreparedStatement
+internal sealed class MySqlPreparedStatement : ISqlPreparedStatement, ISqlResultPreparedStatement
 {
     private readonly MySqlConnection _connection;
     private readonly MySqlStatement _statement;
@@ -133,6 +133,19 @@ internal sealed class MySqlPreparedStatement : ISqlPreparedStatement
         ObjectDisposedException.ThrowIf(_disposed, this);
         return _connection.ExecutePreparedReaderAsync(_statement, parameters, cancellationToken);
     }
+
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return _connection.ExecuteResultPreparedReaderAsync(_statement, parameters, cancellationToken);
+    }
+
+    ValueTask<ISqlRowReader> ISqlResultPreparedStatement.ExecuteResultReaderAsync(
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteResultReaderAsync(parameters, cancellationToken);
 
     /// <inheritdoc />
     /// <remarks>

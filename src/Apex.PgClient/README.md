@@ -4,6 +4,12 @@
 
 `Apex.PgClient` is a direct PostgreSQL protocol driver for .NET 10 and .NET 11.
 
+## ADO.NET
+
+Install the separate [`Apex.PgClient.AdoNet`](../Apex.PgClient.AdoNet/README.md)
+package for `PgDbConnection`, commands, readers, transactions, data sources, and
+batches. This native driver has no dependency on the adapters or `System.Data.Common`.
+
 ## Connect and pool
 
 Connection keyword strings, `postgres://` and `postgresql://` URIs, explicit

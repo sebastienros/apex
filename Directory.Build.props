@@ -32,10 +32,6 @@
   </PropertyGroup>
 
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
-    <None Include="$(MSBuildThisFileDirectory)assets/$(MSBuildProjectName)/icon.png"
-          Pack="true"
-          PackagePath="\"
-          Link="icon.png" />
     <None Include="$(MSBuildProjectDirectory)/README.md"
           Pack="true"
           PackagePath="\"

@@ -16,7 +16,7 @@ using Apex.SqlClient.Internal;
 
 namespace Apex.PgClient;
 
-public sealed class PgConnection : ISqlConnection
+public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 {
     private readonly PgConnectOptions _options;
     private readonly Socket _socket;
@@ -444,6 +444,29 @@ public sealed class PgConnection : ISqlConnection
             parameters,
             cancellationToken));
     }
+
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ThrowIfCopyActive();
+        ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        return ValueTask.FromResult<ISqlRowReader>(
+          new PgResultReader(
+            this,
+            sql,
+            statementName: null,
+            parameters,
+            cancellationToken));
+    }
+
+    ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteResultReaderAsync(sql, parameters, cancellationToken);
 
     public async ValueTask<ISqlTransaction> BeginTransactionAsync(
         CancellationToken cancellationToken = default)
@@ -1311,6 +1334,18 @@ public sealed class PgConnection : ISqlConnection
         CancellationToken cancellationToken) =>
       ValueTask.FromResult<ISqlRowReader>(
         new PgRowReader(
+          this,
+          sql: null,
+          statementName,
+          parameters,
+          cancellationToken));
+
+    internal ValueTask<ISqlRowReader> ExecuteResultPreparedReaderAsync(
+        string statementName,
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+      ValueTask.FromResult<ISqlRowReader>(
+        new PgResultReader(
           this,
           sql: null,
           statementName,
@@ -2595,10 +2630,24 @@ public sealed class PgConnection : ISqlConnection
         }
     }
 
-    private sealed class PgRowReader : ISqlRowReader, IValueTaskSource<bool>
+    private sealed class PgResultReader(
+        PgConnection connection,
+        string? sql,
+        string? statementName,
+        SqlParameters parameters,
+        CancellationToken cancellationToken) :
+        PgRowReader(connection, sql, statementName, parameters, cancellationToken, preserveResultBoundaries: true),
+        ISqlResultBoundaryReader,
+        ISqlRecordsAffectedReader
+    {
+        int ISqlRecordsAffectedReader.RecordsAffected => RecordsAffected;
+    }
+
+    private class PgRowReader : ISqlRowReader, IValueTaskSource<bool>
     {
         private readonly PgConnection _connection;
         private readonly AsyncAutoResetEvent _advance = new();
+        private readonly SqlResultReaderState? _results;
         private readonly object _gate = new();
         private readonly Action _cancelAction;
         private readonly CancellationTokenRegistration _operationCancellation;
@@ -2619,6 +2668,7 @@ public sealed class PgConnection : ISqlConnection
         private bool _canceled;
         private bool _sent;
         private bool _readPending;
+        private bool _readSignaled;
         private int _disposed;
 
         internal PgRowReader(
@@ -2626,9 +2676,11 @@ public sealed class PgConnection : ISqlConnection
             string? sql,
             string? statementName,
             SqlParameters parameters,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool preserveResultBoundaries = false)
         {
             _connection = connection;
+            _results = preserveResultBoundaries ? new SqlResultReaderState() : null;
             _operationCancellationToken = cancellationToken;
             _cancelAction = Cancel;
             _readCompletion.RunContinuationsAsynchronously = true;
@@ -2678,6 +2730,63 @@ public sealed class PgConnection : ISqlConnection
 
         public int FieldCount => _columns.Count;
 
+        protected int RecordsAffected => _results?.RecordsAffected ?? -1;
+
+        public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default)
+        {
+            ObjectDisposedException.ThrowIf(_disposed != 0, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+            Task<bool> wait;
+            lock (_gate)
+            {
+                ThrowIfError();
+                if (_hasCurrent)
+                {
+                    _currentDelivered = true;
+                    return ValueTask.FromResult(true);
+                }
+                if (results.Ended || _completed) return ValueTask.FromResult(false);
+                wait = results.Initialize();
+            }
+
+            // Cancel the operation, not just the wait, so an abandoned initializer cannot later
+            // consume the first row of the result.
+            return AwaitResultTransitionAsync(wait, cancellationToken);
+        }
+
+        public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default)
+        {
+            ObjectDisposedException.ThrowIf(_disposed != 0, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            var results = _results ?? throw new NotSupportedException("This reader does not preserve result boundaries.");
+            Task<bool> wait;
+            bool advanceRow;
+            bool advanceResult;
+            lock (_gate)
+            {
+                ThrowIfError();
+                if (_completed) return ValueTask.FromResult(false);
+                wait = results.NextResult();
+                advanceRow = _hasCurrent;
+                advanceResult = results.Ended;
+            }
+
+            if (advanceRow) _advance.Set();
+            if (advanceResult) results.Advance.Set();
+            return AwaitResultTransitionAsync(wait, cancellationToken);
+        }
+
+        private async ValueTask<bool> AwaitResultTransitionAsync(
+            Task<bool> wait,
+            CancellationToken cancellationToken)
+        {
+            using var registration = cancellationToken.CanBeCanceled
+                ? cancellationToken.Register(_cancelAction)
+                : default;
+            return await wait.ConfigureAwait(false);
+        }
+
         public ValueTask<bool> ReadAsync(
             CancellationToken cancellationToken = default)
         {
@@ -2699,6 +2808,11 @@ public sealed class PgConnection : ISqlConnection
                 }
 
                 if (_completed)
+                {
+                    return ValueTask.FromResult(false);
+                }
+
+                if (_results is { Ended: true })
                 {
                     return ValueTask.FromResult(false);
                 }
@@ -2749,6 +2863,7 @@ public sealed class PgConnection : ISqlConnection
                     _readCancellation = default;
                     _readCancellationToken = default;
                     _readPending = false;
+                    _readSignaled = false;
                 }
 
                 registration.Dispose();
@@ -2951,6 +3066,7 @@ public sealed class PgConnection : ISqlConnection
             }
 
             _advance.Set();
+            _results?.Advance.Set();
             try
             {
                 await _operation.ConfigureAwait(false);
@@ -2988,6 +3104,7 @@ public sealed class PgConnection : ISqlConnection
                         {
                             case (byte)'T':
                                 _columns = ParseColumns(message.Payload.Span);
+                                ResultStarted();
                                 break;
                             case (byte)'D':
                                 ValidateRow(
@@ -2999,7 +3116,7 @@ public sealed class PgConnection : ISqlConnection
                                     {
                                         _current = message;
                                         _hasCurrent = true;
-                                        _currentDelivered = false;
+                                        _currentDelivered = _results?.PublishRow() ?? false;
                                         retained = true;
                                     }
                                 }
@@ -3027,10 +3144,26 @@ public sealed class PgConnection : ISqlConnection
                             case (byte)'1':
                             case (byte)'2':
                             case (byte)'3':
-                            case (byte)'C':
                             case (byte)'I':
                             case (byte)'n':
                             case (byte)'t':
+                                break;
+                            case (byte)'C':
+                                if (_results is not null)
+                                {
+                                    var commandTag = ParseCommandTag(message.Payload.Span);
+                                    if (ReportsRecordsAffected(commandTag))
+                                    {
+                                        _results.AddRecordsAffected(ParseAffectedRows(commandTag));
+                                    }
+                                    if (!_results.Active)
+                                    {
+                                        _columns = Array.Empty<SqlColumn>();
+                                        ResultStarted();
+                                    }
+
+                                    await ResultCompletedAsync().ConfigureAwait(false);
+                                }
                                 break;
                             case (byte)'Z':
                                 _connection.UpdateTransactionStatus(message.Payload.Span);
@@ -3118,10 +3251,8 @@ public sealed class PgConnection : ISqlConnection
                 }
             }
 
-            if (advance)
-            {
-                _advance.Set();
-            }
+            if (advance) _advance.Set();
+            _results?.Advance.Set();
         }
 
         private void Complete(Exception? error)
@@ -3135,9 +3266,32 @@ public sealed class PgConnection : ISqlConnection
 
                 _error = error;
                 _completed = true;
+                _results?.Complete(error);
             }
 
             SignalRead(result: false, error);
+        }
+
+        private void ResultStarted()
+        {
+            if (_results is null) return;
+            lock (_gate)
+            {
+                _results.Start();
+            }
+        }
+
+        private ValueTask ResultCompletedAsync()
+        {
+            if (_results is null) return ValueTask.CompletedTask;
+            bool waitForNext;
+            lock (_gate)
+            {
+                waitForNext = _results.End(_stopped);
+            }
+
+            SignalRead(result: false, error: null);
+            return waitForNext ? _results.Advance.WaitAsync() : ValueTask.CompletedTask;
         }
 
         private void DisposeCurrent()
@@ -3179,12 +3333,19 @@ public sealed class PgConnection : ISqlConnection
             }
         }
 
+        private static bool ReportsRecordsAffected(string commandTag) =>
+            commandTag.StartsWith("INSERT ", StringComparison.Ordinal) ||
+            commandTag.StartsWith("UPDATE ", StringComparison.Ordinal) ||
+            commandTag.StartsWith("DELETE ", StringComparison.Ordinal) ||
+            commandTag.StartsWith("MERGE ", StringComparison.Ordinal);
+
         private void SignalRead(bool result, Exception? error)
         {
             bool signal;
             lock (_gate)
             {
-                signal = _readPending;
+                signal = _readPending && !_readSignaled && (!result || !_currentDelivered);
+                _readSignaled |= signal;
                 if (signal && result)
                 {
                     _currentDelivered = true;

@@ -1,0 +1,195 @@
+using System.Data;
+using System.Data.Common;
+using Apex.SqlClient;
+
+namespace Apex.PgClient;
+
+/// <summary>Asynchronous-only ADO.NET connection adapter for PostgreSQL.</summary>
+public sealed class PgDbConnection : ApexDbConnection
+{
+    internal override DbException TranslateException(SqlClientException exception) => PgAdoErrors.Translate(exception);
+    private PgConnectOptions _options;
+    private readonly Func<CancellationToken, ValueTask<ISqlConnection>>? _pooledOpen;
+
+    public PgDbConnection() : this(string.Empty) { }
+    public PgDbConnection(string connectionString)
+        : this(
+            connectionString,
+            PgAdoConnectionString.Parse(connectionString),
+            null) { }
+    internal PgDbConnection(
+        string connectionString,
+        Func<CancellationToken, ValueTask<ISqlConnection>> pooledOpen)
+        : this(connectionString, PgAdoConnectionString.Parse(connectionString), pooledOpen) { }
+    internal PgDbConnection(
+        string connectionString,
+        PgConnectOptions options,
+        Func<CancellationToken, ValueTask<ISqlConnection>>? pooledOpen,
+        bool autoOpenForCommands = false)
+        : base(
+            connectionString,
+            options.Database,
+            options.Host,
+            options.ConnectTimeout,
+            isPoolBound: pooledOpen is not null,
+            autoOpenForCommands)
+    {
+        _options = options;
+        _pooledOpen = pooledOpen;
+    }
+    protected override async Task<ISqlConnection> OpenCoreAsync(CancellationToken cancellationToken) =>
+        _pooledOpen is not null
+            ? await _pooledOpen(cancellationToken).ConfigureAwait(false)
+            : await PgClient.ConnectAsync(_options, cancellationToken).ConfigureAwait(false);
+    protected override void SetConnectionStringCore(string connectionString)
+    {
+        _options = PgAdoConnectionString.Parse(connectionString);
+        SetConnectionMetadata(connectionString, _options.Database, _options.Host, _options.ConnectTimeout);
+    }
+    protected override DbCommand CreateCommandCore() => new PgDbCommand(this);
+    protected override DbBatch CreateDbBatch() => new PgDbBatch { Connection = this };
+    protected override DbTransaction CreateTransaction(ISqlTransaction transaction, IsolationLevel isolationLevel) =>
+        new PgDbTransaction(transaction, this, isolationLevel);
+    internal ISqlConnection GetConnectionForCommand() => NativeConnection;
+}
+
+/// <summary>Asynchronous-only ADO.NET command adapter for PostgreSQL.</summary>
+public sealed class PgDbCommand : ApexDbCommand
+{
+    internal override DbException TranslateException(SqlClientException exception) => PgAdoErrors.Translate(exception);
+    public PgDbCommand() : base(new PgDbParameterCollection(), PgAdoReaderFactory.Instance) { }
+    public PgDbCommand(PgDbConnection connection)
+        : base(new PgDbParameterCollection(), PgAdoReaderFactory.Instance)
+    {
+        Connection = connection;
+    }
+    protected override ApexDbParameter CreateParameterCore() => new PgDbParameter();
+    protected override ISqlConnection GetConnection()
+    {
+        if (Connection is not PgDbConnection connection)
+        {
+            throw new InvalidOperationException("The command connection must be a PgDbConnection.");
+        }
+
+        if (connection.State != ConnectionState.Open)
+        {
+            throw new InvalidOperationException("The command connection must be open.");
+        }
+
+        return connection.GetConnectionForCommand();
+    }
+    protected override ApexDbDataReader CreateReader(
+        ISqlRowReader reader,
+        CommandBehavior behavior,
+        DbConnection executedConnection,
+        CancellationTokenSource operationCancellation,
+        Func<ValueTask> onClose) =>
+        new PgDbDataReader(reader, behavior, executedConnection, operationCancellation, onClose);
+}
+
+public sealed class PgDbParameter : ApexDbParameter { }
+public sealed class PgDbParameterCollection : ApexDbParameterCollection { }
+public sealed class PgDbDataReader : ApexDbDataReader
+{
+    internal override DbException TranslateException(SqlClientException exception) => PgAdoErrors.Translate(exception);
+    public PgDbDataReader(ISqlRowReader reader, CommandBehavior behavior, DbConnection? connection)
+        : base(reader, behavior, connection) { }
+    internal PgDbDataReader(
+        ISqlRowReader reader,
+        CommandBehavior behavior,
+        DbConnection connection,
+        CancellationTokenSource operationCancellation,
+        Func<ValueTask> onClose)
+        : base(reader, behavior, connection, operationCancellation, onClose) { }
+}
+
+/// <summary>ADO.NET transaction adapter for PostgreSQL.</summary>
+public sealed class PgDbTransaction : ApexDbTransaction
+{
+    internal PgDbTransaction(ISqlTransaction transaction, DbConnection connection, IsolationLevel isolationLevel)
+        : base(transaction, connection, isolationLevel) { }
+}
+
+/// <summary>Factory for the PostgreSQL asynchronous ADO.NET adapter.</summary>
+public sealed class PgDbProviderFactory : DbProviderFactory
+{
+    public static readonly PgDbProviderFactory Instance = new();
+    public override bool CanCreateBatch => true;
+    public override bool CanCreateDataSourceEnumerator => false;
+    public override DbConnection CreateConnection() => new PgDbConnection();
+    public override DbCommand CreateCommand() => new PgDbCommand();
+    public override DbParameter CreateParameter() => new PgDbParameter();
+    public override DbBatch CreateBatch() => new PgDbBatch();
+    public override DbBatchCommand CreateBatchCommand() => new PgDbBatchCommand();
+    public override DbDataSource CreateDataSource(string connectionString) => new PgDbDataSource(connectionString);
+}
+
+/// <summary>Pool-backed source of PostgreSQL ADO.NET connections.</summary>
+public sealed class PgDbDataSource : DbDataSource
+{
+    private readonly string _connectionString;
+    private readonly PgConnectOptions _options;
+    private readonly PgPool _pool;
+    public PgDbDataSource(string connectionString) : this(connectionString, null) { }
+    public PgDbDataSource(string connectionString, SqlPoolOptions? poolOptions)
+    {
+        _connectionString = connectionString;
+        _options = PgAdoConnectionString.Parse(connectionString);
+        _pool = PgPool.Create(_options, poolOptions);
+    }
+
+    public override string ConnectionString => _connectionString;
+    protected override DbConnection CreateDbConnection() =>
+        new PgDbConnection(_connectionString, _options, _pool.GetConnectionAsync);
+    protected override DbConnection OpenDbConnection() => throw ApexDbCommand.AsyncOnly();
+    protected override async ValueTask<DbConnection> OpenDbConnectionAsync(CancellationToken cancellationToken = default)
+    {
+        var connection = (PgDbConnection)CreateDbConnection();
+        await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        return connection;
+    }
+
+    protected override DbCommand CreateDbCommand(string? commandText)
+    {
+        var command = new PgDbCommand(new PgDbConnection(
+            _connectionString,
+            _options,
+            _pool.GetConnectionAsync,
+            autoOpenForCommands: true));
+        command.CommandText = commandText;
+        return command;
+    }
+    protected override DbBatch CreateDbBatch() =>
+        new PgDbBatch
+        {
+            Connection = new PgDbConnection(
+                _connectionString,
+                _options,
+                _pool.GetConnectionAsync,
+                autoOpenForCommands: true),
+        };
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+            ApexExceptionBoundary.RunValueAsync(_pool.DisposeAsync, PgAdoErrors.Translate).AsTask().GetAwaiter().GetResult();
+        base.Dispose(disposing);
+    }
+    protected override async ValueTask DisposeAsyncCore()
+    {
+        await ApexExceptionBoundary.RunValueAsync(_pool.DisposeAsync, PgAdoErrors.Translate).ConfigureAwait(false);
+        await base.DisposeAsyncCore().ConfigureAwait(false);
+    }
+}
+
+internal static class PgAdoReaderFactory
+{
+    internal static readonly IApexAdoReaderFactory Instance = new ApexResultReaderFactory("PostgreSQL");
+}
+
+internal static class PgAdoErrors
+{
+    internal static DbException Translate(SqlClientException exception) =>
+        exception is PgException postgres
+            ? new ApexDbException(postgres, postgres.SqlState, postgres.IsTransient)
+            : new ApexDbException(exception);
+}

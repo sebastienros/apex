@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Globalization;
 using Apex.MsSqlClient;
 using Apex.MySqlClient;
@@ -30,6 +31,9 @@ internal abstract class FortuneDatabase : IAsyncDisposable
         {
             ("postgresql", "apex") =>
                 ApexPostgreSqlFortuneDatabase.CreateAsync(requiredConnectionString),
+            ("postgresql", "apex-ado") =>
+                ValueTask.FromResult<FortuneDatabase>(
+                    new ApexAdoPostgreSqlFortuneDatabase(requiredConnectionString)),
             ("postgresql", "npgsql") =>
                 ValueTask.FromResult<FortuneDatabase>(
                     new NpgsqlFortuneDatabase(
@@ -38,12 +42,21 @@ internal abstract class FortuneDatabase : IAsyncDisposable
             ("mysql", "apex") =>
                 ValueTask.FromResult<FortuneDatabase>(
                     new ApexMySqlFortuneDatabase(requiredConnectionString)),
+            ("mysql", "apex-ado") =>
+                ValueTask.FromResult<FortuneDatabase>(
+                    new ApexAdoStringFortuneDatabase(
+                        new MySqlDbDataSource(requiredConnectionString, PoolOptions()),
+                        unsignedId: true)),
             ("mysql", "mysqlconnector") =>
                 ValueTask.FromResult<FortuneDatabase>(
                     new MySqlConnectorFortuneDatabase(requiredConnectionString)),
             ("sqlserver", "apex") =>
                 ValueTask.FromResult<FortuneDatabase>(
                     new ApexSqlServerFortuneDatabase(requiredConnectionString)),
+            ("sqlserver", "apex-ado") =>
+                ValueTask.FromResult<FortuneDatabase>(
+                    new ApexAdoStringFortuneDatabase(
+                        new MsSqlDbDataSource(requiredConnectionString, PoolOptions()))),
             ("sqlserver", "microsoftdatasqlclient") =>
                 ValueTask.FromResult<FortuneDatabase>(
                     new MicrosoftDataSqlClientFortuneDatabase(requiredConnectionString)),
@@ -84,6 +97,18 @@ internal abstract class FortuneDatabase : IAsyncDisposable
         };
     }
 
+    protected static string CreatePostgreSqlUri(string connectionString)
+    {
+        var options = CreatePostgreSqlOptions(
+            connectionString,
+            new PgConnectOptions().PipeliningLimit);
+        return new UriBuilder("postgresql", options.Host, options.Port, options.Database)
+        {
+            UserName = options.Username,
+            Password = options.Password,
+        }.Uri.AbsoluteUri;
+    }
+
     protected static int PositiveEnvironment(string name, int fallback)
     {
         var value = Environment.GetEnvironmentVariable(name);
@@ -100,6 +125,12 @@ internal abstract class FortuneDatabase : IAsyncDisposable
                 value,
                 "Value must be a positive integer.");
     }
+
+    private static SqlPoolOptions PoolOptions() =>
+        new()
+        {
+            MaximumSize = PositiveEnvironment("DATABASE_CONNECTIONS", 64),
+        };
 
     private static string RequiredSelection(string name, string? value) =>
         string.IsNullOrWhiteSpace(value)
@@ -198,6 +229,72 @@ internal sealed class ApexPostgreSqlFortuneDatabase : Utf8FortuneDatabase
             await _pool.DisposeAsync();
         }
     }
+}
+
+internal sealed class ApexAdoPostgreSqlFortuneDatabase : Utf8FortuneDatabase
+{
+    private readonly PgDbDataSource _dataSource;
+
+    public ApexAdoPostgreSqlFortuneDatabase(string connectionString)
+    {
+        _dataSource = new PgDbDataSource(
+            CreatePostgreSqlUri(connectionString),
+            new SqlPoolOptions
+            {
+                MaximumSize = PositiveEnvironment("DATABASE_CONNECTIONS", 56),
+            });
+    }
+
+    public override async ValueTask<List<Utf8Fortune>> LoadAsync(
+        CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(Query);
+        command.CommandTimeout = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        List<Utf8Fortune> fortunes = [];
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            fortunes.Add(new Utf8Fortune(
+                reader.GetInt32(0),
+                reader.GetFieldValue<ReadOnlyMemory<byte>>(1)));
+        }
+
+        return Complete(fortunes);
+    }
+
+    public override ValueTask DisposeAsync() => _dataSource.DisposeAsync();
+}
+
+internal sealed class ApexAdoStringFortuneDatabase : StringFortuneDatabase
+{
+    private readonly DbDataSource _dataSource;
+    private readonly bool _unsignedId;
+
+    public ApexAdoStringFortuneDatabase(DbDataSource dataSource, bool unsignedId = false)
+    {
+        _dataSource = dataSource;
+        _unsignedId = unsignedId;
+    }
+
+    public override async ValueTask<List<Fortune>> LoadAsync(
+        CancellationToken cancellationToken)
+    {
+        await using var command = _dataSource.CreateCommand(Query);
+        command.CommandTimeout = 0;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        List<Fortune> fortunes = [];
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var id = _unsignedId
+                ? checked((int)reader.GetFieldValue<uint>(0))
+                : reader.GetInt32(0);
+            fortunes.Add(new Fortune(id, reader.GetString(1)));
+        }
+
+        return Complete(fortunes);
+    }
+
+    public override ValueTask DisposeAsync() => _dataSource.DisposeAsync();
 }
 
 internal sealed class ApexMySqlFortuneDatabase : StringFortuneDatabase

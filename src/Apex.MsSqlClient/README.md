@@ -4,6 +4,12 @@
 
 `Apex.MsSqlClient` is a direct Tabular Data Stream (TDS) driver for .NET 10 and .NET 11.
 
+## ADO.NET
+
+Install the separate [`Apex.MsSqlClient.AdoNet`](../Apex.MsSqlClient.AdoNet/README.md)
+package for `MsSqlDbConnection`, commands, readers, transactions, data sources, and
+batches. This native driver has no dependency on the adapters or `System.Data.Common`.
+
 ## Connect and pool
 
 Standard Microsoft SQL Server keyword strings, `sqlserver://` URIs, and explicit options

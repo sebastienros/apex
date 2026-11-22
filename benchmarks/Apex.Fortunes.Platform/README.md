@@ -11,11 +11,16 @@ Set all of these environment variables before starting the app:
 | Variable | Values |
 | --- | --- |
 | `DATABASE` | `postgresql`, `mysql`, or `sqlserver` |
-| `DRIVER` | PostgreSQL: `apex` or `npgsql`; MySQL: `apex` or `mysqlconnector`; SQL Server: `apex` or `microsoftdatasqlclient` |
+| `DRIVER` | PostgreSQL: `apex`, `apex-ado`, or `npgsql`; MySQL: `apex`, `apex-ado`, or `mysqlconnector`; SQL Server: `apex`, `apex-ado`, or `microsoftdatasqlclient` |
 | `CONNECTION_STRING` | Connection string for the selected database and driver |
 
 The Crank config defaults `branchOrCommit` to `main`; override it when benchmarking an
 unmerged branch.
+
+The `apex-ado` scenarios use the optional ADO.NET packages and share the native Apex
+connection strings through YAML aliases. They use leased connections and streaming readers,
+not PostgreSQL's pipelined collector or MySQL's cached prepared-query strategy, so their
+throughput comparison includes those strategy differences.
 
 `DATABASE_CONNECTIONS` sets each job's pool size. The Crank configuration uses two fewer
 connections than database cores except for Npgsql, which uses 256 connections to keep the

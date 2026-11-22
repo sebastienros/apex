@@ -48,7 +48,7 @@ class Apex.MsSqlClient.MsSqlConnectOptions : Apex.SqlClient.SqlConnectOptions, S
   Property: System.String ClientInterfaceName
   Property: System.String TlsHostName
   Property: System.String WorkstationId
-class Apex.MsSqlClient.MsSqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+class Apex.MsSqlClient.MsSqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, Apex.SqlClient.ISqlResultReaderConnection, System.IAsyncDisposable
   Event: System.Action`1[Apex.MsSqlClient.MsSqlInfo] InfoMessage
   Method: Apex.SqlClient.DatabaseMetadata get_DatabaseMetadata()
   Method: Boolean get_IsSecure()

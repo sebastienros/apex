@@ -152,7 +152,7 @@ class Apex.PgClient.PgConnectOptions : Apex.SqlClient.SqlConnectOptions, System.
   Property: System.Collections.Generic.IReadOnlyList`1[System.Security.Cryptography.X509Certificates.X509Certificate2] ClientCertificates
   Property: System.Net.Security.RemoteCertificateValidationCallback CertificateValidationCallback
   Property: System.Security.Cryptography.X509Certificates.X509RevocationMode CertificateRevocationCheckMode
-class Apex.PgClient.PgConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+class Apex.PgClient.PgConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, Apex.SqlClient.ISqlResultReaderConnection, System.IAsyncDisposable
   Event: System.Action`1[Apex.PgClient.PgNotice] Notice
   Event: System.Action`1[Apex.PgClient.PgNotification] Notification
   Method: Apex.PgClient.PgTypeRegistry get_TypeRegistry()

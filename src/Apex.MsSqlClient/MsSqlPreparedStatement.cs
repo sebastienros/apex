@@ -4,7 +4,7 @@ using Apex.SqlClient;
 
 namespace Apex.MsSqlClient;
 
-internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement
+internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResultPreparedStatement
 {
     private readonly MsSqlConnection _connection;
     private readonly object _gate = new();
@@ -129,6 +129,28 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement
               new MsSqlRowReader(_connection, this, parameters, cancellationToken));
         }
     }
+
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+        SqlParameters parameters,
+        CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            _hasExecution = true;
+            return ValueTask.FromResult<ISqlRowReader>(
+              new MsSqlResultReader(
+                _connection,
+                this,
+                parameters,
+                cancellationToken));
+        }
+    }
+
+    ValueTask<ISqlRowReader> ISqlResultPreparedStatement.ExecuteResultReaderAsync(
+        SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteResultReaderAsync(parameters, cancellationToken);
 
     public async IAsyncEnumerable<SqlRow> StreamAsync(
         SqlParameters parameters = default,

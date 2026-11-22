@@ -4,6 +4,12 @@
 
 `Apex.MySqlClient` is a direct MySQL protocol driver for .NET 10 and .NET 11.
 
+## ADO.NET
+
+Install the separate [`Apex.MySqlClient.AdoNet`](../Apex.MySqlClient.AdoNet/README.md)
+package for `MySqlDbConnection`, commands, readers, transactions, data sources, and
+batches. This native driver has no dependency on the adapters or `System.Data.Common`.
+
 ## Connect and pool
 
 The driver accepts `mysql://` and `mariadb://` URIs, keyword connection strings,

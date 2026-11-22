@@ -388,7 +388,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         internal DateTimeOffset LastUsed { get; set; } = created;
     }
 
-    private sealed class Lease : ISqlConnection
+    private sealed class Lease : ISqlConnection, ISqlResultReaderConnection
     {
         private readonly object _gate = new();
         private SqlConnectionPool<TConnection>? _pool;
@@ -548,6 +548,32 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
+        async ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
+            string sql,
+            SqlParameters parameters,
+            CancellationToken cancellationToken)
+        {
+            var connection = BeginChild();
+            try
+            {
+                if (connection is not ISqlResultReaderConnection resultConnection)
+                {
+                    throw new NotSupportedException("The pooled provider does not support result boundaries.");
+                }
+
+                var reader = await resultConnection.ExecuteResultReaderAsync(
+                    sql,
+                    parameters,
+                    cancellationToken).ConfigureAwait(false);
+                return await WrapResultReaderAsync(this, reader).ConfigureAwait(false);
+            }
+            catch
+            {
+                await EndChildAsync().ConfigureAwait(false);
+                throw;
+            }
+        }
+
         public async ValueTask<ISqlTransaction> BeginTransactionAsync(
             CancellationToken cancellationToken = default)
         {
@@ -649,7 +675,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
-        private sealed class LeasePreparedStatement : ISqlPreparedStatement
+        private sealed class LeasePreparedStatement : ISqlPreparedStatement, ISqlResultPreparedStatement
         {
             private readonly Lease _lease;
             private readonly ISqlPreparedStatement _inner;
@@ -725,6 +751,30 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                 }
             }
 
+            async ValueTask<ISqlRowReader> ISqlResultPreparedStatement.ExecuteResultReaderAsync(
+                SqlParameters parameters,
+                CancellationToken cancellationToken)
+            {
+                _lease.PinChild();
+                try
+                {
+                    if (_inner is not ISqlResultPreparedStatement resultStatement)
+                    {
+                        throw new NotSupportedException("The pooled provider statement does not support result boundaries.");
+                    }
+
+                    var reader = await resultStatement.ExecuteResultReaderAsync(
+                        parameters,
+                        cancellationToken).ConfigureAwait(false);
+                    return await WrapResultReaderAsync(_lease, reader).ConfigureAwait(false);
+                }
+                catch
+                {
+                    await _lease.EndChildAsync().ConfigureAwait(false);
+                    throw;
+                }
+            }
+
             public async IAsyncEnumerable<SqlRow> StreamAsync(
                 SqlParameters parameters = default,
                 int fetchSize = 50,
@@ -765,7 +815,33 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
         }
 
-        private sealed class LeaseRowReader : ISqlRowReader
+        private static async ValueTask<ISqlRowReader> WrapResultReaderAsync(Lease lease, ISqlRowReader reader)
+        {
+            if (reader is ISqlResultBoundaryReader && reader is ISqlRecordsAffectedReader)
+            {
+                return new LeaseResultReader(lease, reader);
+            }
+
+            await reader.DisposeAsync().ConfigureAwait(false);
+            throw new NotSupportedException("The provider did not return a result-preserving reader.");
+        }
+
+        private sealed class LeaseResultReader(Lease lease, ISqlRowReader inner) :
+            LeaseRowReader(lease, inner),
+            ISqlResultBoundaryReader,
+            ISqlRecordsAffectedReader
+        {
+            int ISqlRecordsAffectedReader.RecordsAffected =>
+                ((ISqlRecordsAffectedReader)Inner).RecordsAffected;
+
+            public ValueTask<bool> InitializeAsync(CancellationToken cancellationToken = default) =>
+                ((ISqlResultBoundaryReader)Inner).InitializeAsync(cancellationToken);
+
+            public ValueTask<bool> NextResultAsync(CancellationToken cancellationToken = default) =>
+                ((ISqlResultBoundaryReader)Inner).NextResultAsync(cancellationToken);
+        }
+
+        private class LeaseRowReader : ISqlRowReader
         {
             private readonly Lease _lease;
             private readonly ISqlRowReader _inner;
@@ -778,6 +854,8 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
 
             public IReadOnlyList<SqlColumn> Columns => _inner.Columns;
+
+            protected ISqlRowReader Inner => _inner;
 
             public int FieldCount => _inner.FieldCount;
 

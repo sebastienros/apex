@@ -169,7 +169,7 @@ class Apex.MySqlClient.MySqlConnectOptions : Apex.SqlClient.SqlConnectOptions, S
   Property: System.Net.Security.RemoteCertificateValidationCallback CertificateValidationCallback
   Property: System.Security.Cryptography.X509Certificates.X509RevocationMode CertificateRevocationCheckMode
   Property: System.String ServerRsaPublicKey
-class Apex.MySqlClient.MySqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, System.IAsyncDisposable
+class Apex.MySqlClient.MySqlConnection : Apex.SqlClient.ISqlClient, Apex.SqlClient.ISqlConnection, Apex.SqlClient.ISqlResultReaderConnection, System.IAsyncDisposable
   Method: Apex.MySqlClient.MySqlCommandInfo get_LastCommandInfo()
   Method: Apex.MySqlClient.MySqlServerStatus get_ServerStatus()
   Method: Apex.MySqlClient.MySqlServerVersion get_ServerVersion()
