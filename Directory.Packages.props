@@ -16,6 +16,8 @@
     <!-- Testcontainers 4.13.0 requests vulnerable SSH.NET 2025.1.0. -->
     <PackageVersion Include="SSH.NET" Version="2026.0.0" />
     <PackageVersion Include="System.IO.Hashing" Version="10.0.11" />
+    <!-- Microsoft.Data.SqlClient 7.0.2 requests vulnerable System.Security.Cryptography.Pkcs 9.0.13 on net10.0. -->
+    <PackageVersion Include="System.Security.Cryptography.Pkcs" Version="9.0.23" />
     <PackageVersion Include="Testcontainers.MsSql" Version="4.13.0" />
     <PackageVersion Include="Testcontainers.MySql" Version="4.13.0" />
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.13.0" />
