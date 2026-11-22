@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using Apex.PgClient.Internal;
@@ -403,77 +404,29 @@ public sealed class PgRowDecoderTests
     [TestMethod]
     public void GenericTypedDecodingDoesNotAllocateAfterWarmup()
     {
-        PgRowDecoder decoder = new(16, 64);
-        var intRow = CreateRow(Int32(42));
-        var decimalRow = CreateRow("12.34"u8);
-        var pointRow = CreateRow(Point(1.5, -2.25));
         Guid expected =
           Guid.Parse("12345678-1234-5678-9012-123456789abc");
-        var guidRow =
-          CreateRow(expected.ToByteArray(bigEndian: true));
-        var intColumn = Column(23, SqlDataFormat.Binary);
-        var decimalColumn = Column(1700, SqlDataFormat.Text);
-        var pointColumn = Column(600, SqlDataFormat.Binary);
-        var guidColumn = Column(2950, SqlDataFormat.Binary);
-        for (var i = 0; i < 1000; i++)
-        {
-            _ = decoder.Decode<int>(
-              intRow,
-              0,
-              intColumn,
-              copyReadOnlyMemory: false);
-            _ = decoder.Decode<decimal>(
-              decimalRow,
-              0,
-              decimalColumn,
-              copyReadOnlyMemory: false);
-            _ = decoder.Decode<Guid>(
-              guidRow,
-              0,
-              guidColumn,
-              copyReadOnlyMemory: false);
-            _ = decoder.Decode<PgPoint>(
-              pointRow,
-              0,
-              pointColumn,
-              copyReadOnlyMemory: false);
-        }
+        TypedDecodeLoop loop = new(expected);
+
+        // Warm up by running the same loop that is measured, so nothing runs for
+        // the first time inside the measured window. In particular, the loop
+        // starts as Tier0 code and, once it is hot, the runtime compiles an
+        // optimized on-stack replacement (OSR) version synchronously on this
+        // thread. On net11.0 that compile sometimes allocates a 98,352-byte
+        // Int32[] here, the size of the runtime's cast cache table when it grows
+        // to its maximum. OSR code is compiled once per loop and reused by later
+        // calls, so the measured call below only runs steady-state code.
+        _ = loop.Run(10_000);
 
         var before = GC.GetAllocatedBytesForCurrentThread();
-        var intSum = 0;
-        decimal decimalSum = 0;
-        double pointSum = 0;
-        Guid lastGuid = default;
-        for (var i = 0; i < 10_000; i++)
-        {
-            intSum += decoder.Decode<int>(
-              intRow,
-              0,
-              intColumn,
-              copyReadOnlyMemory: false);
-            decimalSum += decoder.Decode<decimal>(
-              decimalRow,
-              0,
-              decimalColumn,
-              copyReadOnlyMemory: false);
-            lastGuid = decoder.Decode<Guid>(
-              guidRow,
-              0,
-              guidColumn,
-              copyReadOnlyMemory: false);
-            pointSum += decoder.Decode<PgPoint>(
-              pointRow,
-              0,
-              pointColumn,
-              copyReadOnlyMemory: false).X;
-        }
+        var result = loop.Run(10_000);
         var allocated =
           GC.GetAllocatedBytesForCurrentThread() - before;
 
-        Assert.AreEqual(420_000, intSum);
-        Assert.AreEqual(123_400m, decimalSum);
-        Assert.AreEqual(15_000d, pointSum);
-        Assert.AreEqual(expected, lastGuid);
+        Assert.AreEqual(420_000, result.IntSum);
+        Assert.AreEqual(123_400m, result.DecimalSum);
+        Assert.AreEqual(15_000d, result.PointSum);
+        Assert.AreEqual(expected, result.LastGuid);
         Assert.AreEqual(0, allocated);
     }
 
@@ -555,5 +508,55 @@ public sealed class PgRowDecoderTests
           bytes.AsSpan(sizeof(double)),
           BitConverter.DoubleToInt64Bits(y));
         return bytes;
+    }
+
+    private sealed class TypedDecodeLoop(Guid guid)
+    {
+        private readonly PgRowDecoder _decoder = new(16, 64);
+        private readonly byte[] _intRow = CreateRow(Int32(42));
+        private readonly byte[] _decimalRow = CreateRow("12.34"u8);
+        private readonly byte[] _pointRow = CreateRow(Point(1.5, -2.25));
+        private readonly byte[] _guidRow =
+          CreateRow(guid.ToByteArray(bigEndian: true));
+        private readonly SqlColumn _intColumn = Column(23, SqlDataFormat.Binary);
+        private readonly SqlColumn _decimalColumn =
+          Column(1700, SqlDataFormat.Text);
+        private readonly SqlColumn _pointColumn = Column(600, SqlDataFormat.Binary);
+        private readonly SqlColumn _guidColumn = Column(2950, SqlDataFormat.Binary);
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        public (int IntSum, decimal DecimalSum, double PointSum, Guid LastGuid) Run(
+          int iterations)
+        {
+            var intSum = 0;
+            decimal decimalSum = 0;
+            double pointSum = 0;
+            Guid lastGuid = default;
+            for (var i = 0; i < iterations; i++)
+            {
+                intSum += _decoder.Decode<int>(
+                  _intRow,
+                  0,
+                  _intColumn,
+                  copyReadOnlyMemory: false);
+                decimalSum += _decoder.Decode<decimal>(
+                  _decimalRow,
+                  0,
+                  _decimalColumn,
+                  copyReadOnlyMemory: false);
+                lastGuid = _decoder.Decode<Guid>(
+                  _guidRow,
+                  0,
+                  _guidColumn,
+                  copyReadOnlyMemory: false);
+                pointSum += _decoder.Decode<PgPoint>(
+                  _pointRow,
+                  0,
+                  _pointColumn,
+                  copyReadOnlyMemory: false).X;
+            }
+
+            return (intSum, decimalSum, pointSum, lastGuid);
+        }
     }
 }
