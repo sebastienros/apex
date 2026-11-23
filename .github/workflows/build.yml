@@ -14,6 +14,8 @@ jobs:
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: false
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
@@ -39,8 +41,9 @@ jobs:
       - name: Build
         timeout-minutes: 5
         run: for project in $TEST_PROJECTS; do dotnet build "$project" --configuration Release --no-restore; done
-      # The hang timeout is an inactivity timer, reset by every test update, so a hang in the
-      # last project still dumps at ~22 s of earlier tests + 60 s, inside the 2 minutes.
+      # The hang timeout is an inactivity timer, reset by every test update, so one hanging project
+      # still dumps at ~22 s of other tests + 60 s, inside the 2 minutes. A second hanging project
+      # would be killed by the step timeout before its own dump.
       - name: Test
         timeout-minutes: 2
         run: |
@@ -72,6 +75,8 @@ jobs:
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: false
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: true
     steps:
       - uses: actions/checkout@v7
       - name: Use the local disk for the NuGet cache

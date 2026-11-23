@@ -27,9 +27,13 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         project: ${{ fromJSON(needs.projects.outputs.list) }}
     runs-on: ${{ matrix.os }}
+    # The last two skip .NET CLI first-run work (HTTPS dev certificate, workload update check):
+    # with a warm NuGet cache, most of the Windows Restore step was the CLI starting up.
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: false
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: true
     steps:
       - uses: actions/checkout@v7
       # The default NuGet cache (%USERPROFILE%\.nuget\packages) is on the slower C: OS disk on
@@ -96,6 +100,29 @@ jobs:
           path: TestResults/
           if-no-files-found: ignore
           retention-days: 7
+
+  # The jobs above restore only the projects they test. This restores the whole solution in locked
+  # mode, so a stale lock file in the benchmarks or the integration tests fails the PR too.
+  lock-files:
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_GENERATE_ASPNET_CERTIFICATE: false
+      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - name: Restore the NuGet cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
+      - name: Restore every project in locked mode
+        timeout-minutes: 5
+        run: dotnet restore Apex.slnx --locked-mode
 
   databases:
     uses: ./.github/workflows/tests.yml
