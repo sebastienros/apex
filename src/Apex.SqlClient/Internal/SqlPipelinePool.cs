@@ -3,39 +3,109 @@ using System.Runtime.ExceptionServices;
 
 namespace Apex.SqlClient.Internal;
 
+/// <summary>
+/// A fixed set of pipelined connections that hands out operations round-robin.
+/// </summary>
+/// <remarks>
+/// <para>
+/// A connection that stops being usable (a fatal protocol error, a server restart, a network
+/// failure) is skipped by dispatch and replaced in the background: the pool reconnects with
+/// backoff, prepares every pool-wide statement on the new connection, and only then swaps it
+/// into the slot. Operations already running on the dead connection still fail with its error;
+/// the pool never retries them because they may not be idempotent.
+/// </para>
+/// <para>
+/// The dispatch path does one interlocked increment, one volatile read, and one predicate call.
+/// Everything else happens on the slow path, which only runs once a connection is unusable.
+/// </para>
+/// </remarks>
 internal sealed class SqlPipelinePool : ISqlPipelinePool
 {
+    internal static readonly TimeSpan DefaultInitialReconnectDelay = TimeSpan.FromMilliseconds(100);
+    internal static readonly TimeSpan DefaultMaximumReconnectDelay = TimeSpan.FromSeconds(5);
+
+    private static readonly Func<ISqlConnection, bool> s_alwaysUsable = static _ => true;
+
     private readonly ISqlConnection[] _connections;
+    private readonly Func<CancellationToken, ValueTask<ISqlConnection>> _connectionFactory;
+    private readonly Func<ISqlConnection, bool> _isUsable;
+    private readonly TimeSpan _initialReconnectDelay;
+    private readonly TimeSpan _maximumReconnectDelay;
+    private readonly int[] _replacing;
+    private readonly List<Task> _background = [];
+    private readonly CancellationTokenSource _disposeCancellation = new();
     private readonly object _disposeGate = new();
     private readonly object _statementsGate = new();
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly HashSet<PipelinePreparedStatement> _statements = [];
+    private Exception? _lastReconnectError;
     private int _nextConnection = -1;
     private int _disposed;
     private Task? _disposeTask;
 
-    private SqlPipelinePool(ISqlConnection[] connections)
+    private SqlPipelinePool(
+        ISqlConnection[] connections,
+        Func<CancellationToken, ValueTask<ISqlConnection>> connectionFactory,
+        Func<ISqlConnection, bool> isUsable,
+        TimeSpan initialReconnectDelay,
+        TimeSpan maximumReconnectDelay)
     {
         _connections = connections;
+        _connectionFactory = connectionFactory;
+        _isUsable = isUsable;
+        _initialReconnectDelay = initialReconnectDelay;
+        _maximumReconnectDelay = maximumReconnectDelay;
+        _replacing = new int[connections.Length];
     }
 
     public int Size => _connections.Length;
 
+    internal static ValueTask<SqlPipelinePool> CreateAsync(
+        SqlPipelinePoolOptions options,
+        Func<CancellationToken, ValueTask<ISqlConnection>> connectionFactory,
+        CancellationToken cancellationToken) =>
+      CreateAsync(options, connectionFactory, isUsable: null, cancellationToken);
+
+    // isUsable reports whether a connection can still run commands. It runs on every dispatch,
+    // so it must be cheap and must not allocate. When it is null, connections are assumed usable
+    // forever and are never replaced. Reconnects back off from initialReconnectDelay, doubling up
+    // to maximumReconnectDelay; the same backoff paces retries of statements that fail to prepare.
     internal static async ValueTask<SqlPipelinePool> CreateAsync(
         SqlPipelinePoolOptions options,
         Func<CancellationToken, ValueTask<ISqlConnection>> connectionFactory,
-        CancellationToken cancellationToken)
+        Func<ISqlConnection, bool>? isUsable,
+        CancellationToken cancellationToken,
+        TimeSpan? initialReconnectDelay = null,
+        TimeSpan? maximumReconnectDelay = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(connectionFactory);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.ConnectionCount);
+        var initialDelay = initialReconnectDelay ?? DefaultInitialReconnectDelay;
+        var maximumDelay = maximumReconnectDelay ?? DefaultMaximumReconnectDelay;
+
+        // A zero delay never grows when doubled, so the loop would spin; a negative one makes
+        // Task.Delay throw, or wait forever for -1 ms.
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(
+            initialDelay,
+            TimeSpan.Zero,
+            nameof(initialReconnectDelay));
+        ArgumentOutOfRangeException.ThrowIfLessThan(
+            maximumDelay,
+            initialDelay,
+            nameof(maximumReconnectDelay));
 
         var connections = await CreateAllAsync(
             options.ConnectionCount,
             connectionFactory,
             static connection => connection.DisposeAsync(),
             cancellationToken).ConfigureAwait(false);
-        return new SqlPipelinePool(connections);
+        return new SqlPipelinePool(
+            connections,
+            connectionFactory,
+            isUsable ?? s_alwaysUsable,
+            initialDelay,
+            maximumDelay);
     }
 
     public ValueTask<SqlRowSet> QueryAsync(
@@ -85,11 +155,60 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
         try
         {
             ObjectDisposedException.ThrowIf(_disposed != 0, this);
-            var statements = await CreateAllAsync(
-                _connections.Length,
-                (index, token) => _connections[index].PrepareAsync(sql, token),
-                static statement => statement.DisposeAsync(),
+
+            // A dead slot gets a hole instead of failing the whole prepare, and so does a slot
+            // whose connection dies while it prepares. The replacement for that slot runs under
+            // _lifecycle too, so it starts after this statement is registered and fills the hole
+            // when it swaps the new connection in. When every slot is dead, prepare on all of
+            // them anyway so the caller sees the real error.
+            var connections = new ISqlConnection[_connections.Length];
+            var usable = new bool[connections.Length];
+            var anyUsable = false;
+            for (var i = 0; i < connections.Length; i++)
+            {
+                connections[i] = Volatile.Read(ref _connections[i]);
+                usable[i] = _isUsable(connections[i]);
+                anyUsable |= usable[i];
+            }
+
+            for (var i = 0; i < connections.Length; i++)
+            {
+                if (!usable[i])
+                {
+                    ScheduleReplacement(i, connections[i]);
+                }
+            }
+
+            Exception? lostConnectionError = null;
+            var statements = await CreateAllAsync<ISqlPreparedStatement?>(
+                connections.Length,
+                async (index, token) =>
+                {
+                    var connection = connections[index];
+                    if (anyUsable && !usable[index])
+                    {
+                        return null;
+                    }
+
+                    try
+                    {
+                        return await connection.PrepareAsync(sql, token).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (
+                        anyUsable && !token.IsCancellationRequested && !_isUsable(connection))
+                    {
+                        Interlocked.CompareExchange(ref lostConnectionError, exception, null);
+                        ScheduleReplacement(index, connection);
+                        return null;
+                    }
+                },
+                static statement => statement?.DisposeAsync() ?? ValueTask.CompletedTask,
                 cancellationToken).ConfigureAwait(false);
+            if (lostConnectionError is not null && Array.TrueForAll(statements, static s => s is null))
+            {
+                ExceptionDispatchInfo.Capture(lostConnectionError).Throw();
+            }
+
             var result = new PipelinePreparedStatement(
                 this,
                 sql,
@@ -140,6 +259,22 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
 
     private async Task DisposeCoreAsync()
     {
+        // Stop the background work before taking _lifecycle: a replacement or a statement
+        // repair holds it while it prepares, and it observes the cancellation and gives up.
+        // CancelAsync runs the callbacks off this thread, so none run under _disposeGate.
+        await _disposeCancellation.CancelAsync().ConfigureAwait(false);
+        Task[] background;
+        lock (_disposeGate)
+        {
+            // No task starts after _disposed is set, so this snapshot is complete.
+            background = _background.ToArray();
+        }
+
+        foreach (var task in background)
+        {
+            await task.ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+        }
+
         await _lifecycle.WaitAsync().ConfigureAwait(false);
         List<Exception>? errors = null;
         try
@@ -177,6 +312,7 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
         finally
         {
             _lifecycle.Release();
+            _disposeCancellation.Dispose();
         }
 
         if (errors is not null)
@@ -190,7 +326,338 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         var index = (int)((uint)Interlocked.Increment(ref _nextConnection) %
                           (uint)_connections.Length);
-        return _connections[index];
+        var connection = Volatile.Read(ref _connections[index]);
+        return _isUsable(connection) ? connection : GetUsableConnectionSlow(index, connection);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private ISqlConnection GetUsableConnectionSlow(int index, ISqlConnection unusable)
+    {
+        ScheduleReplacement(index, unusable);
+
+        // Probe from a fresh round-robin position rather than index + 1, so a dead slot's
+        // share of the traffic spreads over every live slot instead of doubling one neighbor.
+        var count = _connections.Length;
+        var start = NextIndex(ref _nextConnection, count);
+        for (var offset = 0; offset < count; offset++)
+        {
+            var candidateIndex = (start + offset) % count;
+            if (candidateIndex == index)
+            {
+                continue;
+            }
+
+            var candidate = Volatile.Read(ref _connections[candidateIndex]);
+            if (_isUsable(candidate))
+            {
+                return candidate;
+            }
+
+            ScheduleReplacement(candidateIndex, candidate);
+        }
+
+        // Every slot is down. Until a reconnect has failed, hand back the original pick so the
+        // caller gets that connection's own terminal error; after that, the reconnect error is
+        // the one that explains why nothing works.
+        var reconnectError = CreateAllConnectionsDownError();
+        return reconnectError is null ? unusable : throw reconnectError;
+    }
+
+    private static int NextIndex(ref int counter, int count) =>
+      (int)((uint)Interlocked.Increment(ref counter) % (uint)count);
+
+    private ISqlConnection ReadConnection(int index) => Volatile.Read(ref _connections[index]);
+
+    private bool IsUsable(ISqlConnection connection) => _isUsable(connection);
+
+    private SqlClientException? CreateAllConnectionsDownError()
+    {
+        var reconnectError = Volatile.Read(ref _lastReconnectError);
+        return reconnectError is null
+            ? null
+            : new SqlClientException(
+                "No connection in the pipeline pool is usable, and reconnecting failed: " +
+                reconnectError.Message,
+                reconnectError);
+    }
+
+    /// <summary>
+    /// Starts pool-owned background work without the caller's ExecutionContext, and tracks it
+    /// so dispose can cancel and await it. Returns false once the pool is disposed.
+    /// </summary>
+    private bool TryStartBackground<TState>(
+        TState state,
+        Func<TState, CancellationToken, Task> work)
+    {
+        lock (_disposeGate)
+        {
+            if (_disposed != 0)
+            {
+                return false;
+            }
+
+            var cancellationToken = _disposeCancellation.Token;
+            _background.RemoveAll(static task => task.IsCompleted);
+
+            // The work belongs to the pool, not to the command that noticed the problem, so
+            // don't carry that caller's ExecutionContext (activities, AsyncLocals) into it.
+            using (ExecutionContext.SuppressFlow())
+            {
+                _background.Add(Task.Run(() => work(state, cancellationToken)));
+            }
+
+            return true;
+        }
+    }
+
+    private void ScheduleReplacement(int index, ISqlConnection unusable)
+    {
+        if (Volatile.Read(ref _replacing[index]) != 0 ||
+            !ReferenceEquals(Volatile.Read(ref _connections[index]), unusable) ||
+            Interlocked.CompareExchange(ref _replacing[index], 1, 0) != 0)
+        {
+            return;
+        }
+
+        // Re-check under the flag: a replacement that just finished may have swapped the slot
+        // after the caller read it.
+        if (!ReferenceEquals(Volatile.Read(ref _connections[index]), unusable) ||
+            !TryStartBackground(
+                (Pool: this, Index: index, Unusable: unusable),
+                static (state, token) => state.Pool.ReplaceAsync(state.Index, state.Unusable, token)))
+        {
+            Volatile.Write(ref _replacing[index], 0);
+        }
+    }
+
+    private async Task ReplaceAsync(
+        int index,
+        ISqlConnection unusable,
+        CancellationToken cancellationToken)
+    {
+        var delay = _initialReconnectDelay;
+        try
+        {
+            while (true)
+            {
+                var replacement = await TryConnectAsync(cancellationToken).ConfigureAwait(false);
+                if (replacement is not null &&
+                    await TryInstallAsync(index, unusable, replacement, cancellationToken)
+                        .ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                delay = Grow(delay);
+            }
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            // Disposed. Whatever was in flight has already released its resources.
+        }
+        finally
+        {
+            Volatile.Write(ref _replacing[index], 0);
+        }
+    }
+
+    private TimeSpan Grow(TimeSpan delay) =>
+      TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, _maximumReconnectDelay.Ticks));
+
+    private async ValueTask<ISqlConnection?> TryConnectAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _connectionFactory(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Keep the cause: when every slot is down, callers get it instead of a stale
+            // terminal error, so a permanent failure (bad credentials, a dropped database)
+            // is visible rather than retried silently forever.
+            Volatile.Write(ref _lastReconnectError, exception);
+            return null;
+        }
+    }
+
+    private async ValueTask<bool> TryInstallAsync(
+        int index,
+        ISqlConnection unusable,
+        ISqlConnection replacement,
+        CancellationToken cancellationToken)
+    {
+        var installed = false;
+        List<ISqlPreparedStatement>? stale = null;
+        try
+        {
+            await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (_disposed != 0 || !_isUsable(replacement))
+                {
+                    return false;
+                }
+
+                PipelinePreparedStatement[] statements;
+                lock (_statementsGate)
+                {
+                    statements = _statements.ToArray();
+                }
+
+                var prepared = new ISqlPreparedStatement?[statements.Length];
+                var failures = new Exception?[statements.Length];
+                try
+                {
+                    for (var i = 0; i < statements.Length; i++)
+                    {
+                        try
+                        {
+                            prepared[i] = await replacement
+                                .PrepareAsync(statements[i].Sql, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception exception) when (
+                            !cancellationToken.IsCancellationRequested && _isUsable(replacement))
+                        {
+                            // The connection is fine but this statement does not prepare (for
+                            // example, its table is gone). Leave a hole for this slot; the
+                            // statement keeps running on the other connections and retries the
+                            // prepare here with backoff.
+                            failures[i] = exception;
+                        }
+                    }
+
+                    if (!_isUsable(replacement))
+                    {
+                        throw new SqlClientException(
+                            "The replacement connection failed while preparing statements.");
+                    }
+                }
+                catch (Exception exception)
+                {
+                    foreach (var statement in prepared)
+                    {
+                        await DisposeQuietlyAsync(statement).ConfigureAwait(false);
+                    }
+
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+
+                    Volatile.Write(ref _lastReconnectError, exception);
+                    return false;
+                }
+
+                // Publish each statement before the connection. GetStatement reads the connection
+                // first, so once it sees the new connection it also sees the new statements.
+                for (var i = 0; i < statements.Length; i++)
+                {
+                    var previous = statements[i].Install(index, prepared[i], failures[i]);
+                    if (previous is not null)
+                    {
+                        (stale ??= []).Add(previous);
+                    }
+                }
+
+                Volatile.Write(ref _connections[index], replacement);
+                Volatile.Write(ref _lastReconnectError, null);
+                installed = true;
+            }
+            finally
+            {
+                _lifecycle.Release();
+            }
+        }
+        finally
+        {
+            if (!installed)
+            {
+                await DisposeQuietlyAsync(replacement).ConfigureAwait(false);
+            }
+        }
+
+        if (stale is not null)
+        {
+            foreach (var statement in stale)
+            {
+                await DisposeQuietlyAsync(statement).ConfigureAwait(false);
+            }
+        }
+
+        await DisposeQuietlyAsync(unusable).ConfigureAwait(false);
+        return true;
+    }
+
+    private async Task RepairAsync(
+        PipelinePreparedStatement statement,
+        int index,
+        ISqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                // A replacement may have swapped the slot (and filled the hole) while this waited.
+                if (_disposed != 0 ||
+                    !ReferenceEquals(ReadConnection(index), connection) ||
+                    !_isUsable(connection) ||
+                    !statement.HasHole(index))
+                {
+                    return;
+                }
+
+                ISqlPreparedStatement prepared;
+                try
+                {
+                    prepared = await connection
+                        .PrepareAsync(statement.Sql, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    statement.RecordPrepareFailure(index, exception);
+                    return;
+                }
+
+                if (!statement.TryFillHole(index, prepared))
+                {
+                    await DisposeQuietlyAsync(prepared).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                _lifecycle.Release();
+            }
+        }
+        catch (Exception) when (cancellationToken.IsCancellationRequested)
+        {
+            // Disposed.
+        }
+        finally
+        {
+            statement.EndRepair(index);
+        }
+    }
+
+    private static async ValueTask DisposeQuietlyAsync(IAsyncDisposable? disposable)
+    {
+        if (disposable is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await disposable.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Best effort: the resource belongs to a connection that already failed.
+        }
     }
 
     private void Remove(PipelinePreparedStatement statement)
@@ -284,8 +751,19 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
     private sealed class PipelinePreparedStatement : ISqlPreparedStatement
     {
         private readonly SqlPipelinePool _owner;
-        private readonly ISqlPreparedStatement[] _statements;
+
+        // One entry per pool slot, prepared on the connection in that slot. An entry is null
+        // (a hole) while its slot has no usable statement: the slot was dead at prepare time,
+        // or the statement failed to prepare on the slot's current connection.
+        private readonly ISqlPreparedStatement?[] _statements;
+
+        // Per slot: whether a repair is running, and the earliest time (Environment.TickCount64)
+        // and backoff of the next one after a failed prepare. Only the slow path touches these.
+        private readonly int[] _repairing;
+        private readonly long[] _retryAt;
+        private readonly TimeSpan[] _retryDelay;
         private readonly object _disposeGate = new();
+        private Exception? _lastPrepareError;
         private int _nextStatement = -1;
         private int _disposed;
         private Task? _disposeTask;
@@ -293,11 +771,14 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
         internal PipelinePreparedStatement(
             SqlPipelinePool owner,
             string sql,
-            ISqlPreparedStatement[] statements)
+            ISqlPreparedStatement?[] statements)
         {
             _owner = owner;
             Sql = sql;
             _statements = statements;
+            _repairing = new int[statements.Length];
+            _retryAt = new long[statements.Length];
+            _retryDelay = new TimeSpan[statements.Length];
         }
 
         public string Sql { get; }
@@ -363,13 +844,110 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
             }
         }
 
+        /// <summary>
+        /// Puts the statement prepared on a slot's replacement connection in place (or a hole and
+        /// the prepare error) and returns the one it supersedes, for the caller to dispose. After
+        /// this statement is disposed it installs nothing and hands <paramref name="statement"/>
+        /// back instead.
+        /// </summary>
+        internal ISqlPreparedStatement? Install(
+            int index,
+            ISqlPreparedStatement? statement,
+            Exception? prepareError)
+        {
+            lock (_disposeGate)
+            {
+                if (_disposed != 0)
+                {
+                    return statement;
+                }
+
+                if (prepareError is null)
+                {
+                    ResetRetry(index);
+                }
+                else
+                {
+                    RecordPrepareFailure(index, prepareError);
+                }
+
+                return Interlocked.Exchange(ref _statements[index], statement);
+            }
+        }
+
+        internal bool HasHole(int index) =>
+          Volatile.Read(ref _disposed) == 0 && Volatile.Read(ref _statements[index]) is null;
+
+        /// <summary>Fills a hole left by a failed prepare. Returns false if there is none.</summary>
+        internal bool TryFillHole(int index, ISqlPreparedStatement statement)
+        {
+            lock (_disposeGate)
+            {
+                if (_disposed != 0 || Volatile.Read(ref _statements[index]) is not null)
+                {
+                    return false;
+                }
+
+                ResetRetry(index);
+                Volatile.Write(ref _statements[index], statement);
+                return true;
+            }
+        }
+
+        internal void RecordPrepareFailure(int index, Exception exception)
+        {
+            Volatile.Write(ref _lastPrepareError, exception);
+            var delay = _retryDelay[index] == TimeSpan.Zero
+                ? _owner._initialReconnectDelay
+                : _owner.Grow(_retryDelay[index]);
+            _retryDelay[index] = delay;
+            Volatile.Write(
+                ref _retryAt[index],
+                Environment.TickCount64 + (long)delay.TotalMilliseconds);
+        }
+
+        internal void EndRepair(int index) => Volatile.Write(ref _repairing[index], 0);
+
+        private void ResetRetry(int index)
+        {
+            _retryDelay[index] = TimeSpan.Zero;
+            Volatile.Write(ref _retryAt[index], 0);
+        }
+
+        private void ScheduleRepair(int index, ISqlConnection connection)
+        {
+            if (Environment.TickCount64 < Volatile.Read(ref _retryAt[index]) ||
+                Volatile.Read(ref _repairing[index]) != 0 ||
+                Interlocked.CompareExchange(ref _repairing[index], 1, 0) != 0)
+            {
+                return;
+            }
+
+            if (!_owner.TryStartBackground(
+                    (Statement: this, Index: index, Connection: connection),
+                    static (state, token) => state.Statement._owner.RepairAsync(
+                        state.Statement,
+                        state.Index,
+                        state.Connection,
+                        token)))
+            {
+                EndRepair(index);
+            }
+        }
+
         private async Task DisposeCoreAsync()
         {
             List<Exception>? errors = null;
             try
             {
-                foreach (var statement in _statements)
+                for (var i = 0; i < _statements.Length; i++)
                 {
+                    var statement = Volatile.Read(ref _statements[i]);
+                    if (statement is null)
+                    {
+                        continue;
+                    }
+
                     try
                     {
                         await statement.DisposeAsync().ConfigureAwait(false);
@@ -394,9 +972,92 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
         private ISqlPreparedStatement GetStatement()
         {
             ObjectDisposedException.ThrowIf(_disposed != 0, this);
-            var index = (int)((uint)Interlocked.Increment(ref _nextStatement) %
-                              (uint)_statements.Length);
-            return _statements[index];
+            var index = NextIndex(ref _nextStatement, _statements.Length);
+
+            // Read the connection before the statement: a replacement publishes the statement
+            // first, so a usable connection here is never paired with a stale statement.
+            var connection = _owner.ReadConnection(index);
+            var statement = Volatile.Read(ref _statements[index]);
+            return statement is not null && _owner.IsUsable(connection)
+                ? statement
+                : GetStatementSlow(index, connection, statement);
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        private ISqlPreparedStatement GetStatementSlow(
+            int index,
+            ISqlConnection connection,
+            ISqlPreparedStatement? statement)
+        {
+            var anyUsableConnection = Inspect(index, connection, statement);
+
+            // Probe from a fresh position so the skipped slot's traffic spreads out.
+            var count = _statements.Length;
+            var start = NextIndex(ref _nextStatement, count);
+            ISqlPreparedStatement? fallback = statement;
+            for (var offset = 0; offset < count; offset++)
+            {
+                var candidateIndex = (start + offset) % count;
+                if (candidateIndex == index)
+                {
+                    continue;
+                }
+
+                var candidateConnection = _owner.ReadConnection(candidateIndex);
+                var candidate = Volatile.Read(ref _statements[candidateIndex]);
+                if (candidate is not null && _owner.IsUsable(candidateConnection))
+                {
+                    return candidate;
+                }
+
+                anyUsableConnection |= Inspect(candidateIndex, candidateConnection, candidate);
+                fallback ??= candidate;
+            }
+
+            if (anyUsableConnection)
+            {
+                // Live connections, but the statement does not prepare on any of them.
+                var prepareError = Volatile.Read(ref _lastPrepareError);
+                throw prepareError is null
+                    ? new SqlClientException(
+                        "The prepared statement is not available on any usable connection in " +
+                        "the pipeline pool yet; it is being prepared again.")
+                    : new SqlClientException(
+                        "The prepared statement could not be prepared on any usable connection " +
+                        "in the pipeline pool; it will be retried. Last error: " +
+                        prepareError.Message,
+                        prepareError);
+            }
+
+            // Every connection is down.
+            var reconnectError = _owner.CreateAllConnectionsDownError();
+            if (reconnectError is not null)
+            {
+                throw reconnectError;
+            }
+
+            // A statement on a dead connection fails with that connection's own terminal error,
+            // which says more than anything this pool could throw.
+            return fallback ?? throw new SqlClientException(
+                "No connection in the pipeline pool is usable right now; the pool is reconnecting.");
+        }
+
+        // Starts whatever background work a slot needs and reports whether its connection is
+        // usable: a dead connection gets replaced; a hole on a live one gets prepared again.
+        private bool Inspect(int index, ISqlConnection connection, ISqlPreparedStatement? statement)
+        {
+            if (!_owner.IsUsable(connection))
+            {
+                _owner.ScheduleReplacement(index, connection);
+                return false;
+            }
+
+            if (statement is null)
+            {
+                ScheduleRepair(index, connection);
+            }
+
+            return true;
         }
     }
 }
