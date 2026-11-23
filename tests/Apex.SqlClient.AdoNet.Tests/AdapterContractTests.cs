@@ -162,6 +162,12 @@ public sealed class AdapterContractTests
         AssertTimeout(timeout);
         Assert.AreSame(server.CancelError, timeout.InnerException!.InnerException);
 
+        // The same during reader initialization, which runs under the operation's own token.
+        server.HangOn = Stage.Read;
+        timeout = await Assert.ThrowsExactlyAsync<ApexDbException>(() => command.ExecuteReaderAsync());
+        AssertTimeout(timeout);
+        Assert.AreSame(server.CancelError, timeout.InnerException!.InnerException);
+
         server.CancelError = null;
         server.HangOn = Stage.Prepare;
         AssertTimeout(await Assert.ThrowsExactlyAsync<ApexDbException>(() => command.PrepareAsync()));
@@ -231,7 +237,7 @@ public sealed class AdapterContractTests
     }
 
     [TestMethod]
-    public async Task StalePreparedDisposalSwallowsDeadConnectionErrorsAndKeepsTheNewConnectionOpen()
+    public async Task CloseReleasesPreparedStatementsEvenWhenTheReleaseFails()
     {
         var server = new FakeServer();
         await using var connection = server.Connect("PostgreSql");

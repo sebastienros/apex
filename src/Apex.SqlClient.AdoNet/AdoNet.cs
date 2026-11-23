@@ -301,7 +301,17 @@ public abstract class ApexDbCommand : DbCommand
                 cancellation.Source,
                 () => CompleteReaderAsync(cancellation, execution, behavior));
             result.ConfigureCancellation(cancellation);
-            await result.InitializeAsync(cancellation.Token).ConfigureAwait(false);
+            execution.ConnectionOwner.OnReaderOpened();
+            try
+            {
+                await result.InitializeAsync(cancellation.Token).ConfigureAwait(false);
+            }
+            catch
+            {
+                execution.ConnectionOwner.OnReaderClosed();
+                throw;
+            }
+
             transferred = true;
             return result;
         }
@@ -484,16 +494,9 @@ public abstract class ApexDbCommand : DbCommand
         var closeWhenDone = await connection.OpenForCommandAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var native = GetConnection();
-            if (_preparedStatement is not null && !ReferenceEquals(native, _preparedConnection))
-            {
-                // The connection was closed and reopened since PrepareAsync, so the statement's native
-                // connection is gone. Release it (a pooled lease stays pinned until then) and execute
-                // unprepared, as other providers do; PrepareAsync prepares it on the new connection.
-                await DisposePreparedAsync().ConfigureAwait(false);
-            }
-
-            return new ExecutionConnection(native, connection, closeWhenDone);
+            // A prepared statement never outlives its connection: closing the connection releases it
+            // (see ReleasePreparedForCloseAsync), so after a reopen the command executes unprepared.
+            return new ExecutionConnection(GetConnection(), connection, closeWhenDone);
         }
         catch
         {
@@ -511,6 +514,7 @@ public abstract class ApexDbCommand : DbCommand
         ExecutionConnection execution,
         CommandBehavior behavior)
     {
+        execution.ConnectionOwner.OnReaderClosed();
         try
         {
             if (execution.CloseWhenDone || (behavior & CommandBehavior.CloseConnection) != 0)
@@ -545,18 +549,10 @@ public abstract class ApexDbCommand : DbCommand
     internal static NotSupportedException AsyncOnly() =>
         new("Apex ADO.NET adapters support asynchronous I/O only. Use the corresponding Async method.");
 
-    // A prepared statement is stale once its owner was closed (and possibly reopened on another native
-    // connection): it can no longer be closed on the server, and closing the owner would close the
-    // caller's new connection.
-    private bool PreparedIsStale() =>
-        _preparedConnectionOwner is not { } owner ||
-        !ReferenceEquals(owner.CurrentConnection, _preparedConnection);
-
     private void DisposePreparedSynchronously()
     {
         if (_preparedStatement is null) return;
         var statement = _preparedStatement;
-        var stale = PreparedIsStale();
         _preparedStatement = null;
         _preparedConnection = null;
         var connectionOwner = _preparedConnectionOwner;
@@ -567,13 +563,9 @@ public abstract class ApexDbCommand : DbCommand
             ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException)
                 .AsTask().GetAwaiter().GetResult();
         }
-        catch (Exception) when (stale)
-        {
-            // The statement's connection is gone; there is nothing left to release on the server.
-        }
         finally
         {
-            if (!stale && _preparedConnectionWasAutoOpened && connectionOwner is not null)
+            if (_preparedConnectionWasAutoOpened && connectionOwner is not null)
             {
                 connectionOwner.Close();
             }
@@ -591,7 +583,6 @@ public abstract class ApexDbCommand : DbCommand
             return;
         }
         var statement = _preparedStatement;
-        var stale = PreparedIsStale();
         _preparedStatement = null;
         _preparedConnection = null;
         var connectionOwner = _preparedConnectionOwner;
@@ -601,13 +592,9 @@ public abstract class ApexDbCommand : DbCommand
         {
             await ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException).ConfigureAwait(false);
         }
-        catch (Exception) when (stale)
-        {
-            // The statement's connection is gone; there is nothing left to release on the server.
-        }
         finally
         {
-            if (!stale && _preparedConnectionWasAutoOpened && connectionOwner is not null)
+            if (_preparedConnectionWasAutoOpened && connectionOwner is not null)
             {
                 await connectionOwner.CloseAsync().ConfigureAwait(false);
             }
@@ -1203,7 +1190,6 @@ public abstract class ApexDbConnection : DbConnection
     public override ConnectionState State => _state;
     protected ISqlConnection NativeConnection =>
         _connection ?? throw new InvalidOperationException("The connection is not open.");
-    internal ISqlConnection? CurrentConnection => _connection;
     private List<ApexDbCommand>? _preparedCommands;
 
     internal void RegisterPreparedCommand(ApexDbCommand command) => (_preparedCommands ??= []).Add(command);
@@ -1281,22 +1267,54 @@ public abstract class ApexDbConnection : DbConnection
     private async Task CloseConnectionAsync()
     {
         if (_connection is null) return;
-        if (_preparedCommands is { Count: > 0 } prepared)
-        {
-            _preparedCommands = null;
-            foreach (var command in prepared)
-            {
-                await command.ReleasePreparedForCloseAsync().ConfigureAwait(false);
-            }
-        }
-
+        var prepared = _preparedCommands;
+        _preparedCommands = null;
         var connection = _connection;
         _connection = null;
         var previous = _state;
         _state = ConnectionState.Closed;
         OnStateChange(new StateChangeEventArgs(previous, _state));
-        await connection.DisposeAsync().ConfigureAwait(false);
+        try
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            if (prepared is { Count: > 0 })
+            {
+                await ReleasePreparedCommandsAsync(prepared).ConfigureAwait(false);
+            }
+        }
     }
+
+    // Prepared statements pin a pooled lease until they are released, so closing releases them. The
+    // native connection is disposed first: a closed provider connection has nothing left to release,
+    // and a pooled lease returns once its last statement or reader is released. A reader left open
+    // keeps the connection busy, and a release would queue behind it, so the releases then complete
+    // in the background when the reader finishes instead of blocking Close.
+    private async ValueTask ReleasePreparedCommandsAsync(List<ApexDbCommand> prepared)
+    {
+        var waitForReleases = Volatile.Read(ref _openReaders) == 0;
+        foreach (var command in prepared)
+        {
+            var release = command.ReleasePreparedForCloseAsync();
+            if (waitForReleases)
+            {
+                await release.ConfigureAwait(false);
+            }
+            else
+            {
+                // ReleasePreparedForCloseAsync never faults; its continuation runs when the reader finishes.
+                _ = release.AsTask();
+            }
+        }
+    }
+
+    private int _openReaders;
+
+    internal void OnReaderOpened() => Interlocked.Increment(ref _openReaders);
+
+    internal void OnReaderClosed() => Interlocked.Decrement(ref _openReaders);
     protected override void Dispose(bool disposing)
     {
         if (disposing) Close();

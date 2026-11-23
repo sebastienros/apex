@@ -225,6 +225,54 @@ public sealed class PgAdoNetIntegrationTests
     }
 
     [TestMethod]
+    public async Task NativeNonQueryPathTimesOutAndCancelsLikeTheReader()
+    {
+        await using var connection = await OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DO $$BEGIN PERFORM pg_sleep(10); END$$";
+        command.CommandTimeout = 1;
+        var error = await Assert.ThrowsExactlyAsync<ApexDbException>(() => command.ExecuteNonQueryAsync());
+        Assert.IsInstanceOfType<TimeoutException>(error.InnerException);
+        Assert.IsTrue(error.IsTransient);
+
+        command.CommandTimeout = 30;
+        using (var caller = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+        {
+            await Assert.ThrowsAsync<OperationCanceledException>(() => command.ExecuteNonQueryAsync(caller.Token));
+        }
+
+        command.CommandText = "DO $$BEGIN PERFORM pg_sleep(0); END$$";
+        Assert.AreEqual(-1, await command.ExecuteNonQueryAsync());
+    }
+
+    [TestMethod]
+    [DataRow(false)]
+    [DataRow(true)]
+    public async Task ClosingAPooledConnectionWithAnOpenReaderAndAPreparedCommandDoesNotHang(bool prepare)
+    {
+        // Releasing the prepared statement on close must not wait behind the undrained reader. (Closing a
+        // non-pooled connection with an undrained reader waits for the native connection's disposal,
+        // with or without a prepared statement; that is native driver behavior.)
+        await using var source = new PgDbDataSource(ConnectionString);
+        await using var connection = source.CreateConnection();
+        await connection.OpenAsync();
+        await using var prepared = connection.CreateCommand();
+        prepared.CommandText = "SELECT 1";
+        if (prepare) await prepared.PrepareAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT generate_series(1, 100000)";
+        var reader = await command.ExecuteReaderAsync();
+        Assert.IsTrue(await reader.ReadAsync());
+
+        await connection.CloseAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(ConnectionState.Closed, connection.State);
+        await reader.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await connection.OpenAsync();
+        Assert.AreEqual(1, await prepared.ExecuteScalarAsync());
+    }
+
+    [TestMethod]
     public async Task PreparedCommandOnAPooledConnectionSurvivesCloseAndReopen()
     {
         // With one pooled connection, a statement that kept the old lease pinned would block the reopen.
