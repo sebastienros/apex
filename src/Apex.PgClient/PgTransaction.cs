@@ -34,7 +34,15 @@ public sealed class PgTransaction : ISqlTransaction
     {
         if (_connection.IsTransactionFailed)
         {
-            await RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (PgConnection.IsFatalConnectionError(exception))
+            {
+                // Losing the session also ends the failed transaction without committing it.
+            }
+
             throw new System.Transactions.TransactionException(
                 "The PostgreSQL transaction failed before COMMIT and was rolled back.");
         }

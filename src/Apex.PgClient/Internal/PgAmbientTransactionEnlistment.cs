@@ -61,11 +61,7 @@ internal sealed class PgAmbientTransactionEnlistment(
         ArgumentNullException.ThrowIfNull(enlistment);
         try
         {
-            if (!_committedInPrepare)
-            {
-                transaction.RollbackAsync(CancellationToken.None)
-                    .AsTask().GetAwaiter().GetResult();
-            }
+            RollbackUnlessCommitted();
         }
         finally
         {
@@ -78,15 +74,29 @@ internal sealed class PgAmbientTransactionEnlistment(
         ArgumentNullException.ThrowIfNull(enlistment);
         try
         {
-            if (!_committedInPrepare)
-            {
-                transaction.RollbackAsync(CancellationToken.None)
-                    .AsTask().GetAwaiter().GetResult();
-            }
+            RollbackUnlessCommitted();
         }
         finally
         {
             enlistment.Done();
+        }
+    }
+
+    private void RollbackUnlessCommitted()
+    {
+        if (_committedInPrepare)
+        {
+            return;
+        }
+
+        try
+        {
+            transaction.RollbackAsync(CancellationToken.None)
+                .AsTask().GetAwaiter().GetResult();
+        }
+        catch (Exception exception) when (PgConnection.IsFatalConnectionError(exception))
+        {
+            // The session is gone, and PostgreSQL rolls back an open transaction on disconnect.
         }
     }
 
@@ -101,8 +111,9 @@ internal sealed class PgAmbientTransactionEnlistment(
         catch (Exception exception)
         {
             // The transaction is completed only when the server answered and the session is idle
-            // again, which means it rolled back. Otherwise (connection lost) nobody knows.
-            inDoubt = !transaction.IsCompleted;
+            // again, which means it rolled back. Otherwise (connection lost) nobody knows, except
+            // for a transaction that had already failed: PostgreSQL never commits one of those.
+            inDoubt = !transaction.IsCompleted && exception is not TransactionException;
             return exception;
         }
     }

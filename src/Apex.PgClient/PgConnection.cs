@@ -2607,7 +2607,6 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         private readonly PgConnection _connection;
         private CancellationTokenRegistration _registration;
         private Task? _request;
-        private int _closed;
 
         private PgCancellation(PgConnection connection)
         {
@@ -2635,22 +2634,14 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
         private Task Close()
         {
-            Volatile.Write(ref _closed, 1);
-            // Dispose waits for a callback that is already running, so a request it starts is
-            // published before it is read below.
+            // Dispose unregisters a callback that has not run, and waits for one that is running,
+            // so after it no request can start and one already started is published.
             _registration.Dispose();
             return Volatile.Read(ref _request) ?? Task.CompletedTask;
         }
 
-        private void Cancel()
-        {
-            if (Volatile.Read(ref _closed) != 0)
-            {
-                return;
-            }
-
+        private void Cancel() =>
             Interlocked.Exchange(ref _request, _connection.TryCancelRequestAsync());
-        }
     }
 
     private sealed class ResultBuilder
@@ -2723,7 +2714,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         private bool _completed;
         private bool _stopped;
         private bool _canceled;
-        private bool _readyForQuery;
+        private bool _cancelClosed;
         private bool _sent;
         private bool _readPending;
         private bool _readSignaled;
@@ -3232,7 +3223,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                                 bool canceled;
                                 lock (_gate)
                                 {
-                                    _readyForQuery = true;
+                                    _cancelClosed = true;
                                     cancelRequest = _cancelRequest;
                                     canceled = _canceled;
                                 }
@@ -3270,6 +3261,20 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             }
             catch (Exception exception)
             {
+                // The connection may serve the next command once this throws, so stop new cancel
+                // requests and let one in flight be processed first, as on ReadyForQuery.
+                Task? cancelRequest;
+                lock (_gate)
+                {
+                    _cancelClosed = true;
+                    cancelRequest = _cancelRequest;
+                }
+
+                if (cancelRequest is not null)
+                {
+                    await cancelRequest.ConfigureAwait(false);
+                }
+
                 Complete(exception);
                 throw;
             }
@@ -3292,7 +3297,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             bool advance;
             lock (_gate)
             {
-                if (_completed || _canceled || _readyForQuery)
+                if (_completed || _canceled || _cancelClosed)
                 {
                     return;
                 }

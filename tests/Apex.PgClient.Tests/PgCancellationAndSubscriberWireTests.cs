@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
+using System.Transactions;
 using Apex.SqlClient;
 using static Apex.PgClient.Tests.PgConnectionWireTests;
 
@@ -114,8 +115,157 @@ public sealed class PgCancellationAndSubscriberWireTests
             () => DrainAsync(subscriber.Notifications).WaitAsync(Timeout));
         Assert.AreEqual("XX000", error.SqlState);
 
+        // A stopped subscriber must say so rather than accept channels it will never serve.
+        var stopped = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            () => subscriber.SubscribeAsync("orders").AsTask().WaitAsync(Timeout));
+        Assert.AreSame(error, stopped.InnerException);
+
         await subscriber.DisposeAsync().AsTask().WaitAsync(Timeout);
         Assert.AreEqual((byte)'X', await server.WaitAsync(Timeout));
+
+        // Reading Notifications after dispose ends the sequence; it must not fault the getter.
+        var afterDispose = await Assert.ThrowsAsync<Exception>(
+            () => DrainAsync(subscriber.Notifications).WaitAsync(Timeout));
+        Assert.IsNotInstanceOfType<ObjectDisposedException>(afterDispose);
+    }
+
+    // The connection drops while Prepare runs COMMIT: every resource must roll back, and the
+    // scope must report an abort rather than leak the I/O error from a phase-2 notification.
+    [TestMethod]
+    public async Task AmbientCommitOnALostConnectionRollsBackOtherResources()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunAmbientServerAsync(listener, failStatement: false);
+
+        await using var connection = await PgClient.ConnectAsync(CreateOptions(port));
+        RecordingEnlistment other = new();
+        await Assert.ThrowsExactlyAsync<TransactionAbortedException>(async () =>
+        {
+            using TransactionScope scope = new(TransactionScopeAsyncFlowOption.Enabled);
+            await connection.EnlistTransactionAsync(Transaction.Current!);
+            Transaction.Current!.EnlistVolatile(other, EnlistmentOptions.None);
+            await connection.ExecuteAsync("INSERT INTO t VALUES (1)");
+            scope.Complete();
+        });
+
+        Assert.AreEqual("rollback", other.Outcome);
+        Assert.AreEqual("COMMIT", await server.WaitAsync(Timeout));
+    }
+
+    // The session drops inside the scope: disposing it uncompleted must not throw from the
+    // Rollback notification, since PostgreSQL already rolled back on disconnect.
+    [TestMethod]
+    public async Task UncompletedScopeOnALostConnectionDisposesCleanly()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = Task.Run(async () =>
+        {
+            using var client = await listener.AcceptTcpClientAsync();
+            await using var stream = client.GetStream();
+            await ReadStartupAsync(stream);
+            await WriteStartupCompleteAsync(stream);
+            _ = await ReadMessageAsync(stream);
+            await WriteMessageAsync(stream, (byte)'C', CString("BEGIN"));
+            await WriteMessageAsync(stream, (byte)'Z', [(byte)'T']);
+            _ = await ReadMessageAsync(stream);
+        });
+
+        await using var connection = await PgClient.ConnectAsync(CreateOptions(port));
+        using (TransactionScope scope = new(TransactionScopeAsyncFlowOption.Enabled))
+        {
+            await connection.EnlistTransactionAsync(Transaction.Current!);
+            await Assert.ThrowsAsync<IOException>(
+                () => connection.ExecuteAsync("INSERT INTO t VALUES (1)").AsTask().WaitAsync(Timeout));
+        }
+
+        await server.WaitAsync(Timeout);
+    }
+
+    // A failed transaction can only roll back, even if the session is lost while ending it.
+    [TestMethod]
+    public async Task FailedAmbientTransactionOnALostConnectionIsAbortedNotInDoubt()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunAmbientServerAsync(listener, failStatement: true);
+
+        await using var connection = await PgClient.ConnectAsync(CreateOptions(port));
+        var aborted = await Assert.ThrowsExactlyAsync<TransactionAbortedException>(async () =>
+        {
+            using TransactionScope scope = new(TransactionScopeAsyncFlowOption.Enabled);
+            await connection.EnlistTransactionAsync(Transaction.Current!);
+            await Assert.ThrowsExactlyAsync<PgException>(
+                () => connection.ExecuteAsync("INSERT INTO t VALUES (1)").AsTask());
+            scope.Complete();
+        });
+
+        Assert.IsInstanceOfType<TransactionException>(aborted.InnerException);
+        Assert.AreEqual("ROLLBACK", await server.WaitAsync(Timeout));
+    }
+
+    // Answers BEGIN and one statement, then reads the closing command and drops the session.
+    private static async Task<string> RunAmbientServerAsync(TcpListener listener, bool failStatement)
+    {
+        using CancellationTokenSource timeout = new(Timeout);
+        var token = timeout.Token;
+        using var client = await listener.AcceptTcpClientAsync(token);
+        await using var stream = client.GetStream();
+        await ReadStartupAsync(stream, token);
+        await WriteStartupCompleteAsync(stream, token);
+
+        var (type, payload) = await ReadMessageAsync(stream, token);
+        Assert.AreEqual((byte)'Q', type);
+        StringAssert.StartsWith(FirstCStringValue(payload), "BEGIN");
+        await WriteMessageAsync(stream, (byte)'C', CString("BEGIN"), token);
+        await WriteMessageAsync(stream, (byte)'Z', [(byte)'T'], token);
+
+        (type, _) = await ReadMessageAsync(stream, token);
+        Assert.AreEqual((byte)'Q', type);
+        if (failStatement)
+        {
+            await WriteMessageAsync(stream, (byte)'E', ErrorFields("ERROR", "23505", "duplicate"), token);
+            await WriteMessageAsync(stream, (byte)'Z', [(byte)'E'], token);
+        }
+        else
+        {
+            await WriteMessageAsync(stream, (byte)'C', CString("INSERT 0 1"), token);
+            await WriteMessageAsync(stream, (byte)'Z', [(byte)'T'], token);
+        }
+
+        (type, payload) = await ReadMessageAsync(stream, token);
+        Assert.AreEqual((byte)'Q', type);
+        return FirstCStringValue(payload);
+    }
+
+    private sealed class RecordingEnlistment : IEnlistmentNotification
+    {
+        public string? Outcome { get; private set; }
+
+        public void Prepare(PreparingEnlistment preparingEnlistment) =>
+            preparingEnlistment.Prepared();
+
+        public void Commit(Enlistment enlistment)
+        {
+            Outcome = "commit";
+            enlistment.Done();
+        }
+
+        public void Rollback(Enlistment enlistment)
+        {
+            Outcome = "rollback";
+            enlistment.Done();
+        }
+
+        public void InDoubt(Enlistment enlistment)
+        {
+            Outcome = "indoubt";
+            enlistment.Done();
+        }
     }
 
     [TestMethod]

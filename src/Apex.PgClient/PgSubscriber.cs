@@ -17,10 +17,13 @@ public sealed class PgSubscriber : IPgSubscriber
     private readonly HashSet<string> _channels = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly CancellationTokenSource _disposeCancellation = new();
+    // Kept apart from the source, which DisposeAsync disposes, so Notifications stays readable.
+    private readonly CancellationToken _disposeToken;
     private readonly object _waitGate = new();
     private CancellationTokenSource? _waitCancellation;
     private PgConnection _connection;
     private readonly Task _listenLoop;
+    private Exception? _listenError;
     private int _disposed;
 
     private PgSubscriber(
@@ -29,6 +32,7 @@ public sealed class PgSubscriber : IPgSubscriber
         Func<int, TimeSpan?> reconnectPolicy)
     {
         _options = options;
+        _disposeToken = _disposeCancellation.Token;
         _connection = connection;
         _connection.Notification += OnNotification;
         _reconnectPolicy = reconnectPolicy;
@@ -36,7 +40,7 @@ public sealed class PgSubscriber : IPgSubscriber
     }
 
     public IAsyncEnumerable<PgNotification> Notifications =>
-      _notifications.Reader.ReadAllAsync(_disposeCancellation.Token);
+      _notifications.Reader.ReadAllAsync(_disposeToken);
 
     public int ProcessId => _connection.ProcessId;
 
@@ -74,6 +78,7 @@ public sealed class PgSubscriber : IPgSubscriber
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfStopped();
             InterruptWait();
             await _connection.ExecuteAsync(
               "LISTEN " + QuoteIdentifier(channel),
@@ -98,6 +103,7 @@ public sealed class PgSubscriber : IPgSubscriber
         await _lifecycle.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfStopped();
             InterruptWait();
             await _connection.ExecuteAsync(
               "UNLISTEN " + QuoteIdentifier(channel),
@@ -160,6 +166,7 @@ public sealed class PgSubscriber : IPgSubscriber
             // Anything that ends the loop (a non-fatal server error, a throwing reconnect policy,
             // a failed reconnect) must reach the Notifications reader instead of leaving it waiting.
             error = exception;
+            Volatile.Write(ref _listenError, exception);
         }
         finally
         {
@@ -290,6 +297,17 @@ public sealed class PgSubscriber : IPgSubscriber
 
     private void ThrowIfDisposed() =>
       ObjectDisposedException.ThrowIf(_disposed != 0, this);
+
+    // Once the listen loop has failed nothing would deliver notifications for a new channel.
+    private void ThrowIfStopped()
+    {
+        if (Volatile.Read(ref _listenError) is { } error)
+        {
+            throw new InvalidOperationException(
+                "The subscriber stopped listening after an error; create a new subscriber.",
+                error);
+        }
+    }
 
         private static void ValidateChannel(string channel)
         {
