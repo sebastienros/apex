@@ -337,7 +337,12 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
                 return;
             }
 
-            _replacements[index] = Task.Run(() => ReplaceAsync(index, unusable));
+            // The reconnect loop belongs to the pool, not to the command that noticed the dead
+            // slot, so don't carry that caller's ExecutionContext (activities, AsyncLocals) into it.
+            using (ExecutionContext.SuppressFlow())
+            {
+                _replacements[index] = Task.Run(() => ReplaceAsync(index, unusable));
+            }
         }
     }
 
