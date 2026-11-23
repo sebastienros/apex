@@ -196,6 +196,51 @@ public sealed partial class MsSqlConnectionWireTests
     }
 
     [TestMethod]
+    [DataRow(0)]
+    [DataRow(2)]
+    public async Task NextResultSkipsTheUnreadRowsOfTheCurrentResult(int rowsReadFirst)
+    {
+        const int rowCount = 30;
+        ArrayBufferWriter<byte> response = new();
+        var first = BuildIntResult(Sequence(1, rowCount));
+        response.Write(first.AsSpan(0, first.Length - DoneTokenLength));
+        WriteDone(response, (ushort)(TdsDoneStatus.More | TdsDoneStatus.Count), TdsSelectCommand, rowCount);
+        var second = BuildIntResult(Sequence(101, rowCount));
+        response.Write(second.AsSpan(0, second.Length - DoneTokenLength));
+        WriteDone(response, (ushort)TdsDoneStatus.Count, TdsSelectCommand, rowCount);
+
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunResponseServerAsync(listener, response.WrittenMemory.ToArray());
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        await using var reader = await connection.ExecuteResultReaderAsync(
+            "SELECT value; SELECT value",
+            default,
+            default);
+        var results = (ISqlResultBoundaryReader)reader;
+
+        Assert.IsTrue(await results.InitializeAsync());
+        for (var value = 2; value <= 1 + rowsReadFirst; value++)
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(value, reader.GetInt32(0));
+        }
+
+        // Bounded so the former hang (the pump parked on the next row of the first result) fails fast.
+        Assert.IsTrue(await results.NextResultAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.IsTrue(await results.InitializeAsync());
+        for (var value = 101; value < 101 + rowCount; value++)
+        {
+            Assert.AreEqual(value, reader.GetInt32(0));
+            Assert.AreEqual(value < 100 + rowCount, await reader.ReadAsync());
+        }
+
+        Assert.IsFalse(await results.NextResultAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
     public async Task CommandQueuedBehindReaderRunsAfterTheReaderFinishesInline()
     {
         // The reader is a barrier, so the queued query is only sent once the reader's pump ends.

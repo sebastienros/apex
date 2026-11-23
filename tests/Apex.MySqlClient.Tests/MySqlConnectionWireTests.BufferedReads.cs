@@ -123,6 +123,70 @@ public sealed partial class MySqlConnectionWireTests
     }
 
     [TestMethod]
+    [DataRow(0)]
+    [DataRow(2)]
+    public async Task NextResultSkipsTheUnreadRowsOfTheCurrentResult(int rowsReadFirst)
+    {
+        const int rowCount = 30;
+        await using var harness = await ServerHarness.StartAsync();
+        Task server = Task.Run(async () =>
+        {
+            await using var connection = await harness.AcceptAsync();
+            await connection.CompleteHandshakeAsync("8.4.2");
+            await connection.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT n; SELECT n");
+            connection.BeginBatch();
+            foreach (var start in new[] { 1, 101 })
+            {
+                await connection.WriteColumnCountAsync(1);
+                await connection.WriteColumnAsync("n", MySqlType.Long);
+                for (var value = start; value < start + rowCount; value++)
+                {
+                    await connection.WriteTextRowAsync(value.ToString(CultureInfo.InvariantCulture));
+                }
+
+                if (start == 1)
+                {
+                    await connection.WriteOkWithMoreResultsAsync();
+                }
+                else
+                {
+                    await connection.WriteFinalOkAsync();
+                }
+            }
+
+            await connection.FlushBatchAsync();
+            await connection.ExpectCommandAsync(MySqlCommand.Quit);
+        });
+
+        await using var client = await MySqlClient.ConnectAsync(harness.CreateOptions());
+        await using (var reader = await client.ExecuteResultReaderAsync("SELECT n; SELECT n", default, default))
+        {
+            var results = (ISqlResultBoundaryReader)reader;
+            Assert.IsTrue(await results.InitializeAsync());
+            for (var value = 2; value <= 1 + rowsReadFirst; value++)
+            {
+                Assert.IsTrue(await reader.ReadAsync());
+                Assert.AreEqual(value, reader.GetInt32(0));
+            }
+
+            // Bounded so the former hang (the pump parked on the next row of the first result)
+            // fails fast.
+            Assert.IsTrue(await results.NextResultAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.IsTrue(await results.InitializeAsync());
+            for (var value = 101; value < 101 + rowCount; value++)
+            {
+                Assert.AreEqual(value, reader.GetInt32(0));
+                Assert.AreEqual(value < 100 + rowCount, await reader.ReadAsync());
+            }
+
+            Assert.IsFalse(await results.NextResultAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+
+        await client.DisposeAsync();
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
     public async Task DisposingBetweenReceivedRowsDrainsAndReusesTheConnection()
     {
         await using var harness = await ServerHarness.StartAsync();

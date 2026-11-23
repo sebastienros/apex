@@ -271,6 +271,9 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     /// <see cref="_advance"/>, which only happens after this reader stops taking this path
     /// (a read that falls through, <see cref="Cancel"/>, <see cref="NextResultAsync"/> or dispose).
     /// Anything other than a complete row leaves the reader position untouched for the pump.
+    /// The row may be decoded straight into <see cref="_current"/>, even partly on failure: once the
+    /// consumer asks for the next row the delivered one is no longer valid, and a read that falls
+    /// through stays pending until the pump has decoded the row again.
     /// </summary>
     private bool TryReadBufferedRow()
     {
@@ -618,7 +621,8 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             var retained = false;
                             lock (_gate)
                             {
-                                if (!_stopped)
+                                // A pending NextResultAsync skips the rest of this result.
+                                if (!_stopped && _results is not { SkipsRows: true })
                                 {
                                     _hasCurrent = true;
                                     _currentDelivered = _results?.PublishRow() ?? false;

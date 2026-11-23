@@ -232,6 +232,53 @@ public sealed class PgBufferedReadWireTests
         await server.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    [TestMethod]
+    [DataRow(0)]
+    [DataRow(2)]
+    public async Task NextResultSkipsTheUnreadRowsOfTheCurrentResult(int rowsReadFirst)
+    {
+        const int rowCount = 30;
+        var batch = Join(
+            Message((byte)'1', []),
+            Message((byte)'2', []),
+            Message((byte)'T', Join(Int16(1), Column("value", 23, 4))),
+            Rows(1, rowCount),
+            Message((byte)'C', CString($"SELECT {rowCount}")),
+            Message((byte)'T', Join(Int16(1), Column("value", 23, 4))),
+            Rows(101, rowCount),
+            Message((byte)'C', CString($"SELECT {rowCount}")),
+            Message((byte)'Z', [(byte)'I']));
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var server = RunServerAsync(listener, [batch], chunkSize: int.MaxValue);
+        await using var connection = await PgClient.ConnectAsync(CreateOptions(listener));
+        await using (var reader = await connection.ExecuteResultReaderAsync("SELECT value", default, default))
+        {
+            var results = (ISqlResultBoundaryReader)reader;
+            Assert.IsTrue(await results.InitializeAsync());
+            for (var value = 2; value <= 1 + rowsReadFirst; value++)
+            {
+                Assert.IsTrue(await reader.ReadAsync());
+                Assert.AreEqual(value, reader.GetInt32(0));
+            }
+
+            // Bounded so the former hang (the pump parked on the next row of the first result)
+            // fails fast.
+            Assert.IsTrue(await results.NextResultAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.IsTrue(await results.InitializeAsync());
+            for (var value = 101; value < 101 + rowCount; value++)
+            {
+                Assert.AreEqual(value, reader.GetInt32(0));
+                Assert.AreEqual(value < 100 + rowCount, await reader.ReadAsync());
+            }
+
+            Assert.IsFalse(await results.NextResultAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+
+        await connection.DisposeAsync();
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
     private static PgConnectOptions CreateOptions(TcpListener listener) => new()
     {
         Host = "127.0.0.1",

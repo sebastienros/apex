@@ -3255,7 +3255,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                                   _columns);
                                 lock (_gate)
                                 {
-                                    if (!_stopped)
+                                    // A pending NextResultAsync skips the rest of this result.
+                                    if (!_stopped && _results is not { SkipsRows: true })
                                     {
                                         _current = message;
                                         _hasCurrent = true;

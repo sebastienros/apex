@@ -661,7 +661,8 @@ public sealed partial class MySqlConnection
                     decoder.ValidateRow(packet.Span);
                     lock (_gate)
                     {
-                        if (!_stopped)
+                        // A pending NextResultAsync skips the rest of this result.
+                        if (!_stopped && _results is not { SkipsRows: true })
                         {
                             _current = packet;
                             _hasCurrent = true;
