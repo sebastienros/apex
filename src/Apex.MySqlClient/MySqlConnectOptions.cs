@@ -86,7 +86,11 @@ public sealed record MySqlConnectOptions : SqlConnectOptions
     public X509RevocationMode CertificateRevocationCheckMode { get; init; } =
       X509RevocationMode.NoCheck;
 
-    /// <summary>Gets the connection attributes reported to <c>performance_schema</c>.</summary>
+    /// <summary>
+    /// Gets the connection attributes reported to <c>performance_schema</c>. In a connection
+    /// string they are set with <c>ConnectionAttributes=name:value,name:value</c>, and
+    /// <c>Application Name</c> sets <c>program_name</c>.
+    /// </summary>
     public IReadOnlyDictionary<string, string> ConnectionAttributes { get; init; } =
       new Dictionary<string, string>(StringComparer.Ordinal)
       {
@@ -115,6 +119,10 @@ public sealed record MySqlConnectOptions : SqlConnectOptions
     /// Parses a <c>mysql://</c> or <c>mariadb://</c> URI, or a semicolon separated keyword string
     /// such as <c>Server=localhost;Port=3306;User ID=root;Password=secret;Database=test</c>.
     /// </summary>
+    /// <exception cref="FormatException">
+    /// A key is not a supported option, or a value is malformed. Connection attributes are only
+    /// read from the <c>ConnectionAttributes</c> and <c>Application Name</c> keys.
+    /// </exception>
     public static MySqlConnectOptions Parse(string connectionString)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
@@ -287,13 +295,38 @@ public sealed record MySqlConnectOptions : SqlConnectOptions
                         ConnectTimeout = TimeSpan.FromSeconds(ParsePositiveInt(value, key)),
                     };
                     break;
-                default:
-                    connectionAttributes[key] = value;
+                case "applicationname":
+                    connectionAttributes["program_name"] = value;
                     break;
+                case "connectionattributes":
+                    ParseConnectionAttributes(value, connectionAttributes);
+                    break;
+                default:
+                    // The value is left out on purpose: a mistyped key may hold a secret.
+                    throw new FormatException($"Unsupported MySQL connection option '{key}'.");
             }
         }
 
         return options with { ConnectionAttributes = connectionAttributes };
+    }
+
+    /// <summary>
+    /// Parses <c>name:value</c> pairs separated by commas, the Connector/J
+    /// <c>connectionAttributes</c> syntax. The first colon splits the name from the value.
+    /// </summary>
+    private static void ParseConnectionAttributes(string value, Dictionary<string, string> attributes)
+    {
+        foreach (var pair in value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            var separator = pair.IndexOf(':', StringComparison.Ordinal);
+            var name = (separator < 0 ? pair : pair[..separator]).Trim();
+            if (name.Length == 0)
+            {
+                throw new FormatException("A MySQL connection attribute name is empty.");
+            }
+
+            attributes[name] = separator < 0 ? string.Empty : pair[(separator + 1)..].Trim();
+        }
     }
 
     private static string Normalize(string key) =>
