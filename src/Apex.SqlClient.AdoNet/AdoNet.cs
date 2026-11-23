@@ -188,7 +188,18 @@ public abstract class ApexDbCommand : DbCommand
             }
         }
     }
-    public override int CommandTimeout { get; set; } = 30;
+    private int _commandTimeout = 30;
+
+    /// <summary>Gets or sets the timeout, in seconds, of each execute, read and next-result call; 0 disables it.</summary>
+    public override int CommandTimeout
+    {
+        get => _commandTimeout;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _commandTimeout = value;
+        }
+    }
     public override CommandType CommandType { get; set; } = CommandType.Text;
     public override bool DesignTimeVisible { get; set; }
     public override UpdateRowSource UpdatedRowSource { get; set; }
@@ -1736,7 +1747,16 @@ public abstract class ApexDbBatch : DbBatch
     /// read or next-result call, for every execution method. It is not a deadline for the whole batch.
     /// Zero disables it.
     /// </summary>
-    public override int Timeout { get; set; } = 30;
+    public override int Timeout
+    {
+        get => _timeout;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(value);
+            _timeout = value;
+        }
+    }
+    private int _timeout = 30;
     protected abstract ApexDbBatchCommand CreateBatchCommandCore();
     protected abstract ApexDbCommand CreateCommandCore(ApexDbBatchCommand command, DbConnection connection);
     protected virtual void ValidateProviderConnection(DbConnection connection) { }

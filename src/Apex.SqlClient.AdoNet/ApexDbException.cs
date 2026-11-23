@@ -40,6 +40,7 @@ public sealed class ApexDbException : DbException
 internal sealed class ApexOperationCancellation : IDisposable
 {
     private readonly CancellationTokenSource _source;
+    private readonly CancellationToken _token;
     private readonly CancellationToken _callerToken;
     private readonly int _timeoutSeconds;
     private volatile bool _canceled;
@@ -51,12 +52,15 @@ internal sealed class ApexOperationCancellation : IDisposable
     internal ApexOperationCancellation(CancellationToken callerToken, int timeoutSeconds)
     {
         _source = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        // Captured once: CancellationTokenSource.Token throws after disposal, which an exception filter would
+        // swallow, silently skipping the translation.
+        _token = _source.Token;
         _callerToken = callerToken;
         _timeoutSeconds = timeoutSeconds > MaximumTimeoutSeconds ? 0 : timeoutSeconds;
     }
 
     internal CancellationTokenSource Source => _source;
-    internal CancellationToken Token => _source.Token;
+    internal CancellationToken Token => _token;
 
     internal void Arm()
     {
@@ -99,10 +103,10 @@ internal sealed class ApexOperationCancellation : IDisposable
         if (_timeoutSeconds <= 0 ||
             exception is not (OperationCanceledException or SqlClientException) ||
             _canceled ||
-            !_source.IsCancellationRequested ||
+            !_token.IsCancellationRequested ||
             _callerToken.IsCancellationRequested ||
             // The operation's own token is passed to initialization; only a separate call token counts.
-            (callToken != _source.Token && callToken.IsCancellationRequested))
+            (callToken != _token && callToken.IsCancellationRequested))
         {
             return null;
         }

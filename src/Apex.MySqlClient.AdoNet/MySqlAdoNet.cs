@@ -203,9 +203,8 @@ internal static class MySqlAdoColumnTypes
         System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
     internal static Type GetFieldType(SqlColumn column)
     {
-        var metadata = MySqlColumnMetadata.FromColumn(column);
-        var unsigned = metadata.IsUnsigned;
-        return metadata.Type switch
+        var unsigned = IsUnsigned(column);
+        return (MySqlType)column.TypeId switch
         {
             MySqlType.Tiny => unsigned ? typeof(byte) : typeof(sbyte),
             MySqlType.Short => unsigned ? typeof(ushort) : typeof(short),
@@ -223,15 +222,26 @@ internal static class MySqlAdoColumnTypes
             MySqlType.Json => typeof(System.Text.Json.JsonElement),
             MySqlType.Null => typeof(object),
             MySqlType.Geometry or MySqlType.Vector => typeof(byte[]),
-            _ => metadata.IsBinary ? typeof(byte[]) : typeof(string),
+            _ => IsBinary(column) ? typeof(byte[]) : typeof(string),
         };
     }
 
+    // The driver packs the column flags into TypeModifier and the character set into TypeSize (see
+    // MySqlColumnMetadata.FromColumn); read them directly so metadata calls allocate nothing.
+    private const int BinaryCharacterSet = 63;
+
+    private static MySqlColumnFlags GetFlags(SqlColumn column) => (MySqlColumnFlags)unchecked((ushort)column.TypeModifier);
+
+    private static bool IsUnsigned(SqlColumn column) => (GetFlags(column) & MySqlColumnFlags.Unsigned) != 0;
+
+    private static bool IsBinary(SqlColumn column) => unchecked((ushort)column.TypeSize) == BinaryCharacterSet;
+
     internal static string GetDataTypeName(SqlColumn column)
     {
-        var metadata = MySqlColumnMetadata.FromColumn(column);
-        var binary = metadata.IsBinary;
-        var name = metadata.Type switch
+        var type = (MySqlType)column.TypeId;
+        var flags = GetFlags(column);
+        var binary = IsBinary(column);
+        var name = type switch
         {
             MySqlType.Tiny => "TINYINT",
             MySqlType.Short => "SMALLINT",
@@ -258,12 +268,12 @@ internal static class MySqlAdoColumnTypes
             MySqlType.LongBlob => binary ? "LONGBLOB" : "LONGTEXT",
             MySqlType.Blob => binary ? "BLOB" : "TEXT",
             MySqlType.VarChar or MySqlType.VarString => binary ? "VARBINARY" : "VARCHAR",
-            MySqlType.String when (metadata.Flags & MySqlColumnFlags.Enum) != 0 => "ENUM",
-            MySqlType.String when (metadata.Flags & MySqlColumnFlags.Set) != 0 => "SET",
+            MySqlType.String when (flags & MySqlColumnFlags.Enum) != 0 => "ENUM",
+            MySqlType.String when (flags & MySqlColumnFlags.Set) != 0 => "SET",
             MySqlType.String => binary ? "BINARY" : "CHAR",
-            _ => ((byte)metadata.Type).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            _ => column.TypeId.ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
-        return metadata.IsUnsigned && metadata.Type is
+        return IsUnsigned(column) && type is
             MySqlType.Tiny or MySqlType.Short or MySqlType.Int24 or MySqlType.Long or MySqlType.LongLong or
             MySqlType.Float or MySqlType.Double or MySqlType.Decimal or MySqlType.NewDecimal
             ? name + " UNSIGNED"

@@ -88,6 +88,9 @@ public sealed class AdapterContractTests
         Assert.AreEqual(7u, Convert(DbType.UInt32, 7).ToObject());
         AssertValue(Convert(DbType.Object, 7), SqlValueKind.Int32, 7);
 
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new PgDbCommand().CommandTimeout = -1);
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new PgDbBatch().Timeout = -1);
+
         var parameter = new PgDbParameter { DbType = DbType.Int32, Value = null };
         Assert.IsTrue(parameter.ToSqlValue().IsNull);
         parameter.ResetDbType();
