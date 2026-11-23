@@ -7,8 +7,6 @@ on:
 env:
   DOTNET_NOLOGO: true
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
-  DOTNET_GENERATE_ASPNET_CERTIFICATE: false
-  DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: true
   APEX_PG_CONNECTION_STRING: postgresql://apex:Password12!@127.0.0.1:5432/apex?sslmode=disable
   APEX_MYSQL_CONNECTION_STRING: Server=127.0.0.1;Port=3306;Database=apex;User ID=apex;Password=Password12!;SslMode=Disabled;AllowPublicKeyRetrieval=true
   APEX_MSSQL_CONNECTION_STRING: Server=127.0.0.1,1433;Database=master;User ID=sa;Password=Password12!;Encrypt=True;TrustServerCertificate=True

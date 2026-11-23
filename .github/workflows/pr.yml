@@ -27,13 +27,9 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         project: ${{ fromJSON(needs.projects.outputs.list) }}
     runs-on: ${{ matrix.os }}
-    # The last two skip .NET CLI first-run work (HTTPS dev certificate, workload update check):
-    # with a warm NuGet cache, most of the Windows Restore step was the CLI starting up.
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
-      DOTNET_GENERATE_ASPNET_CERTIFICATE: false
-      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: true
     steps:
       - uses: actions/checkout@v7
       # The default NuGet cache (%USERPROFILE%\.nuget\packages) is on the slower C: OS disk on
@@ -108,8 +104,6 @@ jobs:
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
-      DOTNET_GENERATE_ASPNET_CERTIFICATE: false
-      DOTNET_CLI_WORKLOAD_UPDATE_NOTIFY_DISABLE: true
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
