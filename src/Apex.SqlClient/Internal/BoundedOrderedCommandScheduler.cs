@@ -5,8 +5,40 @@ using System.Threading.Tasks.Sources;
 
 namespace Apex.SqlClient.Internal;
 
+/// <summary>
+/// Runs commands on one connection in submission order, sending up to an in-flight limit ahead of
+/// their responses.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Shutdown is bounded. A connection closes with <see cref="CloseAsync"/>, which queues the
+/// protocol's goodbye after the work already queued and waits for it at most
+/// <see cref="DefaultCloseTimeout"/>. Past that deadline the scheduler is disposed: commands that
+/// have not run fail with <see cref="ObjectDisposedException"/>, and a goodbye still queued
+/// completes early. <see cref="DisposeAsync"/> then cancels the send in progress, and when the pump
+/// is still busy after <see cref="DefaultAbortGracePeriod"/> (a receive, or a send that ignores its
+/// token, for example because the peer stopped reading), it aborts the transport through the
+/// callback the connection supplied, which makes the pending I/O fail.
+/// </para>
+/// <para>
+/// Disposal still waits for the pump to unwind before it returns, and does not abandon it: the
+/// connections release pooled buffers right after the scheduler is disposed, so a delegate must
+/// never run past that point. Without an abort callback, a pump stuck in I/O that ignores its token
+/// still keeps disposal waiting.
+/// </para>
+/// </remarks>
 internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 {
+    // How long CloseAsync waits for the commands queued before it and for the goodbye.
+    internal static readonly TimeSpan DefaultCloseTimeout = TimeSpan.FromSeconds(5);
+
+    // How long DisposeAsync lets the pump unwind on its own after shutdown, before it aborts the
+    // transport. A healthy pump unwinds in microseconds; this only expires when it is stuck in I/O.
+    internal static readonly TimeSpan DefaultAbortGracePeriod = TimeSpan.FromSeconds(1);
+
+    private static readonly Func<CancellationToken, ValueTask<bool>> s_goodbyeReceived =
+      static _ => ValueTask.FromResult(true);
+
     private readonly Channel<ICommand> _commands;
     private readonly int _inFlightLimit;
     private readonly Func<Exception, bool> _isFatal;
@@ -30,6 +62,9 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
     private static readonly Action<object?> s_cancelSource =
       static state => ((CancellationTokenSource)state!).Cancel();
     private CancellationTokenSource _sendCancellation = new();
+    private readonly Action? _abortTransport;
+    private readonly TimeSpan _closeTimeout;
+    private readonly TimeSpan _abortGracePeriod;
     private readonly Task _pump;
     private Exception? _terminalError;
     private int _disposed;
@@ -39,11 +74,17 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         int inFlightLimit,
         int queueCapacity,
         Func<Exception, bool>? isFatal = null,
-        Func<CancellationToken, ValueTask>? flushBatchAsync = null)
+        Func<CancellationToken, ValueTask>? flushBatchAsync = null,
+        Action? abortTransport = null,
+        TimeSpan? closeTimeout = null,
+        TimeSpan? abortGracePeriod = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(inFlightLimit);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(queueCapacity);
 
+        _abortTransport = abortTransport;
+        _closeTimeout = closeTimeout ?? DefaultCloseTimeout;
+        _abortGracePeriod = abortGracePeriod ?? DefaultAbortGracePeriod;
         _inFlightLimit = inFlightLimit;
         _isFatal = isFatal ?? (_ => false);
         _flushBatchAsync = flushBatchAsync;
@@ -105,6 +146,33 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         return completion;
     }
 
+    /// <summary>
+    /// Sends the protocol's goodbye as a barrier after the commands already queued, waiting at
+    /// most the close timeout. Past the deadline the scheduler is disposed, and this returns once
+    /// the goodbye has completed or failed; an error caused by the deadline is not reported.
+    /// The caller still calls <see cref="DisposeAsync"/> afterwards.
+    /// </summary>
+    public async ValueTask CloseAsync(Func<CancellationToken, ValueTask> sendGoodbye)
+    {
+        ArgumentNullException.ThrowIfNull(sendGoodbye);
+        using CancellationTokenSource deadline = new(_closeTimeout);
+        var registration = deadline.Token.UnsafeRegister(
+          static state => ((BoundedOrderedCommandScheduler)state!).DisposeAfterCloseTimeout(),
+          this);
+        try
+        {
+            await ExecuteAsync(sendGoodbye, s_goodbyeReceived, barrier: true).ConfigureAwait(false);
+        }
+        catch (Exception) when (deadline.IsCancellationRequested)
+        {
+            // The deadline disposed the scheduler, which failed the goodbye.
+        }
+        finally
+        {
+            registration.Dispose();
+        }
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
@@ -119,11 +187,32 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             _commands.Writer.TryComplete();
         }
 
+        if (_abortTransport is not null && !_pump.IsCompleted)
+        {
+            try
+            {
+                await _pump.WaitAsync(_abortGracePeriod).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                // The pump is stuck in I/O that ignores shutdown. Aborting the transport makes
+                // that I/O fail, so the pump unwinds and fails what is left.
+                _abortTransport();
+            }
+        }
+
         await _pump.ConfigureAwait(false);
         if (Interlocked.Exchange(ref _shutdownDisposed, 1) == 0)
         {
             _shutdown.Dispose();
         }
+    }
+
+    private void DisposeAfterCloseTimeout()
+    {
+        // Runs on the timer thread. CloseAsync's caller disposes again afterwards, and that
+        // DisposeAsync awaits the same pump, so this task needs no observer of its own.
+        _ = DisposeAsync().AsTask();
     }
 
     private async Task PumpAsync()

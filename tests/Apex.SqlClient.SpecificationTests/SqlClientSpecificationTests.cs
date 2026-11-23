@@ -326,6 +326,22 @@ public abstract class SqlClientSpecificationTests
         CollectionAssert.AreEqual(Enumerable.Range(1, 10).ToArray(), values);
     }
 
+    // Disposal used to queue the protocol's goodbye behind the running query and wait for it with
+    // no bound. It now gives queued work a close timeout, then aborts the transport.
+    [TestMethod]
+    public async Task DisposeDoesNotWaitForALongRunningQuery()
+    {
+        var connection = await OpenConnectionAsync();
+        var pending = connection.QueryAsync(LongRunningSql).AsTask();
+        await Task.Delay(200);
+
+        var elapsed = Stopwatch.StartNew();
+        await connection.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+        Assert.IsLessThan(TimeSpan.FromSeconds(9), elapsed.Elapsed);
+        await Assert.ThrowsAsync<ObjectDisposedException>(() => pending);
+    }
+
     [TestMethod]
     public async Task CancellationLeavesConnectionReusable()
     {

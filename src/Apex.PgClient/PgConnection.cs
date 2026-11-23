@@ -67,7 +67,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
           options.PipeliningLimit,
           (int)Math.Max(16, Math.Min(4096, (long)options.PipeliningLimit * 4)),
                     IsFatalConnectionError,
-                    _writer.FlushAsync);
+                    _writer.FlushAsync,
+                    abortTransport: socket.Dispose);
         _statementCache = options.CachePreparedStatements && options.PreparedStatementCacheSize > 0
           ? new LruCache<string, string>(
             options.PreparedStatementCacheSize,
@@ -624,14 +625,12 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         {
             if (Volatile.Read(ref _copyActive) == 0)
             {
-                await _scheduler.ExecuteAsync(
+                await _scheduler.CloseAsync(
                 async token =>
                 {
                     token.ThrowIfCancellationRequested();
                     await _writer.WriteTerminateAsync(CancellationToken.None).ConfigureAwait(false);
-                },
-                static _ => ValueTask.FromResult(true),
-                barrier: true).ConfigureAwait(false);
+                }).ConfigureAwait(false);
             }
             else
             {

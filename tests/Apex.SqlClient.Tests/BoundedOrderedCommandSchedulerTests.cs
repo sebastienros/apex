@@ -660,6 +660,130 @@ public sealed class BoundedOrderedCommandSchedulerTests
     }
 
     [TestMethod]
+    public async Task CloseSendsTheGoodbyeAfterTheQueuedCommands()
+    {
+        var aborted = false;
+        await using BoundedOrderedCommandScheduler scheduler = new(
+          2,
+          4,
+          abortTransport: () => aborted = true);
+        ConcurrentQueue<string> events = [];
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+        var first = Execute(scheduler, 1, events: events);
+        var second = Execute(scheduler, 2, events: events);
+
+        var close = scheduler.CloseAsync(
+          _ =>
+          {
+              events.Enqueue("goodbye");
+              return ValueTask.CompletedTask;
+          });
+        releasePump.SetResult();
+        await close.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await scheduler.DisposeAsync();
+
+        Assert.AreEqual(0, await blocker);
+        CollectionAssert.AreEqual(
+          new[] { 1, 2 },
+          await Task.WhenAll(first.AsTask(), second.AsTask()));
+        Assert.AreEqual("goodbye", events.Last());
+        Assert.IsFalse(aborted);
+    }
+
+    // A receive that ignores its token and only ends when the transport is torn down, like a
+    // driver waiting on a long-running query. Without a bound, closing waits for it forever.
+    [TestMethod]
+    public async Task CloseAbortsTheTransportWhenAnInFlightReceiveIgnoresShutdown()
+    {
+        var transport = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aborts = 0;
+        BoundedOrderedCommandScheduler scheduler = new(
+          1,
+          4,
+          exception => exception is IOException,
+          abortTransport: () =>
+          {
+              Interlocked.Increment(ref aborts);
+              transport.TrySetException(new IOException("aborted"));
+          },
+          closeTimeout: TimeSpan.FromMilliseconds(200),
+          abortGracePeriod: TimeSpan.FromMilliseconds(100));
+        ConcurrentQueue<string> events = [];
+        var receiveStarted = NewGate();
+        var inFlight = scheduler.ExecuteAsync(
+          _ => ValueTask.CompletedTask,
+          _ =>
+          {
+              receiveStarted.SetResult();
+              return new ValueTask<int>(transport.Task);
+          });
+        var queued = Execute(scheduler, 2, events: events);
+        await receiveStarted.Task;
+
+        var elapsed = Stopwatch.StartNew();
+        await scheduler.CloseAsync(
+          _ =>
+          {
+              events.Enqueue("goodbye");
+              return ValueTask.CompletedTask;
+          }).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.IsGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(250), elapsed.Elapsed);
+        Assert.IsGreaterThanOrEqualTo(1, Volatile.Read(ref aborts));
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(inFlight);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(queued);
+        Assert.IsEmpty(events);
+    }
+
+    // A send blocked because the peer stopped reading, in a driver that does not pass the token
+    // down to the socket.
+    [TestMethod]
+    public async Task DisposalAbortsTheTransportWhenASendIgnoresShutdown()
+    {
+        var transport = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        BoundedOrderedCommandScheduler scheduler = new(
+          1,
+          4,
+          exception => exception is IOException,
+          abortTransport: () => transport.TrySetException(new IOException("aborted")),
+          abortGracePeriod: TimeSpan.FromMilliseconds(100));
+        var sendStarted = NewGate();
+        var blocked = scheduler.ExecuteAsync(
+          _ =>
+          {
+              sendStarted.SetResult();
+              return new ValueTask(transport.Task);
+          },
+          _ => ValueTask.FromResult(1));
+        var queued = Execute(scheduler, 2);
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.IsTrue(transport.Task.IsFaulted);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocked);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(queued);
+    }
+
+    [TestMethod]
+    public async Task DisposalDoesNotAbortAPumpThatUnwindsOnShutdown()
+    {
+        var aborted = false;
+        BoundedOrderedCommandScheduler scheduler = new(
+          1,
+          4,
+          abortTransport: () => aborted = true,
+          abortGracePeriod: TimeSpan.FromSeconds(30));
+        (var blocker, _) = await HoldPumpAsync(scheduler);
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocker);
+        Assert.IsFalse(aborted);
+    }
+
+    [TestMethod]
     public async Task DisposalFailsCommandsWaitingForChannelCapacity()
     {
         BoundedOrderedCommandScheduler scheduler = new(1, 1);

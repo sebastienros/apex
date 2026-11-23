@@ -257,6 +257,9 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
         }
     }
 
+    private static async Task DisposeConnectionAsync(ISqlConnection connection) =>
+        await connection.DisposeAsync().ConfigureAwait(false);
+
     private async Task DisposeCoreAsync()
     {
         // Stop the background work before taking _lifecycle: a replacement or a statement
@@ -297,11 +300,20 @@ internal sealed class SqlPipelinePool : ISqlPipelinePool
                 }
             }
 
-            foreach (var connection in _connections)
+            // Concurrently: a connection with work still in flight can take up to the scheduler's
+            // close timeout plus its abort grace period to dispose, and those waits should not add
+            // up across the pool.
+            var disposals = new Task[_connections.Length];
+            for (var index = 0; index < _connections.Length; index++)
+            {
+                disposals[index] = DisposeConnectionAsync(_connections[index]);
+            }
+
+            foreach (var disposal in disposals)
             {
                 try
                 {
-                    await connection.DisposeAsync().ConfigureAwait(false);
+                    await disposal.ConfigureAwait(false);
                 }
                 catch (Exception exception)
                 {
