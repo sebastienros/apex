@@ -29,6 +29,11 @@ jobs:
           global-json-file: global.json
       - name: Version
         run: dotnet --version
+      # The default NuGet cache (%USERPROFILE%\.nuget\packages) is on the slower C: OS disk on
+      # Windows runners. runner.temp is on the fast local disk that also holds the workspace.
+      - name: Use the local disk for the NuGet cache
+        if: runner.os == 'Windows'
+        run: Add-Content -Path $env:GITHUB_ENV -Value "NUGET_PACKAGES=${{ runner.temp }}\nuget-packages"
       # Restore and build outside the Test step: on a cold Windows runner restore and build
       # together take close to a minute, while the tests finish in seconds.
       - name: Restore
