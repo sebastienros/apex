@@ -49,14 +49,30 @@ jobs:
           MSSQL_SA_PASSWORD: Password12!
         ports:
           - 1433:1433
+        # Docker runs the check with /bin/sh -c inside the container, so $MSSQL_SA_PASSWORD comes
+        # from the container's environment. -C trusts the self-signed certificate (sqlcmd 18
+        # encrypts by default) and -b turns a SQL error into a non-zero exit code.
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P $MSSQL_SA_PASSWORD -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-start-period 10s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
+      # Restores the Linux cache that build.yml (on main) and the Linux PR Checks jobs save. Their
+      # test projects cover every package this project uses, so this job only reads the cache.
+      - name: Restore the NuGet cache
+        uses: ./.github/actions/nuget-cache
+        with:
+          mode: restore
+      # --locked-mode fails the restore when a packages.lock.json is out of date.
       - name: Restore
         timeout-minutes: 5
-        run: dotnet restore "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj"
+        run: dotnet restore "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --locked-mode
       - name: Build
         timeout-minutes: 5
         run: dotnet build "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release --no-restore
@@ -64,6 +80,21 @@ jobs:
       # (DatabaseServiceTests.ConnectWithRetryAsync: 90 s deadline, 5 s attempts, 1 s delay).
       # Six minutes covers all three services being down, so every failure is reported with the
       # test's own TimeoutException and last error instead of a bare step kill.
+      # The hang timeout is an inactivity timer, reset by every test update: 120 s is above one
+      # test's ~96 s retry window, and a hang after two full retry windows still dumps at
+      # ~192 + 120 s, inside the six minutes.
       - name: Test database services
         timeout-minutes: 6
-        run: dotnet test --project "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release --no-build
+        run: >-
+          dotnet test --project "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj"
+          --configuration Release --no-build
+          --results-directory "${{ github.workspace }}/TestResults"
+          --hangdump --hangdump-timeout 120s --hangdump-type Mini
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-databases
+          path: TestResults/
+          if-no-files-found: ignore
+          retention-days: 7

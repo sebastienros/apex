@@ -24,6 +24,18 @@
     <Version>0.1.0-preview.1</Version>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- CI restores with locked mode and caches NuGet packages keyed on these lock files.
+         They also record the SDK-bundled Microsoft.NET.ILLink.Tasks and Microsoft.DotNet.ILCompiler
+         versions, which is why global.json uses rollForward "patch": CI then runs the exact SDK in
+         global.json. Regenerate them (dotnet restore Apex.slnx) after changing package versions,
+         project references, Version, or the SDK in global.json. -->
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+
+  <!-- Adds the Microsoft.Testing.Platform hang dump extension (MSTest.Sdk supplies its version under
+       central package management). It only acts when a run passes hangdump options, as CI does. -->
+  <PropertyGroup Condition="'$(UsingMSTestSdk)' == 'true'">
+    <EnableMicrosoftTestingExtensionsHangDump>true</EnableMicrosoftTestingExtensionsHangDump>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(IsTestProject)' == 'true'">

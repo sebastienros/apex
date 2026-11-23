@@ -6,18 +6,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  # The driver test projects are listed once, in .github/test-projects.json, which build.yml also reads.
+  projects:
+    runs-on: ubuntu-latest
+    outputs:
+      list: ${{ steps.read.outputs.list }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: .github/test-projects.json
+          sparse-checkout-cone-mode: false
+      - id: read
+        run: echo "list=$(jq -c . .github/test-projects.json)" >> "$GITHUB_OUTPUT"
+
   drivers:
+    needs: projects
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        project:
-          - tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj
-          - tests/Apex.SqlClient.AdoNet.Tests/Apex.SqlClient.AdoNet.Tests.csproj
-          - tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj
-          - tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj
-          - tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj
-          - tests/Apex.SqlClient.AzureIdentity.Tests/Apex.SqlClient.AzureIdentity.Tests.csproj
+        project: ${{ fromJSON(needs.projects.outputs.list) }}
     runs-on: ${{ matrix.os }}
     env:
       DOTNET_NOLOGO: true
@@ -29,22 +37,85 @@ jobs:
           global-json-file: global.json
       - name: Version
         run: dotnet --version
-      # The default NuGet cache (%USERPROFILE%\.nuget\packages) is on the slower C: OS disk on
-      # Windows runners. runner.temp is on the fast local disk that also holds the workspace.
-      - name: Use the local disk for the NuGet cache
-        if: runner.os == 'Windows'
-        run: Add-Content -Path $env:GITHUB_ENV -Value "NUGET_PACKAGES=${{ runner.temp }}\nuget-packages"
+      # One cache per OS, shared by every matrix job and by build.yml's nuget-cache job on main
+      # (PR runs can read caches saved on main). It is keyed on the lock files, so it changes only
+      # when a package or project reference does. On Windows it also moves the NuGet cache to the
+      # fast local disk.
+      - name: Cache NuGet packages
+        id: nuget-cache
+        uses: ./.github/actions/nuget-cache
       # Restore and build outside the Test step: on a cold Windows runner restore and build
       # together take close to a minute, while the tests finish in seconds.
+      # --locked-mode fails the restore when a packages.lock.json is out of date.
+      # On a cache miss, every test project is restored, so whichever job saves the shared cache
+      # first saves all the packages the other jobs need.
+      # jq writes CRLF line endings on Windows, hence the tr.
       - name: Restore
         timeout-minutes: 5
-        run: dotnet restore "${{ github.workspace }}/${{ matrix.project }}"
+        shell: bash
+        run: |
+          if [ "${{ steps.nuget-cache.outputs.cache-hit }}" = true ]; then
+            projects="${{ matrix.project }}"
+          else
+            projects=$(jq -r '.[]' .github/test-projects.json | tr -d '\r')
+          fi
+          for project in $projects; do
+            dotnet restore "${{ github.workspace }}/$project" --locked-mode
+          done
       - name: Build
         timeout-minutes: 5
         run: dotnet build "${{ github.workspace }}/${{ matrix.project }}" --configuration Release --no-restore
+      # A test that makes no progress for 60 s gets a hang dump: the test platform prints the tests
+      # still running, writes <app>_<pid>_hang.log and .dmp to TestResults, and kills the test
+      # process. 60 s is above the 30 s per-command deadline in the scheduler stress test, which
+      # then reports its own failure first, and leaves time to write the dump inside the 2 minutes.
+      # On macOS runners createdump never completes (it printed nothing for 24 minutes), so macOS
+      # uses type None: the hanging test is still named, in the log and in <app>_<pid>_hang.log,
+      # and the process is killed at 60 s instead of the step timing out.
       - name: Test
         timeout-minutes: 2
-        run: dotnet test --project "${{ github.workspace }}/${{ matrix.project }}" --configuration Release --no-build
+        run: dotnet test --project "${{ github.workspace }}/${{ matrix.project }}" --configuration Release --no-build --results-directory "${{ github.workspace }}/TestResults" --hangdump --hangdump-timeout 60s --hangdump-type ${{ runner.os == 'macOS' && 'None' || 'Mini' }}
+      - name: Name the test results artifact
+        if: failure()
+        shell: bash
+        run: echo "RESULTS_ARTIFACT=test-results-${{ matrix.os }}-$(basename "${{ matrix.project }}" .csproj)" >> "$GITHUB_ENV"
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.RESULTS_ARTIFACT }}
+          path: TestResults/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The jobs above restore only the projects they test. This restores the whole solution in locked
+  # mode, so a stale lock file in the benchmarks or the integration tests fails the PR too.
+  lock-files:
+    runs-on: ubuntu-latest
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+      - name: Restore the NuGet cache
+        uses: ./.github/actions/nuget-cache
+        with:
+          mode: restore
+      - name: Restore every project in locked mode
+        timeout-minutes: 5
+        run: dotnet restore Apex.slnx --locked-mode
+      # --locked-mode does not fail for a project without a lock file: it writes a new one.
+      - name: Check that every lock file is committed
+        run: |
+          changed=$(git status --porcelain -- '*packages.lock.json')
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            echo "::error::Lock files are missing or out of date. Run 'dotnet restore Apex.slnx' and commit the packages.lock.json files."
+            exit 1
+          fi
 
   databases:
     uses: ./.github/workflows/tests.yml
