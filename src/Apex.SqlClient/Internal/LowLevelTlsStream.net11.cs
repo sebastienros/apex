@@ -29,6 +29,7 @@ internal sealed class LowLevelTlsStream : Stream
     private int _plainStart;
     private int _plainEnd;
     private int _disposed;
+    private int _resourcesReleased;
 
     private LowLevelTlsStream(
         Stream inner,
@@ -115,6 +116,7 @@ internal sealed class LowLevelTlsStream : Stream
         _readLock.Wait();
         try
         {
+            ThrowIfDisposed();
             if (TryCopyPlaintext(buffer, out var copied))
             {
                 return copied;
@@ -178,7 +180,7 @@ internal sealed class LowLevelTlsStream : Stream
         }
         finally
         {
-            _readLock.Release();
+            ReleaseOperationLock(_readLock);
         }
     }
 
@@ -195,6 +197,7 @@ internal sealed class LowLevelTlsStream : Stream
         await _readLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             if (TryCopyPlaintext(buffer.Span, out var copied))
             {
                 return copied;
@@ -258,7 +261,7 @@ internal sealed class LowLevelTlsStream : Stream
         }
         finally
         {
-            _readLock.Release();
+            ReleaseOperationLock(_readLock);
         }
     }
 
@@ -279,6 +282,7 @@ internal sealed class LowLevelTlsStream : Stream
         _applicationWriteLock.Wait();
         try
         {
+            ThrowIfDisposed();
             while (!buffer.IsEmpty)
             {
                 _stateLock.Wait();
@@ -302,7 +306,7 @@ internal sealed class LowLevelTlsStream : Stream
         }
         finally
         {
-            _applicationWriteLock.Release();
+            ReleaseOperationLock(_applicationWriteLock);
         }
     }
 
@@ -319,6 +323,7 @@ internal sealed class LowLevelTlsStream : Stream
         await _applicationWriteLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+            ThrowIfDisposed();
             var position = 0;
             while (position < buffer.Length)
             {
@@ -345,7 +350,7 @@ internal sealed class LowLevelTlsStream : Stream
         }
         finally
         {
-            _applicationWriteLock.Release();
+            ReleaseOperationLock(_applicationWriteLock);
         }
     }
 
@@ -367,9 +372,17 @@ internal sealed class LowLevelTlsStream : Stream
         }
         finally
         {
-            ReleaseResources();
-            _inner.Dispose();
-            base.Dispose(disposing);
+            try
+            {
+                // Disposing the transport first aborts pending reads and writes, so the
+                // operations that still own the buffers can unwind before they are returned.
+                _inner.Dispose();
+            }
+            finally
+            {
+                TryReleaseResources();
+                base.Dispose(disposing);
+            }
         }
     }
 
@@ -386,9 +399,17 @@ internal sealed class LowLevelTlsStream : Stream
         }
         finally
         {
-            ReleaseResources();
-            await _inner.DisposeAsync().ConfigureAwait(false);
-            GC.SuppressFinalize(this);
+            try
+            {
+                // Disposing the transport first aborts pending reads and writes, so the
+                // operations that still own the buffers can unwind before they are returned.
+                await _inner.DisposeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                TryReleaseResources();
+                GC.SuppressFinalize(this);
+            }
         }
     }
 
@@ -861,17 +882,73 @@ internal sealed class LowLevelTlsStream : Stream
         }
     }
 
+    internal bool ResourcesReleased => Volatile.Read(ref _resourcesReleased) != 0;
+
+    // Every read holds _readLock and every write (and shutdown) holds _applicationWriteLock
+    // while it touches the session or the buffers, and the inner locks are only taken under
+    // one of them. The session and buffers are therefore released only once both outer locks
+    // are free. Disposal tries first; if an operation is still running, that operation tries
+    // again when it releases its lock, so the last one out releases the resources. The
+    // semaphores are never disposed, so an operation unwinding after disposal can still
+    // release them.
+    private void ReleaseOperationLock(SemaphoreSlim operationLock)
+    {
+        operationLock.Release();
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            TryReleaseResources();
+        }
+    }
+
+    private void TryReleaseResources()
+    {
+        if (Volatile.Read(ref _resourcesReleased) != 0 || !_readLock.Wait(0))
+        {
+            return;
+        }
+
+        try
+        {
+            if (!_applicationWriteLock.Wait(0))
+            {
+                return;
+            }
+
+            try
+            {
+                if (Interlocked.Exchange(ref _resourcesReleased, 1) == 0)
+                {
+                    ReleaseResources();
+                }
+            }
+            finally
+            {
+                _applicationWriteLock.Release();
+            }
+        }
+        finally
+        {
+            _readLock.Release();
+        }
+    }
+
     private void ReleaseResources()
     {
-        _session.Dispose();
-        _context.Dispose();
-        ReturnBuffer(ref _cipherInput);
-        ReturnBuffer(ref _cipherOutput);
-        ReturnBuffer(ref _plainInput);
-        _readLock.Dispose();
-        _applicationWriteLock.Dispose();
-        _writeLock.Dispose();
-        _stateLock.Dispose();
+        _plainStart = 0;
+        _plainEnd = 0;
+        _cipherStart = 0;
+        _cipherEnd = 0;
+        try
+        {
+            _session.Dispose();
+            _context.Dispose();
+        }
+        finally
+        {
+            ReturnBuffer(ref _cipherInput);
+            ReturnBuffer(ref _cipherOutput);
+            ReturnBuffer(ref _plainInput);
+        }
     }
 
     private static void ReturnBuffer(ref byte[]? buffer)
