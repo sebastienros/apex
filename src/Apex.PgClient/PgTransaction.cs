@@ -28,6 +28,20 @@ public sealed class PgTransaction : ISqlTransaction
         }
     }
 
+    // A transaction that hit an error answers COMMIT with a ROLLBACK tag and no error. That is fine
+    // for an explicit commit, but an ambient transaction must learn that PostgreSQL rolled back.
+    internal async ValueTask CommitAmbientAsync()
+    {
+        if (_connection.IsTransactionFailed)
+        {
+            await RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+            throw new System.Transactions.TransactionException(
+                "The PostgreSQL transaction failed before COMMIT and was rolled back.");
+        }
+
+        await CommitAsync(CancellationToken.None).ConfigureAwait(false);
+    }
+
     public async ValueTask RollbackAsync(CancellationToken cancellationToken = default)
     {
         if (IsCompleted)

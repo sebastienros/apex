@@ -94,6 +94,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
     internal bool IsReadyForPool =>
         IsUsable && _transactionStatus == (byte)'I' && Volatile.Read(ref _copyActive) == 0;
 
+    internal bool IsTransactionFailed => _transactionStatus == (byte)'E';
+
     internal static async ValueTask<PgConnection> ConnectAsync(
         PgConnectOptions options,
         CancellationToken cancellationToken)
@@ -586,6 +588,20 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             BinaryPrimitives.WriteInt32BigEndian(message.AsSpan(12), _secretKey);
             await stream.WriteAsync(message, timeout.Token).ConfigureAwait(false);
             await stream.FlushAsync(timeout.Token).ConfigureAwait(false);
+
+            // The server closes the cancel connection only after it has signalled the backend.
+            // libpq waits for this too: returning on flush lets the signal arrive after the next
+            // command has started, which then fails with 57014 instead of the one meant here.
+            try
+            {
+                while (await stream.ReadAsync(message, timeout.Token).ConfigureAwait(false) > 0)
+                {
+                }
+            }
+            catch (Exception exception) when (exception is IOException or SocketException)
+            {
+                // A reset also means the server is done with the request.
+            }
         }
         finally
         {
@@ -969,33 +985,27 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         CancellationToken cancellationToken,
         IReadOnlyList<SqlColumn>? columns)
     {
-        Task? cancellationRequest = null;
-        using var registration = cancellationToken.Register(
-          () => cancellationRequest = TryCancelRequestAsync());
+        var cancellation = PgCancellation.Create(this, cancellationToken);
+        SqlRowSet result;
         try
         {
-            var result = columns is null
+            result = columns is null
               ? await ReadQueryResultsAsync(CancellationToken.None).ConfigureAwait(false)
               : await ReadPreparedQueryResultsAsync(
                   columns,
                   CancellationToken.None).ConfigureAwait(false);
-            if (cancellationRequest is not null)
-            {
-                await cancellationRequest.ConfigureAwait(false);
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            return result;
         }
         catch (PgException) when (cancellationToken.IsCancellationRequested)
         {
-            if (cancellationRequest is not null)
-            {
-                await cancellationRequest.ConfigureAwait(false);
-            }
-
             throw new OperationCanceledException(cancellationToken);
         }
+        finally
+        {
+            await PgCancellation.CloseAsync(cancellation).ConfigureAwait(false);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
     }
 
     internal async ValueTask<SqlRowSet> ExecutePreparedAsync(
@@ -1590,7 +1600,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         Action<TState, SqlRow> collector,
         CancellationToken cancellationToken)
     {
-        using var cancellation = new PgCancellation(this, cancellationToken);
+        var cancellation = PgCancellation.Create(this, cancellationToken);
         try
         {
             return await ReceivePreparedCollectionCoreAsync(
@@ -1602,12 +1612,11 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         }
         catch (PgException) when (cancellationToken.IsCancellationRequested)
         {
-            if (cancellation.Request is { } request)
-            {
-                await request.ConfigureAwait(false);
-            }
-
             throw new OperationCanceledException(cancellationToken);
+        }
+        finally
+        {
+            await PgCancellation.CloseAsync(cancellation).ConfigureAwait(false);
         }
     }
 
@@ -1684,11 +1693,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                             "PostgreSQL prepared query did not complete.");
                     }
 
-                    if (cancellation?.Request is { } request)
-                    {
-                        await request.ConfigureAwait(false);
-                    }
-
+                    await PgCancellation.CloseAsync(cancellation).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     collectorError?.Throw();
                     return state;
@@ -1702,13 +1707,26 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
     private async ValueTask<SqlRowSet> ReadBatchResultsAsync(
         CancellationToken cancellationToken)
     {
+        var cancellation = PgCancellation.Create(this, cancellationToken);
+        try
+        {
+            return await ReadBatchResultsCoreAsync(cancellation, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await PgCancellation.CloseAsync(cancellation).ConfigureAwait(false);
+        }
+    }
+
+    private async ValueTask<SqlRowSet> ReadBatchResultsCoreAsync(
+        PgCancellation? cancellation,
+        CancellationToken cancellationToken)
+    {
         List<ResultBuilder> results = [];
         ResultBuilder current = new(_rowDecoder);
         PgException? error = null;
         var errorIndex = -1;
-        Task? cancellationRequest = null;
-        using var registration = cancellationToken.Register(
-            () => cancellationRequest = TryCancelRequestAsync());
         while (true)
         {
             using var message = await _reader.ReadAsync(CancellationToken.None).ConfigureAwait(false);
@@ -1751,11 +1769,11 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                     break;
                 case (byte)'Z':
                     UpdateTransactionStatus(message.Payload.Span);
-                    registration.Dispose();
+                    // The batch is over: never start a cancel now, it could only hit the next
+                    // command. Wait out one already started before reporting the outcome.
+                    await PgCancellation.CloseAsync(cancellation).ConfigureAwait(false);
                     if (cancellationToken.IsCancellationRequested)
                     {
-                        cancellationRequest ??= TryCancelRequestAsync();
-                        await cancellationRequest.ConfigureAwait(false);
                         throw new OperationCanceledException(cancellationToken);
                     }
 
@@ -2578,28 +2596,61 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                 _cancellationToken);
     }
 
-    private sealed class PgCancellation : IDisposable
+    /// <summary>
+    /// Sends a CancelRequest when a command's token fires, and makes sure that request can never
+    /// reach the next command. The receive path must call <see cref="CloseAsync(PgCancellation?)"/>
+    /// before it returns or throws: after that no request can start, and one already sent has
+    /// been processed by the server (see <see cref="CancelRequestAsync"/>).
+    /// </summary>
+    private sealed class PgCancellation
     {
         private readonly PgConnection _connection;
-        private readonly CancellationTokenRegistration _registration;
+        private CancellationTokenRegistration _registration;
         private Task? _request;
+        private int _closed;
 
-        public PgCancellation(
+        private PgCancellation(PgConnection connection)
+        {
+            _connection = connection;
+        }
+
+        public static PgCancellation? Create(
             PgConnection connection,
             CancellationToken cancellationToken)
         {
-            _connection = connection;
-            _registration = cancellationToken.Register(
+            if (!cancellationToken.CanBeCanceled)
+            {
+                return null;
+            }
+
+            PgCancellation cancellation = new(connection);
+            cancellation._registration = cancellationToken.Register(
                 static state => ((PgCancellation)state!).Cancel(),
-                this);
+                cancellation);
+            return cancellation;
         }
 
-        public Task? Request => Volatile.Read(ref _request);
+        public static Task CloseAsync(PgCancellation? cancellation) =>
+            cancellation?.Close() ?? Task.CompletedTask;
 
-        public void Dispose() => _registration.Dispose();
+        private Task Close()
+        {
+            Volatile.Write(ref _closed, 1);
+            // Dispose waits for a callback that is already running, so a request it starts is
+            // published before it is read below.
+            _registration.Dispose();
+            return Volatile.Read(ref _request) ?? Task.CompletedTask;
+        }
 
-        private void Cancel() =>
-            Volatile.Write(ref _request, _connection.TryCancelRequestAsync());
+        private void Cancel()
+        {
+            if (Volatile.Read(ref _closed) != 0)
+            {
+                return;
+            }
+
+            Interlocked.Exchange(ref _request, _connection.TryCancelRequestAsync());
+        }
     }
 
     private sealed class ResultBuilder
@@ -2672,6 +2723,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         private bool _completed;
         private bool _stopped;
         private bool _canceled;
+        private bool _readyForQuery;
         private bool _sent;
         private bool _readPending;
         private bool _readSignaled;
@@ -3173,21 +3225,21 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                                 break;
                             case (byte)'Z':
                                 _connection.UpdateTransactionStatus(message.Payload.Span);
+                                // Snapshot both under one lock and stop Cancel from sending a
+                                // request now: one sent after ReadyForQuery could only cancel
+                                // the next command on this connection.
                                 Task? cancelRequest;
+                                bool canceled;
                                 lock (_gate)
                                 {
+                                    _readyForQuery = true;
                                     cancelRequest = _cancelRequest;
+                                    canceled = _canceled;
                                 }
 
                                 if (cancelRequest is not null)
                                 {
                                     await cancelRequest.ConfigureAwait(false);
-                                }
-
-                                bool canceled;
-                                lock (_gate)
-                                {
-                                    canceled = _canceled;
                                 }
 
                                 if (canceled)
@@ -3240,7 +3292,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             bool advance;
             lock (_gate)
             {
-                if (_completed || _canceled)
+                if (_completed || _canceled || _readyForQuery)
                 {
                     return;
                 }

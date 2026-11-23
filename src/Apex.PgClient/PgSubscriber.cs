@@ -122,13 +122,8 @@ public sealed class PgSubscriber : IPgSubscriber
 
         await _disposeCancellation.CancelAsync().ConfigureAwait(false);
         InterruptWait();
-        try
-        {
-            await _listenLoop.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (_disposeCancellation.IsCancellationRequested)
-        {
-        }
+        // ListenAsync never faults: it reports its failure through the Notifications channel.
+        await _listenLoop.ConfigureAwait(false);
 
         await _lifecycle.WaitAsync().ConfigureAwait(false);
         try
@@ -152,6 +147,28 @@ public sealed class PgSubscriber : IPgSubscriber
 
     private async Task ListenAsync()
     {
+        Exception? error = null;
+        try
+        {
+            await ListenCoreAsync().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_disposeCancellation.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            // Anything that ends the loop (a non-fatal server error, a throwing reconnect policy,
+            // a failed reconnect) must reach the Notifications reader instead of leaving it waiting.
+            error = exception;
+        }
+        finally
+        {
+            _notifications.Writer.TryComplete(error);
+        }
+    }
+
+    private async Task ListenCoreAsync()
+    {
         var retry = 0;
         while (!_disposeCancellation.IsCancellationRequested)
         {
@@ -172,8 +189,7 @@ public sealed class PgSubscriber : IPgSubscriber
                 var delay = _reconnectPolicy(retry++);
                 if (delay is null)
                 {
-                    _notifications.Writer.TryComplete(exception);
-                    return;
+                    throw;
                 }
 
                 if (delay > TimeSpan.Zero)
