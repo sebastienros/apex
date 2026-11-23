@@ -25,10 +25,7 @@ jobs:
       # Same key as the PR Checks matrix: this job restores every test project, so the cache it
       # saves on main is complete for the Linux PR jobs and the database job.
       - name: Cache NuGet packages
-        uses: actions/cache@v6
-        with:
-          path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
+        uses: ./.github/actions/nuget-cache
       # Restore and build once, then run the already-built tests. Each step has its own
       # budget: compiling the drivers for both TFMs dominates the job, while the tests
       # themselves finish in seconds, so the Test step can stay tight enough to flag a hang.
@@ -75,17 +72,11 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
     steps:
       - uses: actions/checkout@v7
-      - name: Use the local disk for the NuGet cache
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Add-Content -Path $env:GITHUB_ENV -Value "NUGET_PACKAGES=${{ runner.temp }}\nuget-packages"
       - name: Cache NuGet packages
         id: nuget-cache
-        uses: actions/cache@v6
+        uses: ./.github/actions/nuget-cache
         with:
-          path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
-          lookup-only: true
+          mode: lookup
       - uses: actions/setup-dotnet@v6
         if: steps.nuget-cache.outputs.cache-hit != 'true'
         with:

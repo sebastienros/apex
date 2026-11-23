@@ -1,0 +1,41 @@
+name: NuGet package cache
+description: >-
+  Restores (and, depending on mode, saves) the NuGet global packages folder under one key per OS,
+  derived from every packages.lock.json. All workflows use this action so that their caches match:
+  PR runs read the caches that build.yml saves on main.
+
+inputs:
+  mode:
+    description: >-
+      save: restore the cache, and save it at the end of the job on a miss.
+      restore: restore only, never save.
+      lookup: only check whether the cache exists, and save it at the end of the job on a miss.
+    default: save
+
+outputs:
+  cache-hit:
+    description: "'true' when the cache for the current lock files exists."
+    value: ${{ steps.save.outputs.cache-hit || steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    # The default NuGet cache (%USERPROFILE%\.nuget\packages) is on the slower C: OS disk on
+    # Windows runners. runner.temp is on the fast local disk that also holds the workspace.
+    - name: Use the local disk for the NuGet cache
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: Add-Content -Path $env:GITHUB_ENV -Value "NUGET_PACKAGES=${{ runner.temp }}\nuget-packages"
+    - id: save
+      if: inputs.mode != 'restore'
+      uses: actions/cache@v6
+      with:
+        path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
+        lookup-only: ${{ inputs.mode == 'lookup' }}
+    - id: restore
+      if: inputs.mode == 'restore'
+      uses: actions/cache/restore@v6
+      with:
+        path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}
+        key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}

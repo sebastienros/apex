@@ -66,10 +66,9 @@ jobs:
       # Restores the Linux cache that build.yml (on main) and the Linux PR Checks jobs save. Their
       # test projects cover every package this project uses, so this job only reads the cache.
       - name: Restore the NuGet cache
-        uses: actions/cache/restore@v6
+        uses: ./.github/actions/nuget-cache
         with:
-          path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
+          mode: restore
       # --locked-mode fails the restore when a packages.lock.json is out of date.
       - name: Restore
         timeout-minutes: 5

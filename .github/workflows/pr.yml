@@ -32,13 +32,6 @@ jobs:
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
     steps:
       - uses: actions/checkout@v7
-      # The default NuGet cache (%USERPROFILE%\.nuget\packages) is on the slower C: OS disk on
-      # Windows runners. runner.temp is on the fast local disk that also holds the workspace.
-      # This runs before the cache step so that the cache restores into the same folder.
-      - name: Use the local disk for the NuGet cache
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: Add-Content -Path $env:GITHUB_ENV -Value "NUGET_PACKAGES=${{ runner.temp }}\nuget-packages"
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
@@ -46,13 +39,11 @@ jobs:
         run: dotnet --version
       # One cache per OS, shared by every matrix job and by build.yml's nuget-cache job on main
       # (PR runs can read caches saved on main). It is keyed on the lock files, so it changes only
-      # when a package or project reference does.
+      # when a package or project reference does. On Windows it also moves the NuGet cache to the
+      # fast local disk.
       - name: Cache NuGet packages
         id: nuget-cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
+        uses: ./.github/actions/nuget-cache
       # Restore and build outside the Test step: on a cold Windows runner restore and build
       # together take close to a minute, while the tests finish in seconds.
       # --locked-mode fails the restore when a packages.lock.json is out of date.
@@ -110,13 +101,21 @@ jobs:
         with:
           global-json-file: global.json
       - name: Restore the NuGet cache
-        uses: actions/cache/restore@v6
+        uses: ./.github/actions/nuget-cache
         with:
-          path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
+          mode: restore
       - name: Restore every project in locked mode
         timeout-minutes: 5
         run: dotnet restore Apex.slnx --locked-mode
+      # --locked-mode does not fail for a project without a lock file: it writes a new one.
+      - name: Check that every lock file is committed
+        run: |
+          changed=$(git status --porcelain -- '*packages.lock.json')
+          if [ -n "$changed" ]; then
+            echo "$changed"
+            echo "::error::Lock files are missing or out of date. Run 'dotnet restore Apex.slnx' and commit the packages.lock.json files."
+            exit 1
+          fi
 
   databases:
     uses: ./.github/workflows/tests.yml
