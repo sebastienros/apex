@@ -342,6 +342,26 @@ public abstract class SqlClientSpecificationTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => pending);
     }
 
+    // A command still queued behind a running one completes as soon as its token is cancelled,
+    // instead of when it reaches the front of the queue, and the running command is unaffected.
+    [TestMethod]
+    public async Task CancellingAQueuedQueryDoesNotWaitForTheRunningOne()
+    {
+        await using var connection = await OpenConnectionAsync();
+        var running = connection.QueryAsync(LongRunningSql).AsTask();
+        await Task.Delay(200);
+
+        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(200));
+        var elapsed = Stopwatch.StartNew();
+        await Assert.ThrowsAsync<OperationCanceledException>(
+          () => connection.QueryAsync("SELECT 1", cancellation.Token).AsTask());
+
+        Assert.IsLessThan(TimeSpan.FromSeconds(5), elapsed.Elapsed);
+        Assert.IsFalse(running.IsCompleted);
+        await running;
+        Assert.AreEqual(1, (await connection.QueryAsync("SELECT 1"))[0].Get<int>(0));
+    }
+
     [TestMethod]
     public async Task CancellationLeavesConnectionReusable()
     {

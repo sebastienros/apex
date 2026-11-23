@@ -183,8 +183,15 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
               ref _terminalError,
               new ObjectDisposedException(nameof(BoundedOrderedCommandScheduler)),
               null);
-            _shutdown.Cancel();
-            _commands.Writer.TryComplete();
+            try
+            {
+                _shutdown.Cancel();
+            }
+            finally
+            {
+                // Even if a cancellation callback throws, the pump must still be woken.
+                _commands.Writer.TryComplete();
+            }
         }
 
         if (_abortTransport is not null && !_pump.IsCompleted)
@@ -437,6 +444,13 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 {
                     await _ready.WaitAsync().ConfigureAwait(false);
                 }
+            }
+
+            if (_shutdown.IsCancellationRequested)
+            {
+                // Disposal fails the rest of the batch (FailBatch) instead of reading responses
+                // that no caller will get.
+                return false;
             }
 
             if (entry.CanceledBeforeSend)
@@ -848,9 +862,10 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
         private void Release(int owner)
         {
-            // An ownership is only taken before the caller holds the ValueTask, so once the other
-            // owner has released it can never come back. Seeing only our own bit means we are the
-            // last owner, which keeps the synchronous fast path free of an extra interlocked write.
+            // Every ownership is taken before the caller holds the ValueTask (the pump's in
+            // Initialize, the writer continuation's in Enqueue), so once an owner has released it
+            // can never come back. Seeing only our own bit means we are the last owner, which keeps
+            // the synchronous fast path free of an extra interlocked write.
             if (Volatile.Read(ref _owners) != owner &&
                 Interlocked.And(ref _owners, ~owner) != owner)
             {

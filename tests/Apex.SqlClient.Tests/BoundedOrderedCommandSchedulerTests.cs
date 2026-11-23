@@ -595,6 +595,39 @@ public sealed class BoundedOrderedCommandSchedulerTests
     }
 
     [TestMethod]
+    public async Task DisposalStopsReceivingTheRestOfAPipelinedBatch()
+    {
+        BoundedOrderedCommandScheduler scheduler = new(3, 8);
+        ConcurrentQueue<string> events = [];
+        var receiveStarted = NewGate();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+        var first = scheduler.ExecuteAsync(
+          _ =>
+          {
+              events.Enqueue("send-1");
+              return ValueTask.CompletedTask;
+          },
+          async cancellationToken =>
+          {
+              receiveStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+              return 1;
+          });
+        var second = Execute(scheduler, 2, events: events);
+        var third = Execute(scheduler, 3, events: events);
+        releasePump.SetResult();
+        await blocker;
+        await receiveStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(first);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(second);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(third);
+        CollectionAssert.AreEqual(new[] { "send-1", "send-2", "send-3" }, events.ToArray());
+    }
+
+    [TestMethod]
     public async Task DisposalCancelsABlockedSendOfACancellableCommand()
     {
         BoundedOrderedCommandScheduler scheduler = new(1, 2);
