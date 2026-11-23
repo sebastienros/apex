@@ -10,6 +10,9 @@ namespace Apex.DriverBenchmarks;
 public class PostgreSqlBenchmarks
 {
     private const string RowsSql = "SELECT generate_series(1, 100)::int4";
+    private const int PipelineDepth = 16;
+    private readonly Task<SqlRowSet>[] _pipeline = new Task<SqlRowSet>[PipelineDepth];
+    private readonly SqlParameters _pipelineParameters = SqlParameters.Create(42);
     private PgConnection _apex = null!;
     private PgDbConnection _ado = null!;
     private System.Data.Common.DbCommand _adoRowsPrepared = null!;
@@ -120,6 +123,31 @@ public class PostgreSqlBenchmarks
         var sum = results.Current[0].Get<int>(0);
         await results.NextResultAsync();
         return sum + results.Current[0].Get<int>(0);
+    }
+
+    // 16 concurrent unprepared commands on one connection; the scheduler pipelines them.
+    [Benchmark(OperationsPerInvoke = PipelineDepth)]
+    public async Task<int> ApexPipelinedSimpleQueriesAsync()
+    {
+        for (var i = 0; i < PipelineDepth; i++)
+        {
+            _pipeline[i] = _apex.QueryAsync("SELECT 1").AsTask();
+        }
+
+        await Task.WhenAll(_pipeline).ConfigureAwait(false);
+        return _pipeline[PipelineDepth - 1].Result[0].Get<int>(0);
+    }
+
+    [Benchmark(OperationsPerInvoke = PipelineDepth)]
+    public async Task<int> ApexPipelinedParameterizedQueriesAsync()
+    {
+        for (var i = 0; i < PipelineDepth; i++)
+        {
+            _pipeline[i] = _apex.QueryAsync("SELECT $1::int4", _pipelineParameters).AsTask();
+        }
+
+        await Task.WhenAll(_pipeline).ConfigureAwait(false);
+        return _pipeline[PipelineDepth - 1].Result[0].Get<int>(0);
     }
 
     [Benchmark]
