@@ -51,7 +51,9 @@ public sealed class TdsHandshakeTests
           new byte[] { 0x04, 0x00, 0x00, 0x74 },
           login.AsSpan(4, 4).ToArray());
         Assert.AreEqual(8192, BinaryPrimitives.ReadInt32LittleEndian(login.AsSpan(8)));
-        Assert.AreEqual(0xC0, login[24]);
+        // fUseDB (0x20) | fDatabase (0x40) | fSetLang (0x80): without fUseDB the server does
+        // not report USE database changes (MS-TDS 2.2.6.4).
+        Assert.AreEqual(0xE0, login[24]);
         Assert.AreEqual(0x02, login[25]);
         Assert.AreEqual(0x10, login[27]);
         AssertField(login, 36, "host");

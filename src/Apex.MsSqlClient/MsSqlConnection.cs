@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
@@ -16,7 +17,16 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     private readonly Socket _socket;
     private readonly Stream _stream;
     private readonly TdsPacketReader _reader;
+    private const int InitialRequestBytes = 1024;
+    private const int MaximumRetainedRequestBytes = 64 * 1024;
+    private static readonly string[] s_commonOperations =
+    [
+        "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "WITH", "EXEC", "EXECUTE",
+        "BEGIN", "COMMIT", "ROLLBACK", "SAVE", "SET", "DECLARE", "IF", "USE",
+        "CREATE", "ALTER", "DROP", "TRUNCATE", "WAITFOR",
+    ];
     private readonly TdsPacketWriter _writer;
+    private ArrayBufferWriter<byte> _request = new(InitialRequestBytes);
     private readonly MsSqlRowDecoder _rowDecoder;
     private readonly BoundedOrderedCommandScheduler _scheduler;
     private readonly object _attentionGate = new();
@@ -371,25 +381,27 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ReadOnlyMemory<byte> payload;
+        var payload = BeginRequest();
         byte messageType;
         if (parameters.Count == 0)
         {
-            payload = TdsRequestWriter.BuildSqlBatch(
+            TdsRequestWriter.WriteSqlBatch(
+              payload,
               sql,
               Interlocked.Read(ref _transactionDescriptor));
             messageType = TdsMessageType.SqlBatch;
         }
         else
         {
-            payload = TdsRequestWriter.BuildExecuteSql(
+            TdsRequestWriter.WriteExecuteSql(
+              payload,
               sql,
               parameters,
               Interlocked.Read(ref _transactionDescriptor));
             messageType = TdsMessageType.Rpc;
         }
 
-        return _writer.WriteMessageAsync(messageType, payload, cancellationToken);
+        return SendRequestAsync(messageType, cancellationToken);
     }
 
     internal async ValueTask<bool> WritePreparedRequestAsync(
@@ -397,14 +409,12 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        var payload = statement.BuildRequest(
-          parameters,
-          Interlocked.Read(ref _transactionDescriptor),
-          out var preparesHandle);
-        await _writer.WriteMessageAsync(
-          TdsMessageType.Rpc,
+        var payload = BeginRequest();
+        var preparesHandle = statement.WriteRequest(
           payload,
-          cancellationToken).ConfigureAwait(false);
+          parameters,
+          Interlocked.Read(ref _transactionDescriptor));
+        await SendRequestAsync(TdsMessageType.Rpc, cancellationToken).ConfigureAwait(false);
         return preparesHandle;
     }
 
@@ -474,13 +484,13 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
               handle = statement.GetHandleForClose();
               if (handle > 0)
               {
-                  var payload = TdsRequestWriter.BuildUnprepare(
+                  var payload = BeginRequest();
+                  TdsRequestWriter.WriteUnprepare(
+                payload,
                 handle,
                 Interlocked.Read(ref _transactionDescriptor));
-                  await _writer.WriteMessageAsync(
-                TdsMessageType.Rpc,
-                payload,
-                CancellationToken.None).ConfigureAwait(false);
+                  await SendRequestAsync(TdsMessageType.Rpc, CancellationToken.None)
+                .ConfigureAwait(false);
                   sent = true;
               }
           },
@@ -1196,11 +1206,52 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         }
     }
 
-    private static string GetOperation(string sql)
+    // Returns the upper-cased first keyword, reusing a constant for common statements so the
+    // per-query diagnostics tag does not allocate.
+    internal static string GetOperation(string sql)
     {
         var text = sql.AsSpan().TrimStart();
         var separator = text.IndexOfAny(" \t\r\n");
-        return (separator < 0 ? text : text[..separator]).ToString().ToUpperInvariant();
+        var keyword = separator < 0 ? text : text[..separator];
+        foreach (var operation in s_commonOperations)
+        {
+            if (keyword.Equals(operation, StringComparison.OrdinalIgnoreCase))
+            {
+                return operation;
+            }
+        }
+
+        return keyword.ToString().ToUpperInvariant();
+    }
+
+    // Request payloads are built into one buffer per connection. Every request is built and sent
+    // from a scheduler send callback, and the scheduler awaits each send to completion before
+    // starting the next one, so only one request uses the buffer at a time.
+    private ArrayBufferWriter<byte> BeginRequest()
+    {
+        _request.ResetWrittenCount();
+        return _request;
+    }
+
+    private async ValueTask SendRequestAsync(
+        byte messageType,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _writer.WriteMessageAsync(
+              messageType,
+              _request.WrittenMemory,
+              cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Don't keep a buffer that grew for one large request alive while the connection idles.
+            if (_request.Capacity > MaximumRetainedRequestBytes)
+            {
+                _request = new ArrayBufferWriter<byte>(InitialRequestBytes);
+            }
+        }
     }
 
     private static bool IsFatalConnectionError(Exception exception) =>
