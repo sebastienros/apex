@@ -5,12 +5,34 @@ namespace Apex.MsSqlClient.Internal;
 
 internal readonly record struct TdsMessage(byte Type, ReadOnlyMemory<byte> Payload);
 
+/// <summary>
+/// Reads TDS packets and exposes the payload of the current message.
+/// </summary>
+/// <remarks>
+/// The default reader issues exact-length reads and never consumes bytes past the packet it is
+/// reading, which keeps the pre-TLS PRELOGIN exchange from swallowing handshake records. A
+/// connection created after the TLS switch uses <see cref="CreateBuffered"/>, which receives into
+/// a pooled buffer and lets token parsers read primitives and whole rows synchronously from
+/// <see cref="GetBufferedPayload"/>, so they fall back to async only at buffer or packet
+/// boundaries.
+/// </remarks>
 internal sealed class TdsPacketReader
 {
+    internal const int DefaultReceiveBufferSize = 32 * 1024;
     private const int HeaderLength = 8;
+    private const int MaximumRetainedMessageBufferLength = 1024 * 1024;
+    private const int Idle = 0;
+    private const int Filling = 1;
+    private const int Released = 2;
+
     private readonly Stream _stream;
-    private readonly byte[] _header = new byte[HeaderLength];
-    private readonly byte[] _skipBuffer = new byte[512];
+    private readonly bool _buffered;
+    private readonly byte[] _skipBuffer;
+    private byte[] _buffer;
+    private byte[] _messageBuffer = [];
+    private int _start;
+    private int _end;
+    private int _state;
     private int _packetPayloadRemaining;
     private byte _messageType;
     private bool _packetEndsMessage;
@@ -19,6 +41,16 @@ internal sealed class TdsPacketReader
     internal TdsPacketReader(Stream stream)
     {
         _stream = stream;
+        _buffer = new byte[HeaderLength];
+        _skipBuffer = new byte[512];
+    }
+
+    private TdsPacketReader(Stream stream, int receiveBufferSize)
+    {
+        _stream = stream;
+        _buffered = true;
+        _buffer = ArrayPool<byte>.Shared.Rent(receiveBufferSize);
+        _skipBuffer = [];
     }
 
     internal bool EndOfMessage =>
@@ -26,7 +58,20 @@ internal sealed class TdsPacketReader
       _packetPayloadRemaining == 0 &&
       _packetEndsMessage;
 
-    internal async ValueTask<byte> BeginMessageAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Creates a reader that receives into a pooled buffer and may read past the current message.
+    /// Use it only once nothing else reads the stream (after PRELOGIN and the TLS switch), and call
+    /// <see cref="Release"/> when the stream is closed.
+    /// </summary>
+    internal static TdsPacketReader CreateBuffered(
+        Stream stream,
+        int receiveBufferSize = DefaultReceiveBufferSize)
+    {
+        ArgumentOutOfRangeException.ThrowIfLessThan(receiveBufferSize, 512);
+        return new TdsPacketReader(stream, receiveBufferSize);
+    }
+
+    internal ValueTask<byte> BeginMessageAsync(CancellationToken cancellationToken)
     {
         if (_messageActive && !EndOfMessage)
         {
@@ -35,16 +80,162 @@ internal sealed class TdsPacketReader
         }
 
         _messageActive = false;
-        await ReadPacketHeaderAsync(expectedType: null, cancellationToken).ConfigureAwait(false);
+        if (TryReadPacketHeader(expectedType: null))
+        {
+            _messageActive = true;
+            return new ValueTask<byte>(_messageType);
+        }
+
+        return BeginMessageSlowAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Reads a whole message. A buffered reader returns memory it owns, which stays valid only
+    /// until the next read; an exact reader returns a new array.
+    /// </summary>
+    internal async ValueTask<TdsMessage> ReadMessageAsync(CancellationToken cancellationToken)
+    {
+        if (_messageBuffer.Length > MaximumRetainedMessageBufferLength)
+        {
+            _messageBuffer = [];
+        }
+
+        var type = await BeginMessageAsync(cancellationToken).ConfigureAwait(false);
+        if (!_buffered)
+        {
+            return new TdsMessage(
+              type,
+              await ReadOwnedPayloadAsync(cancellationToken).ConfigureAwait(false));
+        }
+
+        // Most responses fit one packet: hand out the received bytes without copying them.
+        if (_packetEndsMessage && _packetPayloadRemaining <= _buffer.Length)
+        {
+            var length = _packetPayloadRemaining;
+            if (_end - _start < length)
+            {
+                await FillAsync(length, cancellationToken).ConfigureAwait(false);
+            }
+
+            var payload = _buffer.AsMemory(_start, length);
+            AdvancePayload(length);
+            return new TdsMessage(type, payload);
+        }
+
+        var written = 0;
+        while (true)
+        {
+            await EnsurePayloadAsync(cancellationToken).ConfigureAwait(false);
+            if (EndOfMessage)
+            {
+                break;
+            }
+
+            var length = _packetPayloadRemaining;
+            EnsureMessageCapacity(checked(written + length), written);
+            await ReadPayloadExactlyAsync(
+              _messageBuffer.AsMemory(written, length),
+              cancellationToken).ConfigureAwait(false);
+            written += length;
+        }
+
+        return new TdsMessage(type, _messageBuffer.AsMemory(0, written));
+    }
+
+    /// <summary>
+    /// Returns the payload bytes of the current packet that are already received. The span is
+    /// valid until the next asynchronous read on this reader.
+    /// </summary>
+    internal ReadOnlySpan<byte> GetBufferedPayload()
+    {
+        while (_packetPayloadRemaining == 0 &&
+               _messageActive &&
+               !_packetEndsMessage &&
+               TryReadPacketHeader(_messageType))
+        {
+        }
+
+        return _buffer.AsSpan(_start, Math.Min(_end - _start, _packetPayloadRemaining));
+    }
+
+    /// <summary>Consumes bytes returned by <see cref="GetBufferedPayload"/>.</summary>
+    internal void AdvancePayload(int count)
+    {
+        if ((uint)count > (uint)Math.Min(_end - _start, _packetPayloadRemaining))
+        {
+            throw new ArgumentOutOfRangeException(nameof(count));
+        }
+
+        _start += count;
+        _packetPayloadRemaining -= count;
+    }
+
+    internal bool TryReadPayload(int length, out ReadOnlySpan<byte> value)
+    {
+        var buffered = GetBufferedPayload();
+        if ((uint)length > (uint)buffered.Length)
+        {
+            value = default;
+            return false;
+        }
+
+        value = buffered[..length];
+        _start += length;
+        _packetPayloadRemaining -= length;
+        return true;
+    }
+
+    internal ValueTask ReadPayloadExactlyAsync(
+        Memory<byte> destination,
+        CancellationToken cancellationToken)
+    {
+        if (TryReadPayload(destination.Length, out var value))
+        {
+            value.CopyTo(destination.Span);
+            return ValueTask.CompletedTask;
+        }
+
+        return ReadPayloadExactlySlowAsync(destination, cancellationToken);
+    }
+
+    internal ValueTask SkipPayloadAsync(
+        int length,
+        CancellationToken cancellationToken)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        if (TryReadPayload(length, out _))
+        {
+            return ValueTask.CompletedTask;
+        }
+
+        return SkipPayloadSlowAsync(length, cancellationToken);
+    }
+
+    /// <summary>
+    /// Returns the pooled receive buffer once no receive can still write into it. Call it after the
+    /// stream is closed; a receive that is still pending returns the buffer when it completes.
+    /// </summary>
+    internal void Release()
+    {
+        if (Interlocked.Exchange(ref _state, Released) == Idle)
+        {
+            ReturnBuffer();
+        }
+    }
+
+    private async ValueTask<byte> BeginMessageSlowAsync(CancellationToken cancellationToken)
+    {
+        await FillAsync(HeaderLength, cancellationToken).ConfigureAwait(false);
+        _ = TryReadPacketHeader(expectedType: null);
         _messageActive = true;
         return _messageType;
     }
 
-    internal async ValueTask<TdsMessage> ReadMessageAsync(CancellationToken cancellationToken)
+    private async ValueTask<ReadOnlyMemory<byte>> ReadOwnedPayloadAsync(
+        CancellationToken cancellationToken)
     {
-        var type = await BeginMessageAsync(cancellationToken).ConfigureAwait(false);
         ArrayBufferWriter<byte> payload = new();
-        while (!EndOfMessage)
+        while (true)
         {
             await EnsurePayloadAsync(cancellationToken).ConfigureAwait(false);
             if (EndOfMessage)
@@ -53,16 +244,16 @@ internal sealed class TdsPacketReader
             }
 
             var payloadLength = _packetPayloadRemaining;
-            var destination = payload.GetMemory(payloadLength)[..payloadLength];
-            await _stream.ReadExactlyAsync(destination, cancellationToken).ConfigureAwait(false);
-            _packetPayloadRemaining = 0;
+            await ReadPayloadExactlyAsync(
+              payload.GetMemory(payloadLength)[..payloadLength],
+              cancellationToken).ConfigureAwait(false);
             payload.Advance(payloadLength);
         }
 
-        return new TdsMessage(type, payload.WrittenMemory);
+        return payload.WrittenMemory;
     }
 
-    internal async ValueTask ReadPayloadExactlyAsync(
+    private async ValueTask ReadPayloadExactlySlowAsync(
         Memory<byte> destination,
         CancellationToken cancellationToken)
     {
@@ -74,50 +265,111 @@ internal sealed class TdsPacketReader
                 throw new InvalidDataException("TDS token stream is truncated at END_OF_MESSAGE.");
             }
 
-            var count = Math.Min(destination.Length, _packetPayloadRemaining);
-            await _stream.ReadExactlyAsync(destination[..count], cancellationToken)
-              .ConfigureAwait(false);
-            _packetPayloadRemaining -= count;
-            destination = destination[count..];
+            var buffered = Math.Min(_end - _start, _packetPayloadRemaining);
+            if (buffered == 0)
+            {
+                if (!_buffered)
+                {
+                    // Exact mode reads straight into the destination, never past this packet.
+                    var count = Math.Min(destination.Length, _packetPayloadRemaining);
+                    await _stream.ReadExactlyAsync(destination[..count], cancellationToken)
+                      .ConfigureAwait(false);
+                    _packetPayloadRemaining -= count;
+                    destination = destination[count..];
+                    continue;
+                }
+
+                await FillAsync(1, cancellationToken).ConfigureAwait(false);
+                buffered = Math.Min(_end - _start, _packetPayloadRemaining);
+            }
+
+            var copied = Math.Min(buffered, destination.Length);
+            _buffer.AsSpan(_start, copied).CopyTo(destination.Span);
+            _start += copied;
+            _packetPayloadRemaining -= copied;
+            destination = destination[copied..];
         }
     }
 
-    internal async ValueTask SkipPayloadAsync(
+    private async ValueTask SkipPayloadSlowAsync(
         int length,
         CancellationToken cancellationToken)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        if (!_buffered)
+        {
+            while (length > 0)
+            {
+                var count = Math.Min(length, _skipBuffer.Length);
+                await ReadPayloadExactlyAsync(
+                  _skipBuffer.AsMemory(0, count),
+                  cancellationToken).ConfigureAwait(false);
+                length -= count;
+            }
+
+            return;
+        }
 
         while (length > 0)
         {
-            var count = Math.Min(length, _skipBuffer.Length);
-            await ReadPayloadExactlyAsync(
-              _skipBuffer.AsMemory(0, count),
-              cancellationToken).ConfigureAwait(false);
-            length -= count;
+            await EnsurePayloadAsync(cancellationToken).ConfigureAwait(false);
+            if (EndOfMessage)
+            {
+                throw new InvalidDataException("TDS token stream is truncated at END_OF_MESSAGE.");
+            }
+
+            var buffered = Math.Min(_end - _start, _packetPayloadRemaining);
+            if (buffered == 0)
+            {
+                await FillAsync(1, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            var skipped = Math.Min(buffered, length);
+            _start += skipped;
+            _packetPayloadRemaining -= skipped;
+            length -= skipped;
         }
     }
 
-    private async ValueTask EnsurePayloadAsync(CancellationToken cancellationToken)
+    private ValueTask EnsurePayloadAsync(CancellationToken cancellationToken)
     {
         while (_packetPayloadRemaining == 0 && !_packetEndsMessage)
         {
-            await ReadPacketHeaderAsync(_messageType, cancellationToken).ConfigureAwait(false);
+            if (!TryReadPacketHeader(_messageType))
+            {
+                return EnsurePayloadSlowAsync(cancellationToken);
+            }
+        }
+
+        return ValueTask.CompletedTask;
+    }
+
+    private async ValueTask EnsurePayloadSlowAsync(CancellationToken cancellationToken)
+    {
+        while (_packetPayloadRemaining == 0 && !_packetEndsMessage)
+        {
+            if (!TryReadPacketHeader(_messageType))
+            {
+                await FillAsync(HeaderLength, cancellationToken).ConfigureAwait(false);
+            }
         }
     }
 
-    private async ValueTask ReadPacketHeaderAsync(
-        byte? expectedType,
-        CancellationToken cancellationToken)
+    private bool TryReadPacketHeader(byte? expectedType)
     {
-        await _stream.ReadExactlyAsync(_header, cancellationToken).ConfigureAwait(false);
-        int packetLength = BinaryPrimitives.ReadUInt16BigEndian(_header.AsSpan(2));
+        if (_end - _start < HeaderLength)
+        {
+            return false;
+        }
+
+        var header = _buffer.AsSpan(_start, HeaderLength);
+        int packetLength = BinaryPrimitives.ReadUInt16BigEndian(header[2..]);
         if (packetLength < HeaderLength)
         {
             throw new InvalidDataException($"Invalid TDS packet length {packetLength}.");
         }
 
-        var type = _header[0];
+        var type = header[0];
         if (expectedType is not null && expectedType != type)
         {
             throw new InvalidDataException(
@@ -126,7 +378,80 @@ internal sealed class TdsPacketReader
 
         _messageType = type;
         _packetPayloadRemaining = packetLength - HeaderLength;
-        _packetEndsMessage = (_header[1] & 0x01) != 0;
+        _packetEndsMessage = (header[1] & 0x01) != 0;
+        _start += HeaderLength;
+        return true;
+    }
+
+    /// <summary>
+    /// Receives until at least <paramref name="minimumAvailable"/> unread bytes are buffered. A
+    /// buffered reader reads as much as the stream returns; an exact reader never reads more than
+    /// it was asked for.
+    /// </summary>
+    private async ValueTask FillAsync(int minimumAvailable, CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(
+          Interlocked.CompareExchange(ref _state, Filling, Idle) != Idle,
+          this);
+
+        try
+        {
+            var buffer = _buffer;
+            var available = _end - _start;
+            if (available > 0 && _start > 0)
+            {
+                buffer.AsSpan(_start, available).CopyTo(buffer);
+            }
+
+            _start = 0;
+            _end = available;
+            while (_end < minimumAvailable)
+            {
+                var target = _buffered
+                  ? buffer.AsMemory(_end)
+                  : buffer.AsMemory(_end, minimumAvailable - _end);
+                var read = await _stream.ReadAsync(target, cancellationToken)
+                  .ConfigureAwait(false);
+                if (read == 0)
+                {
+                    throw new EndOfStreamException(
+                      "SQL Server closed the connection in the middle of a TDS packet.");
+                }
+
+                _end += read;
+            }
+        }
+        finally
+        {
+            if (Interlocked.CompareExchange(ref _state, Idle, Filling) == Released)
+            {
+                ReturnBuffer();
+            }
+        }
+    }
+
+    private void EnsureMessageCapacity(int required, int written)
+    {
+        if (required <= _messageBuffer.Length)
+        {
+            return;
+        }
+
+        var grown = new byte[Math.Max(required, Math.Max(4096, _messageBuffer.Length * 2))];
+        _messageBuffer.AsSpan(0, written).CopyTo(grown);
+        _messageBuffer = grown;
+    }
+
+    private void ReturnBuffer()
+    {
+        var buffer = _buffer;
+        _buffer = [];
+        _start = 0;
+        _end = 0;
+        if (_buffered && buffer.Length > 0)
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 }
 

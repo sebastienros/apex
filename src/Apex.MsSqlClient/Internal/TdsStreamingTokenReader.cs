@@ -4,6 +4,7 @@ namespace Apex.MsSqlClient.Internal;
 
 internal sealed class TdsStreamingTokenReader
 {
+    private const int DoneTokenLength = 12;
     private readonly TdsPacketReader _reader;
     private readonly CancellationToken _cancellationToken;
     private readonly byte[] _primitive = new byte[8];
@@ -43,7 +44,28 @@ internal sealed class TdsStreamingTokenReader
         return columns;
     }
 
-    internal async ValueTask ReadRowAsync(
+    internal ValueTask ReadRowAsync(
+        IReadOnlyList<TdsColumn> columns,
+        bool nullCompressed,
+        TdsRowBuffer row)
+    {
+        // Rows that are already received in the current packet decode synchronously; rows that
+        // cross a buffer or packet boundary take the incremental path.
+        if (TdsRowCodec.TryReadRow(
+              _reader.GetBufferedPayload(),
+              columns,
+              nullCompressed,
+              row,
+              out var consumed))
+        {
+            _reader.AdvancePayload(consumed);
+            return ValueTask.CompletedTask;
+        }
+
+        return ReadRowSlowAsync(columns, nullCompressed, row);
+    }
+
+    private async ValueTask ReadRowSlowAsync(
         IReadOnlyList<TdsColumn> columns,
         bool nullCompressed,
         TdsRowBuffer row)
@@ -71,7 +93,20 @@ internal sealed class TdsStreamingTokenReader
         }
     }
 
-    internal async ValueTask<TdsDoneToken> ReadDoneAsync()
+    internal ValueTask<TdsDoneToken> ReadDoneAsync()
+    {
+        if (_reader.TryReadPayload(DoneTokenLength, out var done))
+        {
+            return new ValueTask<TdsDoneToken>(new TdsDoneToken(
+              (TdsDoneStatus)BinaryPrimitives.ReadUInt16LittleEndian(done),
+              BinaryPrimitives.ReadUInt16LittleEndian(done[2..]),
+              BinaryPrimitives.ReadInt64LittleEndian(done[4..])));
+        }
+
+        return ReadDoneSlowAsync();
+    }
+
+    private async ValueTask<TdsDoneToken> ReadDoneSlowAsync()
     {
         TdsDoneStatus status =
           (TdsDoneStatus)await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
@@ -83,55 +118,24 @@ internal sealed class TdsStreamingTokenReader
     internal async ValueTask<MsSqlInfo> ReadMessageAsync()
     {
         int length = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-        var body = await ReadBytesAsync(length).ConfigureAwait(false);
-        TdsPayloadReader reader = new(body);
-        var number = reader.ReadInt32LittleEndian();
-        var state = reader.ReadByte();
-        var severity = reader.ReadByte();
-        var message = reader.ReadUsVarChar();
-        var serverName = reader.ReadBVarChar();
-        var procedureName = reader.ReadBVarChar();
-        var lineNumber = reader.Remaining switch
+        if (_reader.TryReadPayload(length, out var buffered))
         {
-            >= 4 => reader.ReadInt32LittleEndian(),
-            2 => reader.ReadUInt16LittleEndian(),
-            _ => throw new InvalidDataException(
-              "SQL Server INFO/ERROR token omitted its line number."),
-        };
-        return new MsSqlInfo(
-          number,
-          state,
-          severity,
-          message,
-          serverName,
-          procedureName,
-          lineNumber);
+            return TdsTokenReader.ParseMessage(buffered);
+        }
+
+        return TdsTokenReader.ParseMessage(await ReadBytesAsync(length).ConfigureAwait(false));
     }
 
     internal async ValueTask<TdsEnvironmentChangeInfo> ReadEnvironmentChangeAsync()
     {
         int length = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-        var body = await ReadBytesAsync(length).ConfigureAwait(false);
-        TdsPayloadReader reader = new(body);
-        var type = reader.ReadByte();
-        return type switch
+        if (_reader.TryReadPayload(length, out var buffered))
         {
-            TdsEnvironmentChange.Database =>
-              new TdsEnvironmentChangeInfo(Database: reader.ReadBVarChar()),
-            TdsEnvironmentChange.PacketSize =>
-              new TdsEnvironmentChangeInfo(
-                PacketSize: ParsePacketSize(reader.ReadBVarChar())),
-            TdsEnvironmentChange.BeginTransaction or TdsEnvironmentChange.EnlistDtc =>
-              new TdsEnvironmentChangeInfo(
-                TransactionDescriptor: ReadTransactionDescriptor(ref reader)),
-            TdsEnvironmentChange.CommitTransaction or
-            TdsEnvironmentChange.RollbackTransaction or
-            TdsEnvironmentChange.DefectDtc =>
-              new TdsEnvironmentChangeInfo(TransactionDescriptor: 0),
-            TdsEnvironmentChange.Routing =>
-              new TdsEnvironmentChangeInfo(Routing: ReadRouting(ref reader)),
-            _ => default,
-        };
+            return TdsTokenReader.ParseEnvironmentChange(buffered);
+        }
+
+        return TdsTokenReader.ParseEnvironmentChange(
+          await ReadBytesAsync(length).ConfigureAwait(false));
     }
 
     internal async ValueTask SkipUShortLengthTokenAsync()
@@ -510,37 +514,67 @@ internal sealed class TdsStreamingTokenReader
         row.PatchInt32LittleEndian(lengthOffset, valueLength);
     }
 
-    private async ValueTask<byte> ReadByteAsync()
+    private ValueTask<byte> ReadByteAsync() =>
+      _reader.TryReadPayload(1, out var value)
+        ? new ValueTask<byte>(value[0])
+        : ReadByteSlowAsync();
+
+    private async ValueTask<byte> ReadByteSlowAsync()
     {
         await ReadExactlyAsync(_primitive.AsMemory(0, 1)).ConfigureAwait(false);
         return _primitive[0];
     }
 
-    private async ValueTask<ushort> ReadUInt16LittleEndianAsync()
+    private ValueTask<ushort> ReadUInt16LittleEndianAsync() =>
+      _reader.TryReadPayload(2, out var value)
+        ? new ValueTask<ushort>(BinaryPrimitives.ReadUInt16LittleEndian(value))
+        : ReadUInt16LittleEndianSlowAsync();
+
+    private async ValueTask<ushort> ReadUInt16LittleEndianSlowAsync()
     {
         await ReadExactlyAsync(_primitive.AsMemory(0, 2)).ConfigureAwait(false);
         return BinaryPrimitives.ReadUInt16LittleEndian(_primitive);
     }
 
-    private async ValueTask<int> ReadInt32LittleEndianAsync()
+    private ValueTask<int> ReadInt32LittleEndianAsync() =>
+      _reader.TryReadPayload(4, out var value)
+        ? new ValueTask<int>(BinaryPrimitives.ReadInt32LittleEndian(value))
+        : ReadInt32LittleEndianSlowAsync();
+
+    private async ValueTask<int> ReadInt32LittleEndianSlowAsync()
     {
         await ReadExactlyAsync(_primitive.AsMemory(0, 4)).ConfigureAwait(false);
         return BinaryPrimitives.ReadInt32LittleEndian(_primitive);
     }
 
-    private async ValueTask<uint> ReadUInt32LittleEndianAsync()
+    private ValueTask<uint> ReadUInt32LittleEndianAsync() =>
+      _reader.TryReadPayload(4, out var value)
+        ? new ValueTask<uint>(BinaryPrimitives.ReadUInt32LittleEndian(value))
+        : ReadUInt32LittleEndianSlowAsync();
+
+    private async ValueTask<uint> ReadUInt32LittleEndianSlowAsync()
     {
         await ReadExactlyAsync(_primitive.AsMemory(0, 4)).ConfigureAwait(false);
         return BinaryPrimitives.ReadUInt32LittleEndian(_primitive);
     }
 
-    private async ValueTask<long> ReadInt64LittleEndianAsync()
+    private ValueTask<long> ReadInt64LittleEndianAsync() =>
+      _reader.TryReadPayload(8, out var value)
+        ? new ValueTask<long>(BinaryPrimitives.ReadInt64LittleEndian(value))
+        : ReadInt64LittleEndianSlowAsync();
+
+    private async ValueTask<long> ReadInt64LittleEndianSlowAsync()
     {
         await ReadExactlyAsync(_primitive.AsMemory(0, 8)).ConfigureAwait(false);
         return BinaryPrimitives.ReadInt64LittleEndian(_primitive);
     }
 
-    private async ValueTask<ulong> ReadUInt64LittleEndianAsync()
+    private ValueTask<ulong> ReadUInt64LittleEndianAsync() =>
+      _reader.TryReadPayload(8, out var value)
+        ? new ValueTask<ulong>(BinaryPrimitives.ReadUInt64LittleEndian(value))
+        : ReadUInt64LittleEndianSlowAsync();
+
+    private async ValueTask<ulong> ReadUInt64LittleEndianSlowAsync()
     {
         await ReadExactlyAsync(_primitive.AsMemory(0, 8)).ConfigureAwait(false);
         return BinaryPrimitives.ReadUInt64LittleEndian(_primitive);
@@ -560,6 +594,11 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<string> ReadUtf16Async(int characterCount)
     {
+        if (_reader.TryReadPayload(checked(characterCount * sizeof(char)), out var buffered))
+        {
+            return TdsCollationCodec.GetEncoding(1200).GetString(buffered);
+        }
+
         var value = await ReadBytesAsync(
           checked(characterCount * sizeof(char))).ConfigureAwait(false);
         return TdsCollationCodec.Decode(value, 1200);
@@ -582,54 +621,4 @@ internal sealed class TdsStreamingTokenReader
 
     private ValueTask SkipAsync(int length) =>
       _reader.SkipPayloadAsync(length, _cancellationToken);
-
-    private static int ParsePacketSize(string value) =>
-      int.TryParse(
-        value,
-        System.Globalization.NumberStyles.None,
-        System.Globalization.CultureInfo.InvariantCulture,
-        out var packetSize) &&
-      packetSize is >= 512 and <= 32767
-        ? packetSize
-        : throw new InvalidDataException(
-          $"SQL Server sent invalid packet size '{value}'.");
-
-    private static long ReadTransactionDescriptor(ref TdsPayloadReader reader)
-    {
-        int length = reader.ReadByte();
-        if (length != sizeof(long))
-        {
-            throw new InvalidDataException(
-              $"SQL Server transaction descriptor has length {length}; expected 8.");
-        }
-
-        return reader.ReadInt64LittleEndian();
-    }
-
-    private static MsSqlRoutingInfo ReadRouting(ref TdsPayloadReader reader)
-    {
-        int length = reader.ReadUInt16LittleEndian();
-        var start = reader.Position;
-        if (length < 5)
-        {
-            throw new InvalidDataException("SQL Server routing data is too short.");
-        }
-
-        var protocol = reader.ReadByte();
-        if (protocol != 0)
-        {
-            throw new NotSupportedException(
-              $"SQL Server routing protocol {protocol} is not TCP/IP.");
-        }
-
-        int port = reader.ReadUInt16LittleEndian();
-        if (port == 0)
-        {
-            throw new InvalidDataException("SQL Server routing port cannot be zero.");
-        }
-
-        var host = reader.ReadUsVarChar();
-        reader.Position = checked(start + length);
-        return new MsSqlRoutingInfo(host, port);
-    }
 }

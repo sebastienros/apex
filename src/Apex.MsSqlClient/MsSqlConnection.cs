@@ -50,7 +50,9 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         _fedAuth = fedAuth;
         _socket = socket;
         _stream = stream;
-        _reader = new TdsPacketReader(stream);
+        // The connection is created after PRELOGIN and any TLS switch, so the reader may buffer
+        // past the current message.
+        _reader = TdsPacketReader.CreateBuffered(stream);
         _writer = new TdsPacketWriter(stream, options.PacketSize);
         _rowDecoder = new MsSqlRowDecoder(
           options.StringCacheCapacity,
@@ -372,6 +374,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
             finally
             {
                 _socket.Dispose();
+                _reader.Release();
             }
         }
     }
