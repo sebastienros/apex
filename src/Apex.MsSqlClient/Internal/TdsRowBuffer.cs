@@ -21,6 +21,31 @@ internal sealed class TdsRowBuffer : IBufferWriter<byte>
 
     internal void Clear() => _length = 0;
 
+    /// <summary>Appends a null field: a length of -1 and no value.</summary>
+    internal void WriteNull()
+    {
+        EnsureCapacity(sizeof(int));
+        BinaryPrimitives.WriteInt32LittleEndian(_buffer.AsSpan(_length), -1);
+        _length += sizeof(int);
+    }
+
+    /// <summary>Appends a field: its 4-byte length, then the value.</summary>
+    internal void WriteValue(ReadOnlySpan<byte> value)
+    {
+        EnsureCapacity(sizeof(int) + value.Length);
+        BinaryPrimitives.WriteInt32LittleEndian(_buffer.AsSpan(_length), value.Length);
+        value.CopyTo(_buffer.AsSpan(_length + sizeof(int)));
+        _length += sizeof(int) + value.Length;
+    }
+
+    /// <summary>Appends raw bytes.</summary>
+    internal void Write(ReadOnlySpan<byte> value)
+    {
+        EnsureCapacity(value.Length);
+        value.CopyTo(_buffer.AsSpan(_length));
+        _length += value.Length;
+    }
+
     internal void PatchInt32LittleEndian(int offset, int value)
     {
         if ((uint)offset > (uint)(_length - sizeof(int)))

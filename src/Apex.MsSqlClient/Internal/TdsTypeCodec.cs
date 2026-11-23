@@ -110,33 +110,7 @@ internal static class TdsTypeCodec
         return columns;
     }
 
-    internal static int FixedLength(byte type) =>
-      type switch
-      {
-          TdsDataType.Null => 0,
-          TdsDataType.Int1 or TdsDataType.Bit => 1,
-          TdsDataType.Int2 => 2,
-          TdsDataType.Int4 or
-        TdsDataType.DateTime4 or
-        TdsDataType.Float4 or
-        TdsDataType.Money4 => 4,
-          TdsDataType.Money or
-        TdsDataType.DateTime or
-        TdsDataType.Float8 or
-        TdsDataType.Int8 => 8,
-          _ => -1,
-      };
-
-    internal static bool UsesPlp(TdsTypeInfo typeInfo) =>
-      typeInfo.MaximumLength == ushort.MaxValue &&
-      typeInfo.Type is
-        TdsDataType.BigVarBinary or
-        TdsDataType.BigBinary or
-        TdsDataType.BigVarChar or
-        TdsDataType.BigChar or
-        TdsDataType.NVarChar or
-        TdsDataType.NChar or
-        TdsDataType.Json;
+    internal static int FixedLength(byte type) => TdsFieldLayout.FixedLengthOf(type);
 
     private static TdsTypeInfo ReadScaled(
         byte type,
@@ -220,4 +194,8 @@ internal static class TdsTypeCodec
     }
 }
 
-internal readonly record struct TdsColumn(SqlColumn Column, TdsTypeInfo TypeInfo);
+internal readonly record struct TdsColumn(SqlColumn Column, TdsTypeInfo TypeInfo)
+{
+    /// <summary>The wire layout of this column's values, resolved once from its type.</summary>
+    internal TdsFieldLayout Layout { get; } = TdsFieldLayout.For(TypeInfo);
+}

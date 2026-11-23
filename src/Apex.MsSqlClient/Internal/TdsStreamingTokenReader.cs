@@ -89,7 +89,13 @@ internal sealed class TdsStreamingTokenReader
             var isNull =
               nullCompressed &&
               (_nullBitmap[i >> 3] & (1 << (i & 7))) != 0;
-            await WriteFieldAsync(row, columns[i].TypeInfo, isNull).ConfigureAwait(false);
+            if (isNull)
+            {
+                row.WriteNull();
+                continue;
+            }
+
+            await WriteFieldAsync(row, columns[i].Layout).ConfigureAwait(false);
         }
     }
 
@@ -187,7 +193,7 @@ internal sealed class TdsStreamingTokenReader
         var flags = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
         var typeInfo = await ReadTypeInfoAsync().ConfigureAwait(false);
         _discarded.Clear();
-        await WriteFieldAsync(_discarded, typeInfo, isNull: false).ConfigureAwait(false);
+        await WriteFieldAsync(_discarded, TdsFieldLayout.For(typeInfo)).ConfigureAwait(false);
         return TdsReturnValue.Create(
           ordinal,
           name,
@@ -359,110 +365,63 @@ internal sealed class TdsStreamingTokenReader
         return new TdsTypeInfo(type, maximumLength, Collation: collation);
     }
 
-    private async ValueTask WriteFieldAsync(
-        TdsRowBuffer row,
-        TdsTypeInfo typeInfo,
-        bool isNull)
+    /// <summary>
+    /// Appends one field, reading across packets. This is the incremental counterpart of
+    /// <see cref="TdsRowCodec.TryReadRow"/> and must accept the same layouts.
+    /// </summary>
+    private async ValueTask WriteFieldAsync(TdsRowBuffer row, TdsFieldLayout layout)
     {
-        if (isNull || typeInfo.Type == TdsDataType.Null)
+        int length;
+        switch (layout.Kind)
         {
-            row.WriteInt32LittleEndian(-1);
-            return;
-        }
-
-        var fixedLength = TdsTypeCodec.FixedLength(typeInfo.Type);
-        if (fixedLength >= 0)
-        {
-            await WriteRawValueAsync(row, fixedLength).ConfigureAwait(false);
-            return;
-        }
-
-        switch (typeInfo.Type)
-        {
-            case TdsDataType.Guid:
-            case TdsDataType.IntN:
-            case TdsDataType.BitN:
-            case TdsDataType.Decimal:
-            case TdsDataType.Numeric:
-            case TdsDataType.DecimalN:
-            case TdsDataType.NumericN:
-            case TdsDataType.FloatN:
-            case TdsDataType.MoneyN:
-            case TdsDataType.DateTimeN:
-            case TdsDataType.Date:
-            case TdsDataType.Time:
-            case TdsDataType.DateTime2:
-            case TdsDataType.DateTimeOffset:
-                int byteLength = await ReadByteAsync().ConfigureAwait(false);
-                if (byteLength == 0)
+            case TdsFieldKind.Fixed:
+                length = layout.FixedLength;
+                break;
+            case TdsFieldKind.ByteLength:
+                length = await ReadByteAsync().ConfigureAwait(false);
+                if (length == 0)
                 {
-                    row.WriteInt32LittleEndian(-1);
-                }
-                else
-                {
-                    await WriteRawValueAsync(row, byteLength).ConfigureAwait(false);
-                }
-
-                return;
-
-            case TdsDataType.Binary:
-            case TdsDataType.VarBinary:
-            case TdsDataType.BigBinary:
-            case TdsDataType.BigVarBinary:
-            case TdsDataType.Char:
-            case TdsDataType.VarChar:
-            case TdsDataType.BigChar:
-            case TdsDataType.BigVarChar:
-            case TdsDataType.NVarChar:
-            case TdsDataType.NChar:
-                if (TdsTypeCodec.UsesPlp(typeInfo))
-                {
-                    await WritePlpAsync(row).ConfigureAwait(false);
+                    row.WriteNull();
                     return;
                 }
 
-                int length = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
+                break;
+            case TdsFieldKind.UShortLength:
+                length = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
                 if (length == ushort.MaxValue)
                 {
-                    row.WriteInt32LittleEndian(-1);
-                }
-                else
-                {
-                    await WriteRawValueAsync(row, length).ConfigureAwait(false);
+                    row.WriteNull();
+                    return;
                 }
 
+                break;
+            case TdsFieldKind.Plp:
+                await WritePlpAsync(row).ConfigureAwait(false);
                 return;
-
-            case TdsDataType.Text:
-            case TdsDataType.NText:
-            case TdsDataType.Image:
+            case TdsFieldKind.TextPointer:
                 int pointerLength = await ReadByteAsync().ConfigureAwait(false);
                 if (pointerLength == 0)
                 {
-                    row.WriteInt32LittleEndian(-1);
+                    row.WriteNull();
                     return;
                 }
 
                 await SkipAsync(pointerLength + 8).ConfigureAwait(false);
-                var dataLength = await ReadInt32LittleEndianAsync().ConfigureAwait(false);
-                if (dataLength < 0)
+                length = await ReadInt32LittleEndianAsync().ConfigureAwait(false);
+                if (length < 0)
                 {
-                    throw new InvalidDataException("SQL Server LOB value has a negative length.");
+                    throw TdsRowCodec.NegativeLobLength();
                 }
 
-                await WriteRawValueAsync(row, dataLength).ConfigureAwait(false);
+                break;
+            case TdsFieldKind.Null:
+                row.WriteNull();
                 return;
-
-            case TdsDataType.Xml:
-            case TdsDataType.Json:
-            case TdsDataType.Udt:
-                await WritePlpAsync(row).ConfigureAwait(false);
-                return;
-
             default:
-                throw new NotSupportedException(
-                  $"Cannot decode SQL Server row type 0x{typeInfo.Type:X2}.");
+                throw layout.Unsupported();
         }
+
+        await WriteRawValueAsync(row, length).ConfigureAwait(false);
     }
 
     private async ValueTask WriteRawValueAsync(TdsRowBuffer row, int length)
@@ -478,7 +437,7 @@ internal sealed class TdsStreamingTokenReader
         var totalLength = await ReadUInt64LittleEndianAsync().ConfigureAwait(false);
         if (totalLength == ulong.MaxValue)
         {
-            row.WriteInt32LittleEndian(-1);
+            row.WriteNull();
             return;
         }
 
@@ -504,14 +463,7 @@ internal sealed class TdsStreamingTokenReader
             row.Advance(length);
         }
 
-        var valueLength = checked(row.WrittenCount - valueOffset);
-        if (totalLength != 0xFFFF_FFFF_FFFF_FFFE && totalLength != (ulong)valueLength)
-        {
-            throw new InvalidDataException(
-              $"SQL Server PLP value declared {totalLength} bytes but contained {valueLength}.");
-        }
-
-        row.PatchInt32LittleEndian(lengthOffset, valueLength);
+        TdsRowCodec.CompletePlp(row, lengthOffset, valueOffset, totalLength);
     }
 
     private ValueTask<byte> ReadByteAsync() =>
