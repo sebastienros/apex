@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using Apex.MsSqlClient.Internal;
 using Apex.SqlClient;
@@ -21,7 +22,7 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
     {
         _connection = connection;
         Sql = sql;
-        Operation = GetOperation(sql);
+        Operation = MsSqlConnection.GetOperation(sql);
     }
 
     public string Sql { get; }
@@ -195,29 +196,36 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
         }
     }
 
-    internal ReadOnlyMemory<byte> BuildRequest(
+    internal bool WriteRequest(
+        IBufferWriter<byte> payload,
         SqlParameters parameters,
-        long transactionDescriptor,
-        out bool preparesHandle)
+        long transactionDescriptor)
     {
         lock (_gate)
         {
             if (_handle > 0)
             {
-                preparesHandle = false;
                 // The handle is bound to the declarations it was prepared with (decimal scale,
                 // string/binary length class, type). Values that need different declarations
                 // run unprepared instead of being rounded, truncated, or overflowed. A different
                 // parameter count still goes to sp_execute so the server rejects it, because
                 // sp_executesql would silently accept unused parameters.
-                return parameters.Count != _handleParameterCount ||
-                    TdsRequestWriter.DefinitionsMatch(_handleDefinitions!, parameters)
-                  ? TdsRequestWriter.BuildExecute(_handle, parameters, transactionDescriptor)
-                  : TdsRequestWriter.BuildExecuteSql(Sql, parameters, transactionDescriptor);
+                if (parameters.Count != _handleParameterCount ||
+                    TdsRequestWriter.DefinitionsMatch(_handleDefinitions!, parameters))
+                {
+                    TdsRequestWriter.WriteExecute(payload, _handle, parameters, transactionDescriptor);
+                }
+                else
+                {
+                    TdsRequestWriter.WriteExecuteSql(payload, Sql, parameters, transactionDescriptor);
+                }
+
+                return false;
             }
 
             var definitions = TdsRequestWriter.BuildDefinitions(parameters);
-            var request = TdsRequestWriter.BuildPrepareExecute(
+            TdsRequestWriter.WritePrepareExecute(
+              payload,
               Sql,
               definitions,
               parameters,
@@ -225,8 +233,7 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
             _preparingDefinitions = definitions;
             _preparingParameterCount = parameters.Count;
             _preparing = true;
-            preparesHandle = true;
-            return request;
+            return true;
         }
     }
 
@@ -280,13 +287,6 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
                 _preparing = false;
             }
         }
-    }
-
-    private static string GetOperation(string sql)
-    {
-        var text = sql.AsSpan().TrimStart();
-        var separator = text.IndexOfAny(" \t\r\n");
-        return (separator < 0 ? text : text[..separator]).ToString().ToUpperInvariant();
     }
 
     private void ThrowIfDisposed()

@@ -91,10 +91,14 @@ internal static class TdsBufferWriterExtensions
         writer.Advance(5);
     }
 
-    internal static void WriteUtf16(this IBufferWriter<byte> writer, string value)
+    internal static void WriteUtf16(this IBufferWriter<byte> writer, string value) =>
+      writer.WriteUtf16(value.AsSpan());
+
+    // UTF-16 always encodes to two bytes per char (Encoding.Unicode replaces a lone surrogate
+    // with U+FFFD), so the size is known without a GetByteCount pass.
+    internal static void WriteUtf16(this IBufferWriter<byte> writer, ReadOnlySpan<char> value)
     {
-        var byteCount = Encoding.Unicode.GetByteCount(value);
-        var destination = writer.GetSpan(byteCount);
+        var destination = writer.GetSpan(checked(value.Length * 2));
         var written = Encoding.Unicode.GetBytes(value, destination);
         writer.Advance(written);
     }

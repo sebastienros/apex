@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections;
 using System.Globalization;
 using System.Net;
@@ -199,6 +200,140 @@ public sealed class TdsRequestWriterTests
         AssertRpcHeader(ref reader, TdsProcedureId.Unprepare);
         AssertIntParameter(ref reader, string.Empty, output: false, 0x01020304);
         Assert.AreEqual(0, reader.Remaining);
+    }
+
+    [TestMethod]
+    public void ExecuteSqlWritesTheSameDefinitionsAsBuildDefinitions()
+    {
+        SqlParameters[] cases =
+        [
+            SqlParameters.Empty,
+            SqlParameters.Create(1),
+            SqlParameters.Create(
+              10.5m,
+              0.0001m,
+              12m,
+              "short",
+              new string('x', 4001),
+              SqlValue.Null,
+              new byte[] { 1 },
+              true,
+              2L,
+              new DateOnly(2026, 1, 1),
+              Guid.Empty,
+              12.25),
+            // Enough parameters for the declaration to exceed the stack buffer.
+            SqlParameters.Create(Enumerable.Range(0, 40).Select(static i => (SqlValue)(i + 0.5m)).ToArray()),
+        ];
+
+        foreach (var parameters in cases)
+        {
+            var definitions = TdsRequestWriter.BuildDefinitions(parameters);
+            var payload = TdsRequestWriter.BuildExecuteSql("SELECT 1", parameters, 0);
+            TdsPayloadReader reader = new(payload.Span);
+            AssertAllHeaders(ref reader, 0);
+            AssertRpcHeader(ref reader, TdsProcedureId.ExecuteSql);
+            AssertNVarCharParameter(ref reader, string.Empty, "SELECT 1");
+            AssertNVarCharParameter(ref reader, string.Empty, definitions);
+            Assert.IsTrue(TdsRequestWriter.DefinitionsMatch(definitions, parameters));
+            if (parameters.Count > 0)
+            {
+                Assert.AreEqual("@P1", reader.ReadBVarChar());
+            }
+        }
+
+        Assert.AreEqual(
+          "@P1 numeric(38,1),@P2 numeric(38,4),@P3 numeric(38,0),@P4 nvarchar(4000)," +
+          "@P5 nvarchar(max),@P6 nvarchar(4000),@P7 varbinary(8000),@P8 bit,@P9 bigint," +
+          "@P10 date,@P11 uniqueidentifier,@P12 float",
+          TdsRequestWriter.BuildDefinitions(cases[2]));
+    }
+
+    [TestMethod]
+    public void LongDefinitionsUseNVarCharMax()
+    {
+        var parameters = SqlParameters.Create(
+          Enumerable.Range(0, 300).Select(static i => (SqlValue)$"value-{i}").ToArray());
+        var definitions = TdsRequestWriter.BuildDefinitions(parameters);
+        Assert.IsGreaterThan(4000, definitions.Length);
+
+        var payload = TdsRequestWriter.BuildExecuteSql("SELECT 1", parameters, 0);
+        TdsPayloadReader reader = new(payload.Span);
+        reader.Skip(22 + 6);
+        AssertNVarCharParameter(ref reader, string.Empty, "SELECT 1");
+        Assert.AreEqual(string.Empty, reader.ReadBVarChar());
+        Assert.AreEqual(0, reader.ReadByte());
+        Assert.AreEqual(TdsDataType.NVarChar, reader.ReadByte());
+        Assert.AreEqual(ushort.MaxValue, reader.ReadUInt16LittleEndian());
+        reader.Skip(5);
+        Assert.AreEqual(definitions.Length * 2L, reader.ReadInt64LittleEndian());
+        Assert.AreEqual(definitions.Length * 2, reader.ReadInt32LittleEndian());
+        Assert.AreEqual(
+          definitions,
+          Encoding.Unicode.GetString(reader.ReadSpan(definitions.Length * 2)));
+        Assert.AreEqual(0, reader.ReadInt32LittleEndian());
+        Assert.AreEqual("@P1", reader.ReadBVarChar());
+    }
+
+    [TestMethod]
+    public void StringLengthsAreTwoBytesPerCharIncludingLoneSurrogates()
+    {
+        var lone = "a\uD800b";
+        var payload = TdsRequestWriter.BuildExecute(1, SqlParameters.Create(lone), 0);
+        TdsPayloadReader reader = new(payload.Span);
+        reader.Skip(22 + 6);
+        AssertIntParameter(ref reader, string.Empty, output: true, 1);
+        Assert.AreEqual("@P1", reader.ReadBVarChar());
+        Assert.AreEqual(0, reader.ReadByte());
+        Assert.AreEqual(TdsDataType.NVarChar, reader.ReadByte());
+        Assert.AreEqual(8000, reader.ReadUInt16LittleEndian());
+        reader.Skip(5);
+        Assert.AreEqual(Encoding.Unicode.GetByteCount(lone), reader.ReadUInt16LittleEndian());
+        CollectionAssert.AreEqual(
+          Encoding.Unicode.GetBytes(lone),
+          reader.ReadSpan(lone.Length * 2).ToArray());
+        Assert.AreEqual(0, reader.Remaining);
+
+        Assert.AreEqual(
+          "@P1 nvarchar(4000),@P2 nvarchar(max)",
+          TdsRequestWriter.BuildDefinitions(SqlParameters.Create(
+            new string('\uD800', 4000),
+            new string('\uD800', 4001))));
+    }
+
+    [TestMethod]
+    public void ReusedBufferProducesTheSamePayload()
+    {
+        var parameters = SqlParameters.Create(42, "text", 1.25m, SqlValue.Null);
+        ArrayBufferWriter<byte> buffer = new();
+        TdsRequestWriter.WriteExecuteSql(
+          buffer,
+          new string('x', 5000),
+          SqlParameters.Create(new byte[9000]),
+          7);
+
+        buffer.ResetWrittenCount();
+        TdsRequestWriter.WriteExecuteSql(buffer, "SELECT @P1, @P2, @P3, @P4", parameters, 7);
+        CollectionAssert.AreEqual(
+          TdsRequestWriter.BuildExecuteSql("SELECT @P1, @P2, @P3, @P4", parameters, 7).ToArray(),
+          buffer.WrittenSpan.ToArray());
+
+        buffer.ResetWrittenCount();
+        TdsRequestWriter.WriteExecute(buffer, 3, parameters, 7);
+        CollectionAssert.AreEqual(
+          TdsRequestWriter.BuildExecute(3, parameters, 7).ToArray(),
+          buffer.WrittenSpan.ToArray());
+    }
+
+    [TestMethod]
+    public void OperationNamesForCommonVerbsAreNotAllocated()
+    {
+        Assert.AreSame(MsSqlConnection.GetOperation("select 1"), MsSqlConnection.GetOperation("SELECT 2"));
+        Assert.AreEqual("SELECT", MsSqlConnection.GetOperation("  select\n1"));
+        Assert.AreEqual("INSERT", MsSqlConnection.GetOperation("Insert INTO t VALUES (1)"));
+        Assert.AreEqual("EXEC", MsSqlConnection.GetOperation("exec sp_who"));
+        Assert.AreEqual("WAITFOR", MsSqlConnection.GetOperation("waitfor delay '00:00:01'"));
+        Assert.AreEqual("SELECT*FROM", MsSqlConnection.GetOperation("select*from t"));
     }
 
     private static void AssertAllHeaders(

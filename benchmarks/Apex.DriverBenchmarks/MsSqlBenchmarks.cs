@@ -29,9 +29,14 @@ public class MsSqlBenchmarks
     SELECT CAST(N'repeated-value' AS nvarchar(32)) FROM numbers OPTION (MAXRECURSION 100)
     """;
 
+    private const string MixedSql =
+      "SELECT CAST(@P1 AS int), CAST(@P2 AS nvarchar(32)), CAST(@P3 AS decimal(18,4)), @P4";
+
     private MsSqlConnection _apex = null!;
     private ISqlPreparedStatement _apexPrepared = null!;
     private ISqlPreparedStatement _apexBatch = null!;
+    private ISqlPreparedStatement _apexPreparedMixed = null!;
+    private SqlParameters _mixedParameters;
     private IReadOnlyList<SqlParameters> _apexBatchParameters = null!;
     private SqlConnection _microsoft = null!;
     private SqlCommand _microsoftSimple = null!;
@@ -56,6 +61,12 @@ public class MsSqlBenchmarks
           "INSERT INTO #apex_batch VALUES (0)");
         _apexBatch = await _apex.PrepareAsync(
           "UPDATE #apex_batch SET value = @P1");
+        _apexPreparedMixed = await _apex.PrepareAsync(MixedSql);
+        _mixedParameters = SqlParameters.Create(
+          42,
+          "a short string value",
+          1234.5678m,
+          SqlValue.Null);
         _apexBatchParameters = Enumerable.Range(1, BatchDepth)
           .Select(static value => SqlParameters.Create(value))
           .ToArray();
@@ -92,6 +103,7 @@ public class MsSqlBenchmarks
     {
         await _apexPrepared.DisposeAsync();
         await _apexBatch.DisposeAsync();
+        await _apexPreparedMixed.DisposeAsync();
         await _apex.DisposeAsync();
         await _microsoftSimple.DisposeAsync();
         await _microsoftPrepared.DisposeAsync();
@@ -120,6 +132,14 @@ public class MsSqlBenchmarks
     [Benchmark]
     public async Task<int> ApexPreparedQueryAsync() =>
       (await _apexPrepared.QueryAsync(SqlParameters.Create(42)))[0].Get<int>(0);
+
+    [Benchmark]
+    public async Task<int> ApexPreparedMixedParametersAsync() =>
+      (await _apexPreparedMixed.QueryAsync(_mixedParameters))[0].Get<int>(0);
+
+    [Benchmark]
+    public async Task<int> ApexUnpreparedMixedParametersAsync() =>
+      (await _apex.QueryAsync(MixedSql, _mixedParameters))[0].Get<int>(0);
 
     [Benchmark]
     public async Task<int> MicrosoftSafeStream100RowsAsync() =>
