@@ -24,6 +24,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
     private readonly SqlConnectionReusePredicate<TConnection> _reusePredicate;
     private readonly TimeProvider _timeProvider;
     private readonly ITimer? _cleaner;
+    private readonly bool _tracksExpiration;
     private int _size;
     private int _waiters;
     private int _disposed;
@@ -43,6 +44,9 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         _connectionFactory = connectionFactory;
         _reusePredicate = reusePredicate;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _tracksExpiration =
+            options.IdleTimeout != Timeout.InfiniteTimeSpan ||
+            options.MaximumLifetime != Timeout.InfiniteTimeSpan;
         _slots = new SemaphoreSlim(options.MaximumSize, options.MaximumSize);
         if (options.CleanerPeriod > TimeSpan.Zero &&
             (options.IdleTimeout != Timeout.InfiniteTimeSpan ||
@@ -61,6 +65,14 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
     public async ValueTask<ISqlConnection> GetConnectionAsync(
         CancellationToken cancellationToken = default)
     {
+        var pooled = await RentAsync(cancellationToken).ConfigureAwait(false);
+        return new Lease(this, pooled);
+    }
+
+    // Takes a slot and a physical connection. The caller owns both until it passes the
+    // connection to ReturnAsync, which releases the slot.
+    private async ValueTask<PooledConnection> RentAsync(CancellationToken cancellationToken)
+    {
         ThrowIfDisposed();
         await AcquireSlotAsync(cancellationToken).ConfigureAwait(false);
 
@@ -70,9 +82,9 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             while (TryTakeIdle(out var candidate))
             {
                 var pooled = candidate!;
-                if (IsReusable(pooled))
+                if (IsReusable(pooled, GetExpirationNow()))
                 {
-                    return new Lease(this, pooled);
+                    return pooled;
                 }
 
                 await DisposeConnectionAsync(pooled.Connection).ConfigureAwait(false);
@@ -91,7 +103,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                 throw new ObjectDisposedException(GetType().Name);
             }
 
-            return new Lease(this, new PooledConnection(connection, _timeProvider.GetUtcNow()));
+            return new PooledConnection(connection, GetExpirationNow());
         }
         catch
         {
@@ -100,35 +112,74 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         }
     }
 
-    public ValueTask<SqlRowSet> QueryAsync(
+    // The one-shot operations use the physical connection directly, without a Lease, so
+    // they allocate no closure, lease or gate. The connection is returned exactly as a
+    // disposed lease would return it, including after a failure.
+    public async ValueTask<SqlRowSet> QueryAsync(
         string sql,
-        CancellationToken cancellationToken = default) =>
-        WithConnectionCoreAsync(
-            (connection, token) => connection.QueryAsync(sql, token),
-            cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var pooled = await RentAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await pooled.Connection.QueryAsync(sql, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await ReturnAsync(pooled).ConfigureAwait(false);
+        }
+    }
 
-    public ValueTask<SqlRowSet> QueryAsync(
+    public async ValueTask<SqlRowSet> QueryAsync(
         string sql,
         SqlParameters parameters,
-        CancellationToken cancellationToken = default) =>
-        WithConnectionCoreAsync(
-            (connection, token) => connection.QueryAsync(sql, parameters, token),
-            cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var pooled = await RentAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await pooled.Connection.QueryAsync(sql, parameters, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await ReturnAsync(pooled).ConfigureAwait(false);
+        }
+    }
 
-    public ValueTask<SqlCommandResult> ExecuteAsync(
+    public async ValueTask<SqlCommandResult> ExecuteAsync(
         string sql,
-        CancellationToken cancellationToken = default) =>
-        WithConnectionCoreAsync(
-            (connection, token) => connection.ExecuteAsync(sql, token),
-            cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var pooled = await RentAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await pooled.Connection.ExecuteAsync(sql, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await ReturnAsync(pooled).ConfigureAwait(false);
+        }
+    }
 
-    public ValueTask<SqlCommandResult> ExecuteAsync(
+    public async ValueTask<SqlCommandResult> ExecuteAsync(
         string sql,
         SqlParameters parameters,
-        CancellationToken cancellationToken = default) =>
-        WithConnectionCoreAsync(
-            (connection, token) => connection.ExecuteAsync(sql, parameters, token),
-            cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        var pooled = await RentAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await pooled.Connection.ExecuteAsync(sql, parameters, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await ReturnAsync(pooled).ConfigureAwait(false);
+        }
+    }
 
     public async IAsyncEnumerable<SqlRow> StreamAsync(
         string sql,
@@ -196,9 +247,10 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             }
 
             List<PooledConnection> reusable = new(_idle.Count);
+            var now = GetExpirationNow();
             while (_idle.TryPop(out var pooled))
             {
-                if (IsReusable(pooled))
+                if (IsReusable(pooled, now))
                 {
                     reusable.Add(pooled);
                 }
@@ -291,17 +343,6 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         }
     }
 
-    private async ValueTask<TResult> WithConnectionCoreAsync<TResult>(
-        Func<ISqlConnection, CancellationToken, ValueTask<TResult>> operation,
-        CancellationToken cancellationToken)
-    {
-        var connection = await GetConnectionAsync(cancellationToken).ConfigureAwait(false);
-        await using (connection.ConfigureAwait(false))
-        {
-            return await operation(connection, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
     private bool TryTakeIdle(out PooledConnection? pooled)
     {
         lock (_idleGate)
@@ -312,9 +353,10 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
 
     private async ValueTask ReturnAsync(PooledConnection pooled)
     {
-        pooled.LastUsed = _timeProvider.GetUtcNow();
+        var now = GetExpirationNow();
+        pooled.LastUsed = now;
         var returned = false;
-        if (_disposed == 0 && IsReusable(pooled))
+        if (_disposed == 0 && IsReusable(pooled, now))
         {
             lock (_idleGate)
             {
@@ -342,13 +384,16 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         }
     }
 
-    private bool IsReusable(PooledConnection pooled)
-    {
-        var now = _timeProvider.GetUtcNow();
-        return _reusePredicate(pooled.Connection) &&
-               !HasElapsed(_options.IdleTimeout, pooled.LastUsed, now) &&
-               !HasElapsed(_options.MaximumLifetime, pooled.Created, now);
-    }
+    // The clock is only read when an expiration is configured; otherwise timestamps are
+    // never compared and stay at their default.
+    private DateTimeOffset GetExpirationNow() =>
+        _tracksExpiration ? _timeProvider.GetUtcNow() : default;
+
+    private bool IsReusable(PooledConnection pooled, DateTimeOffset now) =>
+        _reusePredicate(pooled.Connection) &&
+        (!_tracksExpiration ||
+         (!HasElapsed(_options.IdleTimeout, pooled.LastUsed, now) &&
+          !HasElapsed(_options.MaximumLifetime, pooled.Created, now)));
 
     private async ValueTask DisposeConnectionAsync(TConnection connection)
     {
