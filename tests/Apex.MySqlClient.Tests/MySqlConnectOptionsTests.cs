@@ -97,7 +97,7 @@ public sealed class MySqlConnectOptionsTests
           "mysql://root@db/app?usefoundrows=true&application+name=Apex%20MySQL");
 
         Assert.IsFalse(options.UseAffectedRows);
-        Assert.AreEqual("Apex MySQL", options.ConnectionAttributes["application name"]);
+        Assert.AreEqual("Apex MySQL", options.ConnectionAttributes["program_name"]);
     }
 
     [TestMethod]
@@ -133,13 +133,37 @@ public sealed class MySqlConnectOptionsTests
     }
 
     [TestMethod]
-    public void UnknownKeysBecomeConnectionAttributes()
+    public void UnknownKeysAreRejectedWithoutEchoingTheirValue()
+    {
+        // A typo used to be sent to the server as a connection attribute, where any session can
+        // read it from performance_schema.session_connect_attrs.
+        var error = Assert.ThrowsExactly<FormatException>(
+          () => MySqlConnectOptions.Parse("Server=db;Passwd=hunter2"));
+        StringAssert.Contains(error.Message, "Passwd");
+        Assert.IsFalse(error.Message.Contains("hunter2", StringComparison.Ordinal));
+
+        Assert.ThrowsExactly<FormatException>(() => MySqlConnectOptions.Parse("Server=db;SslCa=/ca.pem"));
+        Assert.ThrowsExactly<FormatException>(
+          () => MySqlConnectOptions.Parse("mysql://root@db/app?sql_mode=STRICT_ALL_TABLES"));
+    }
+
+    [TestMethod]
+    public void ConnectionAttributesAreOnlyReadFromTheExplicitKey()
     {
         MySqlConnectOptions options = MySqlConnectOptions.Parse(
-          "Server=db;sql_mode=STRICT_ALL_TABLES;time_zone=+00:00");
+          "Server=db;ConnectionAttributes=team:payments, region : eu-west:1 ,flag:;Application Name=billing");
 
-        Assert.AreEqual("STRICT_ALL_TABLES", options.ConnectionAttributes["sql_mode"]);
-        Assert.AreEqual("+00:00", options.ConnectionAttributes["time_zone"]);
+        Assert.AreEqual("payments", options.ConnectionAttributes["team"]);
+        Assert.AreEqual("eu-west:1", options.ConnectionAttributes["region"]);
+        Assert.AreEqual(string.Empty, options.ConnectionAttributes["flag"]);
+        Assert.AreEqual("billing", options.ConnectionAttributes["program_name"]);
+        Assert.AreEqual("apex-mysql-client", options.ConnectionAttributes["_client_name"]);
+        Assert.HasCount(5, options.ConnectionAttributes);
+
+        Assert.ThrowsExactly<FormatException>(
+          () => MySqlConnectOptions.Parse("Server=db;ConnectionAttributes=:orphan"));
+        Assert.ThrowsExactly<FormatException>(
+          () => MySqlConnectOptions.Parse("Server=db;ConnectionAttributes=team=payments"));
     }
 
     [TestMethod]

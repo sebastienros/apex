@@ -188,12 +188,9 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
             yield break;
         }
 
-        var statement = await GetOrPrepareViaSchedulerAsync(sql, cancellationToken)
-          .ConfigureAwait(false);
         await foreach (var row in StreamPreparedRowsAsync(
-                         statement,
+                         sql,
                          parameters,
-                         ownsStatement: !statement.IsCached,
                          fetchSize,
                          cancellationToken).ConfigureAwait(false))
         {
@@ -283,6 +280,10 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
                   HandleCompletionPacket(packet.Span);
               }
 
+              // The server destroyed every prepared statement. Forget the cached ones before the
+              // barrier is released, so no later command can look one up and execute it.
+              ClearStatementCache();
+
               // COM_RESET_CONNECTION also resets session variables, so re-apply the configured
               // ones inside the same barrier before any other command runs.
               await ApplySessionVariablesAsync(CancellationToken.None).ConfigureAwait(false);
@@ -290,7 +291,6 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
           },
           barrier: true,
           cancellationToken).ConfigureAwait(false);
-        ClearStatementCache();
     }
 
     /// <inheritdoc />

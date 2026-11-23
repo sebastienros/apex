@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.ExceptionServices;
 using Apex.MySqlClient.Internal;
 using Apex.SqlClient;
 using Apex.SqlClient.Internal;
@@ -8,6 +9,8 @@ namespace Apex.MySqlClient;
 
 public sealed partial class MySqlConnection
 {
+    private static readonly Task<bool> s_notKilled = Task.FromResult(false);
+
     private async ValueTask<MySqlExecutionResult> ExecuteQueryCoreAsync(
         string sql,
         SqlParameters parameters,
@@ -312,22 +315,23 @@ public sealed partial class MySqlConnection
           cancellationToken).ConfigureAwait(false);
     }
 
-    internal async IAsyncEnumerable<SqlRow> StreamPreparedRowsAsync(
+    private IAsyncEnumerable<SqlRow> StreamPreparedRowsAsync(
+        string sql,
+        SqlParameters parameters,
+        int fetchSize,
+        CancellationToken cancellationToken) =>
+      StreamRowsAsync(CreatePreparedReader(sql, parameters, cancellationToken), fetchSize, cancellationToken);
+
+    internal IAsyncEnumerable<SqlRow> StreamPreparedRowsAsync(
         MySqlStatement statement,
         SqlParameters parameters,
         bool ownsStatement,
         int fetchSize,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        var reader =
-          CreatePreparedReader(statement, parameters, ownsStatement, cancellationToken);
-        await using var _ = reader.ConfigureAwait(false);
-        await foreach (var row in StreamRowsAsync(reader, fetchSize, cancellationToken)
-                         .ConfigureAwait(false))
-        {
-            yield return row;
-        }
-    }
+        CancellationToken cancellationToken) =>
+      StreamRowsAsync(
+        CreatePreparedReader(statement, parameters, ownsStatement, cancellationToken),
+        fetchSize,
+        cancellationToken);
 
     internal ValueTask<ISqlRowReader> ExecutePreparedReaderAsync(
         MySqlStatement statement,
@@ -379,21 +383,30 @@ public sealed partial class MySqlConnection
           preserveResultBoundaries: true));
     }
 
-    private async ValueTask<ISqlRowReader> ExecutePreparedReaderCoreAsync(
+    private ValueTask<ISqlRowReader> ExecutePreparedReaderCoreAsync(
         string sql,
         SqlParameters parameters,
         CancellationToken cancellationToken,
-        bool preserveResultBoundaries = false)
-    {
-        var statement = await GetOrPrepareViaSchedulerAsync(sql, cancellationToken)
-          .ConfigureAwait(false);
-        return CreatePreparedReader(
-          statement,
-          parameters,
-          ownsStatement: !statement.IsCached,
-          cancellationToken,
-          preserveResultBoundaries);
-    }
+        bool preserveResultBoundaries = false) =>
+      ValueTask.FromResult<ISqlRowReader>(CreatePreparedReader(
+        sql,
+        parameters,
+        cancellationToken,
+        preserveResultBoundaries));
+
+    /// <summary>
+    /// Creates a reader that resolves <paramref name="sql"/> to a prepared statement inside its
+    /// own scheduler barrier, so an earlier command cannot evict and close a cached statement
+    /// between the cache lookup and the execute.
+    /// </summary>
+    private MySqlRowReader CreatePreparedReader(
+        string sql,
+        SqlParameters parameters,
+        CancellationToken cancellationToken,
+        bool preserveResultBoundaries = false) =>
+      preserveResultBoundaries
+        ? new MySqlResultReader(this, writeCommand: null, binary: true, cancellationToken, preparedSql: sql, preparedParameters: parameters)
+        : new MySqlRowReader(this, writeCommand: null, binary: true, cancellationToken, preparedSql: sql, preparedParameters: parameters);
 
     private MySqlRowReader CreatePreparedReader(
         MySqlStatement statement,
@@ -419,25 +432,22 @@ public sealed partial class MySqlConnection
             : new MySqlRowReader(this, writeCommand, binary: false, cancellationToken);
     }
 
-    private async IAsyncEnumerable<SqlRow> StreamTextRowsAsync(
+    private IAsyncEnumerable<SqlRow> StreamTextRowsAsync(
         string sql,
         int fetchSize,
-        [EnumeratorCancellation] CancellationToken cancellationToken)
-    {
-        var reader = CreateTextReader(sql, cancellationToken);
-        await using var _ = reader.ConfigureAwait(false);
-        await foreach (var row in StreamRowsAsync(reader, fetchSize, cancellationToken)
-                         .ConfigureAwait(false))
-        {
-            yield return row;
-        }
-    }
+        CancellationToken cancellationToken) =>
+      StreamRowsAsync(CreateTextReader(sql, cancellationToken), fetchSize, cancellationToken);
 
+    /// <summary>
+    /// Streams the reader's rows in pages and disposes the reader when the enumeration ends.
+    /// Callers create the reader from inside their own iterator, so it is always enumerated.
+    /// </summary>
     private static async IAsyncEnumerable<SqlRow> StreamRowsAsync(
         MySqlRowReader reader,
         int fetchSize,
         [EnumeratorCancellation] CancellationToken cancellationToken)
     {
+        await using var _ = reader.ConfigureAwait(false);
         var pageCapacity = Math.Min(fetchSize, 256);
         var hasCurrent = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
         while (hasCurrent)
@@ -462,28 +472,6 @@ public sealed partial class MySqlConnection
                 yield return batch.CreateRow(i);
             }
         }
-    }
-
-    private async ValueTask<MySqlStatement> GetOrPrepareViaSchedulerAsync(
-        string sql,
-        CancellationToken cancellationToken)
-    {
-        if (_statementCache is null)
-        {
-            return await PrepareCoreAsync(sql, cancellationToken).ConfigureAwait(false);
-        }
-
-        MySqlStatement? existing;
-        lock (_statementCacheGate)
-        {
-            _statementCache.TryGet(sql, out existing);
-        }
-
-        return existing ?? await _scheduler.ExecuteAsync(
-          static _ => ValueTask.CompletedTask,
-          _ => GetOrPrepareAsync(sql),
-          barrier: true,
-          cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -544,7 +532,7 @@ public sealed partial class MySqlConnection
         _writer.WritePacket(0, _payload.WrittenSpan);
     }
 
-    private void WriteExecute(
+    internal void WriteExecute(
         MySqlStatement statement,
         SqlParameters parameters,
         MySqlCursorType cursorType)
@@ -593,6 +581,12 @@ public sealed partial class MySqlConnection
         }
     }
 
+    /// <summary>
+    /// Runs the receive phase of a command that may be cancelled while it runs on the server.
+    /// The caller must hold the scheduler barrier whenever the token can be cancelled: a
+    /// <c>KILL QUERY</c> issued for this command is always awaited before the barrier is
+    /// released, on every exit path, so it can never land on the next command instead.
+    /// </summary>
     private async ValueTask<T> ReceiveWithCancellationAsync<T>(
         Func<ValueTask<T>> receiveAsync,
         CancellationToken cancellationToken)
@@ -604,28 +598,95 @@ public sealed partial class MySqlConnection
 
         CancellationState state = new(this);
         var registration = cancellationToken.Register(state.Cancel);
+        T result = default!;
+        Exception? failure = null;
         try
         {
-            T result;
-            try
-            {
-                result = await receiveAsync().ConfigureAwait(false);
-            }
-            finally
-            {
-                await registration.DisposeAsync().ConfigureAwait(false);
-            }
-
-            await state.WaitAsync().ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            return result;
+            result = await receiveAsync().ConfigureAwait(false);
         }
-        catch (Exception exception) when (
-          cancellationToken.IsCancellationRequested &&
-          (exception is MySqlException { IsInterrupted: true } || IsFatalConnectionError(exception)))
+        catch (Exception exception)
         {
-            await state.WaitAsync().ConfigureAwait(false);
+            failure = exception;
+        }
+
+        // Disposing the registration waits for a running callback, so no KILL can start after
+        // this point; the one that may have started is awaited next.
+        await registration.DisposeAsync().ConfigureAwait(false);
+        await FinishKillAsync(state.Cancellation, failure).ConfigureAwait(false);
+        if (cancellationToken.IsCancellationRequested && IsCancellationOutcome(failure))
+        {
             throw new OperationCanceledException(cancellationToken);
+        }
+
+        if (failure is not null)
+        {
+            ExceptionDispatchInfo.Throw(failure);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Awaits the <c>KILL QUERY</c> started for a command, if any, and absorbs it when it found
+    /// nothing to interrupt. The caller must hold the scheduler barrier and must not start
+    /// another KILL for the same command afterwards.
+    /// </summary>
+    private async ValueTask FinishKillAsync(Task<bool>? kill, Exception? failure)
+    {
+        if (kill is not null && await kill.ConfigureAwait(false))
+        {
+            await AbsorbPendingKillAsync(failure).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Gets a value indicating whether a cancelled command that ended this way is reported as a
+    /// cancellation: it completed, was interrupted, or lost its connection. Any other server
+    /// error is reported as it is.
+    /// </summary>
+    private static bool IsCancellationOutcome(Exception? failure) =>
+      failure is null or OperationCanceledException or MySqlException { IsInterrupted: true } ||
+      IsFatalConnectionError(failure);
+
+    /// <summary>
+    /// Consumes a <c>KILL QUERY</c> that the server acknowledged but that did not interrupt the
+    /// command it targeted, because the command had already finished. The kill flag can then
+    /// still be pending on the session, and the server would interrupt the next statement with
+    /// error 1317. A <c>DO SLEEP(0)</c> sent inside the same barrier absorbs it, as MySqlConnector
+    /// does. The caller must hold the scheduler barrier.
+    /// </summary>
+    /// <param name="outcome">How the targeted command ended, <see langword="null"/> on success.</param>
+    private async ValueTask AbsorbPendingKillAsync(Exception? outcome)
+    {
+        if (outcome is MySqlException { ErrorNumber: 1317 } ||
+            (outcome is not null && IsFatalConnectionError(outcome)) ||
+            !IsUsable)
+        {
+            // The kill already interrupted the command, or the session is gone.
+            return;
+        }
+
+        var commandInfo = _lastCommandInfo;
+        var columns = _lastColumns;
+        try
+        {
+            _writer.WriteTextCommand(MySqlCommand.Query, "DO SLEEP(0)");
+            await _writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+            await ReadResultsAsync(binary: false, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (MySqlException exception) when (exception.ErrorNumber == 1317)
+        {
+        }
+        catch (Exception exception)
+        {
+            // The kill may still be pending, so keep the connection out of the pool. The caller
+            // reports the outcome of the command itself.
+            Invalidate(exception);
+        }
+        finally
+        {
+            _lastCommandInfo = commandInfo;
+            _lastColumns = columns;
         }
     }
 
@@ -634,28 +695,32 @@ public sealed partial class MySqlConnection
     /// command is either killed through a second connection or the physical connection is
     /// discarded, which keeps a desynchronized connection out of the pool.
     /// </summary>
-    private Task CancelRunningCommandAsync() =>
+    /// <returns>
+    /// <see langword="true"/> when the server acknowledged a <c>KILL QUERY</c>, so the caller
+    /// must absorb a kill that the command finished before. The connection may still have been
+    /// invalidated meanwhile, which <see cref="AbsorbPendingKillAsync"/> checks.
+    /// </returns>
+    private Task<bool> CancelRunningCommandAsync() =>
       _options.QueryCancellation switch
       {
-          MySqlQueryCancellation.Disabled => Task.CompletedTask,
+          MySqlQueryCancellation.Disabled => s_notKilled,
           MySqlQueryCancellation.CloseConnection => InvalidateForCancellation(),
           _ => KillRunningQueryAsync(),
       };
 
-    private Task InvalidateForCancellation()
+    private Task<bool> InvalidateForCancellation()
     {
         Invalidate(new MySqlConnectionAbortedException(
           "The MySQL connection was closed to cancel a running command."));
-        return Task.CompletedTask;
+        return s_notKilled;
     }
 
-    private async Task KillRunningQueryAsync()
+    private async Task<bool> KillRunningQueryAsync()
     {
         var connectionId = _connectionId;
         if (connectionId == 0)
         {
-            await InvalidateForCancellation().ConfigureAwait(false);
-            return;
+            return await InvalidateForCancellation().ConfigureAwait(false);
         }
 
         try
@@ -673,14 +738,13 @@ public sealed partial class MySqlConnection
             await admin.ExecuteAsync(
               $"KILL QUERY {connectionId.ToString(System.Globalization.CultureInfo.InvariantCulture)}",
               CancellationToken.None).ConfigureAwait(false);
+            return true;
         }
-        catch (Exception exception) when (
-          exception is SqlClientException or
-            TimeoutException or
-            OperationCanceledException ||
-          IsFatalConnectionError(exception))
+        catch (Exception)
         {
-            await InvalidateForCancellation().ConfigureAwait(false);
+            // Whatever went wrong, the server may or may not have received the KILL, so the
+            // session state is unknown and the connection must leave the pool.
+            return await InvalidateForCancellation().ConfigureAwait(false);
         }
     }
 
@@ -688,7 +752,7 @@ public sealed partial class MySqlConnection
     {
         private readonly MySqlConnection _connection;
         private readonly object _gate = new();
-        private Task? _cancellation;
+        private Task<bool>? _cancellation;
 
         internal CancellationState(MySqlConnection connection)
         {
@@ -698,17 +762,15 @@ public sealed partial class MySqlConnection
 
         internal Action Cancel { get; }
 
-        internal async ValueTask WaitAsync()
+        /// <summary>Gets the started cancellation, which reports whether it killed a query.</summary>
+        internal Task<bool>? Cancellation
         {
-            Task? cancellation;
-            lock (_gate)
+            get
             {
-                cancellation = _cancellation;
-            }
-
-            if (cancellation is not null)
-            {
-                await cancellation.ConfigureAwait(false);
+                lock (_gate)
+                {
+                    return _cancellation;
+                }
             }
         }
 

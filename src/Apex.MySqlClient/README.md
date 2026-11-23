@@ -28,6 +28,14 @@ SqlRowSet rows = await pool.QueryAsync(
     SqlParameters.Create(42));
 ```
 
+Unknown connection-string keys throw `FormatException`, which names the key but
+not its value. Earlier versions sent unknown keys to the server as connection
+attributes, so a typo such as `SslCa=` was silently ignored and a key such as
+`Passwd=` became readable in `performance_schema.session_connect_attrs`. To set
+attributes, use `ConnectionAttributes=team:payments,region:eu-west` (the
+Connector/J syntax), `Application Name=billing` for `program_name`, or the
+`ConnectionAttributes` option.
+
 ## Supported features
 
 - Text and binary query protocols, prepared statements, ordered batches,
@@ -71,8 +79,11 @@ On .NET 11 or later, set `UseExperimentalLowLevelTls=true` to opt into the
 `TlsBufferSession` transport. The default remains `SslStream`.
 
 Cancellation uses a short-lived authenticated connection to issue `KILL QUERY`.
-If cancellation cannot be delivered, the physical command connection is closed
-instead of being returned to a pool in an uncertain protocol state.
+The command connection runs nothing else until the server has acknowledged the
+`KILL`, so it cannot interrupt the next command. If the `KILL` found nothing to
+interrupt, the driver sends `DO SLEEP(0)` to absorb it. If cancellation cannot
+be delivered, the physical command connection is closed instead of being
+returned to a pool in an uncertain protocol state.
 
 `LOAD DATA LOCAL INFILE` is disabled by default. Enable it only for a trusted
 server because the server selects the requested local path.
