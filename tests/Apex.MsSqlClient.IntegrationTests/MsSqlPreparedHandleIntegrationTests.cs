@@ -179,12 +179,57 @@ public sealed class MsSqlPreparedHandleIntegrationTests
         }
     }
 
+    [TestMethod]
+    public async Task UseInsideReaderUpdatesDiagnosticsNamespace()
+    {
+        using var trace = new Activity("use-reader-namespace-probe").Start();
+        var traceId = trace.TraceId;
+        List<string?> namespaces = [];
+        using ActivityListener listener = new()
+        {
+            ShouldListenTo = static source => source.Name == "Apex.SqlClient",
+            Sample = static (ref ActivityCreationOptions<ActivityContext> _) =>
+              ActivitySamplingResult.AllDataAndRecorded,
+            ActivityStopped = activity =>
+            {
+                if (activity.TraceId != traceId)
+                {
+                    return;
+                }
+
+                lock (namespaces)
+                {
+                    namespaces.Add(activity.GetTagItem("db.namespace") as string);
+                }
+            },
+        };
+        ActivitySource.AddActivityListener(listener);
+
+        await using var connection =
+          await MsSqlClient.ConnectAsync(MsSqlTestEnvironment.Options);
+        await using (var reader =
+                     await connection.ExecuteReaderAsync("USE tempdb; SELECT DB_NAME()"))
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual("tempdb", reader.GetString(0));
+            Assert.IsFalse(await reader.ReadAsync());
+        }
+
+        _ = await connection.QueryAsync("SELECT 1");
+
+        lock (namespaces)
+        {
+            Assert.AreEqual("tempdb", namespaces[^1]);
+        }
+    }
+
     // Prepared handles are numbered per session, so probing low handle numbers with
     // sp_unprepare finds (and releases) any handle left on the session.
     private static async Task<int> CountLiveHandlesAsync(MsSqlConnection connection)
     {
         var live = 0;
-        for (var handle = 1; handle <= 64; handle++)
+        // Each test uses a fresh session and creates only a few handles.
+        for (var handle = 1; handle <= 16; handle++)
         {
             try
             {

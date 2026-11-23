@@ -401,7 +401,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
             messageType = TdsMessageType.Rpc;
         }
 
-        return _writer.WriteMessageAsync(messageType, payload.WrittenMemory, cancellationToken);
+        return SendRequestAsync(messageType, cancellationToken);
     }
 
     internal async ValueTask<bool> WritePreparedRequestAsync(
@@ -414,10 +414,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
           payload,
           parameters,
           Interlocked.Read(ref _transactionDescriptor));
-        await _writer.WriteMessageAsync(
-          TdsMessageType.Rpc,
-          payload.WrittenMemory,
-          cancellationToken).ConfigureAwait(false);
+        await SendRequestAsync(TdsMessageType.Rpc, cancellationToken).ConfigureAwait(false);
         return preparesHandle;
     }
 
@@ -492,10 +489,8 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
                 payload,
                 handle,
                 Interlocked.Read(ref _transactionDescriptor));
-                  await _writer.WriteMessageAsync(
-                TdsMessageType.Rpc,
-                payload.WrittenMemory,
-                CancellationToken.None).ConfigureAwait(false);
+                  await SendRequestAsync(TdsMessageType.Rpc, CancellationToken.None)
+                .ConfigureAwait(false);
                   sent = true;
               }
           },
@@ -1229,21 +1224,34 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         return keyword.ToString().ToUpperInvariant();
     }
 
-    // Request payloads are built into one buffer per connection. Every request is written from
-    // a scheduler send callback (all SQL Server commands are barriers), so only one request is
-    // built at a time, and WriteMessageAsync copies it into packets before returning.
+    // Request payloads are built into one buffer per connection. Every request is built and sent
+    // from a scheduler send callback, and the scheduler awaits each send to completion before
+    // starting the next one, so only one request uses the buffer at a time.
     private ArrayBufferWriter<byte> BeginRequest()
     {
-        if (_request.Capacity > MaximumRetainedRequestBytes)
-        {
-            _request = new ArrayBufferWriter<byte>(InitialRequestBytes);
-        }
-        else
-        {
-            _request.ResetWrittenCount();
-        }
-
+        _request.ResetWrittenCount();
         return _request;
+    }
+
+    private async ValueTask SendRequestAsync(
+        byte messageType,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _writer.WriteMessageAsync(
+              messageType,
+              _request.WrittenMemory,
+              cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Don't keep a buffer that grew for one large request alive while the connection idles.
+            if (_request.Capacity > MaximumRetainedRequestBytes)
+            {
+                _request = new ArrayBufferWriter<byte>(InitialRequestBytes);
+            }
+        }
     }
 
     private static bool IsFatalConnectionError(Exception exception) =>

@@ -11,7 +11,8 @@ using Apex.SqlClient;
 namespace Apex.MsSqlClient.Internal;
 
 // Request builders write into a caller-owned buffer so the connection can reuse one buffer for
-// every request. The Build* overloads that return a new payload are kept for tests.
+// every request. The Build* overloads that return a new payload exist for tests;
+// BuildDefinitions is also used to keep a prepared handle's declarations.
 internal static class TdsRequestWriter
 {
     private const string DecimalDefinitionPrefix = "numeric(38,";
@@ -180,20 +181,19 @@ internal static class TdsRequestWriter
 
             if (value.Kind == SqlValueKind.Decimal)
             {
-                const string prefix = "numeric(38,";
-                if (!remaining.StartsWith(prefix, StringComparison.Ordinal) ||
+                if (!remaining.StartsWith(DecimalDefinitionPrefix, StringComparison.Ordinal) ||
                     !GetDecimalScale(value.GetRequired<decimal>()).TryFormat(
                       digits,
                       out written,
                       provider: CultureInfo.InvariantCulture) ||
-                    !remaining[prefix.Length..].StartsWith(digits[..written], StringComparison.Ordinal) ||
-                    remaining.Length <= prefix.Length + written ||
-                    remaining[prefix.Length + written] != ')')
+                    !remaining[DecimalDefinitionPrefix.Length..].StartsWith(digits[..written], StringComparison.Ordinal) ||
+                    remaining.Length <= DecimalDefinitionPrefix.Length + written ||
+                    remaining[DecimalDefinitionPrefix.Length + written] != ')')
                 {
                     return false;
                 }
 
-                remaining = remaining[(prefix.Length + written + 1)..];
+                remaining = remaining[(DecimalDefinitionPrefix.Length + written + 1)..];
                 continue;
             }
 
