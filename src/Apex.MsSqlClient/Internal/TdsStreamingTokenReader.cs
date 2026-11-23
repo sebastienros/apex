@@ -596,7 +596,7 @@ internal sealed class TdsStreamingTokenReader
     {
         if (_reader.TryReadPayload(checked(characterCount * sizeof(char)), out var buffered))
         {
-            return TdsCollationCodec.GetEncoding(1200).GetString(buffered);
+            return TdsCollationCodec.Decode(buffered, 1200);
         }
 
         var value = await ReadBytesAsync(
