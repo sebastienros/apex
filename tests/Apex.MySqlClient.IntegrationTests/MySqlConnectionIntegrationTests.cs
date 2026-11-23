@@ -1078,6 +1078,113 @@ public sealed class MySqlConnectionIntegrationTests
     }
 
     [TestMethod]
+    public async Task CancellationNeverLeavesAKillQueryForTheNextCommand()
+    {
+        // The command fails with a non-interrupt error (1242) right after the sleep, while the
+        // KILL QUERY sent for the cancellation is still being delivered on its own connection. The
+        // driver must not let the next command start until that KILL has landed, or the KILL
+        // interrupts the next command instead.
+        await using var connection = await MySqlClient.ConnectAsync(
+          Options with { QueryCancellation = MySqlQueryCancellation.KillQuery });
+        const string failing = "SELECT SLEEP(0.02) + (SELECT 1 UNION ALL SELECT 2) AS v";
+        for (var i = 0; i < 60; i++)
+        {
+            using CancellationTokenSource cancellation = new();
+            cancellation.CancelAfter(TimeSpan.FromMilliseconds(10 + (i % 15)));
+            try
+            {
+                await connection.QueryAsync(failing, cancellation.Token);
+            }
+            catch (Exception exception) when (
+              exception is OperationCanceledException or MySqlException { ErrorNumber: 1242 })
+            {
+            }
+
+            var rows = await connection.QueryAsync("SELECT SLEEP(0.05) AS s, 1 AS v");
+            Assert.AreEqual(0L, rows[0].Get<long>("s"), $"Iteration {i} was interrupted.");
+        }
+    }
+
+    [TestMethod]
+    public async Task ReaderCancellationNeverLeavesAKillQueryForTheNextCommand()
+    {
+        await using var connection = await MySqlClient.ConnectAsync(
+          Options with { QueryCancellation = MySqlQueryCancellation.KillQuery });
+        const string failing = "SELECT SLEEP(0.02) + (SELECT 1 UNION ALL SELECT 2) AS v";
+        for (var i = 0; i < 60; i++)
+        {
+            using CancellationTokenSource cancellation = new();
+            cancellation.CancelAfter(TimeSpan.FromMilliseconds(10 + (i % 15)));
+            try
+            {
+                await using var reader = await connection.ExecuteReaderAsync(
+                  failing,
+                  cancellationToken: cancellation.Token);
+                while (await reader.ReadAsync())
+                {
+                }
+            }
+            catch (Exception exception) when (
+              exception is OperationCanceledException or MySqlException { ErrorNumber: 1242 })
+            {
+            }
+
+            var rows = await connection.QueryAsync("SELECT SLEEP(0.05) AS s, 1 AS v");
+            Assert.AreEqual(0L, rows[0].Get<long>("s"), $"Iteration {i} was interrupted.");
+        }
+    }
+
+    [TestMethod]
+    public async Task ReaderSurvivesEvictionOfItsCachedStatementByAnEarlierPipelinedCommand()
+    {
+        await using var connection = await MySqlClient.ConnectAsync(
+          Options with { CachePreparedStatements = true, PreparedStatementCacheSize = 1 });
+        const string first = "SELECT ? + 1 AS v";
+        const string second = "SELECT ? + 2 AS v";
+        await connection.QueryAsync(first, SqlParameters.Create(1));
+
+        // Both are queued before either runs, so the reader's cache lookup used to see the first
+        // statement even though the earlier command evicts and closes it on the server.
+        var evicting = connection.QueryAsync(second, SqlParameters.Create(1)).AsTask();
+        await using (var reader = await connection.ExecuteReaderAsync(first, SqlParameters.Create(10)))
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(11L, reader.Get<long>(0));
+            Assert.IsFalse(await reader.ReadAsync());
+        }
+
+        Assert.AreEqual(3L, (await evicting)[0].Get<long>("v"));
+        var streamed = connection.QueryAsync(first, SqlParameters.Create(1)).AsTask();
+        List<long> values = [];
+        await foreach (var row in connection.StreamAsync(second, SqlParameters.Create(5)))
+        {
+            values.Add(row.Get<long>(0));
+        }
+
+        CollectionAssert.AreEqual(new[] { 7L }, values);
+        Assert.AreEqual(2L, (await streamed)[0].Get<long>("v"));
+    }
+
+    [TestMethod]
+    public async Task ReaderQueuedBehindAResetDoesNotReuseAStatementTheResetDestroyed()
+    {
+        await using var connection = await MySqlClient.ConnectAsync(
+          Options with { CachePreparedStatements = true });
+        const string sql = "SELECT ? + 1 AS v";
+        await connection.QueryAsync(sql, SqlParameters.Create(1));
+
+        var reset = connection.ResetAsync().AsTask();
+        await using (var reader = await connection.ExecuteReaderAsync(sql, SqlParameters.Create(41)))
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(42L, reader.Get<long>(0));
+        }
+
+        await reset;
+        Assert.AreEqual(5L, (await connection.QueryAsync(sql, SqlParameters.Create(4)))[0].Get<long>("v"));
+    }
+
+    [TestMethod]
     public async Task SurfacesMySqlErrorNumberAndSqlState()
     {
         await using var connection = await MySqlClient.ConnectAsync(Options);

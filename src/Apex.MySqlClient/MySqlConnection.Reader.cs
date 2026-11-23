@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.ExceptionServices;
 using System.Threading.Tasks.Sources;
@@ -11,13 +12,15 @@ public sealed partial class MySqlConnection
 {
     private sealed class MySqlResultReader(
         MySqlConnection connection,
-        Action writeCommand,
+        Action? writeCommand,
         bool binary,
         CancellationToken cancellationToken,
         MySqlStatement? statement = null,
-        bool ownsStatement = false) :
+        bool ownsStatement = false,
+        string? preparedSql = null,
+        SqlParameters preparedParameters = default) :
         MySqlRowReader(connection, writeCommand, binary, cancellationToken, statement, ownsStatement,
-            preserveResultBoundaries: true),
+            preserveResultBoundaries: true, preparedSql, preparedParameters),
         ISqlResultBoundaryReader,
         ISqlRecordsAffectedReader
     {
@@ -39,9 +42,11 @@ public sealed partial class MySqlConnection
         private readonly CancellationTokenRegistration _operationCancellation;
         private readonly CancellationToken _operationCancellationToken;
         private readonly bool _binary;
-        private readonly MySqlStatement? _statement;
-        private readonly MySqlStatement? _ownedStatement;
+        private readonly string? _preparedSql;
+        private readonly SqlParameters _preparedParameters;
         private readonly Task<bool> _operation;
+        private MySqlStatement? _statement;
+        private MySqlStatement? _ownedStatement;
         private ManualResetValueTaskSourceCore<bool> _readCompletion;
         private CancellationTokenRegistration _readCancellation;
         private CancellationToken _readCancellationToken;
@@ -50,7 +55,7 @@ public sealed partial class MySqlConnection
         private MySqlRowDecoder? _decoder;
         private IReadOnlyList<SqlColumn> _columns = Array.Empty<SqlColumn>();
         private Exception? _error;
-        private Task? _cancelRequest;
+        private Task<bool>? _cancelRequest;
         private bool _hasCurrent;
         private bool _currentDelivered;
         private bool _completed;
@@ -59,17 +64,25 @@ public sealed partial class MySqlConnection
         private bool _sent;
         private bool _readPending;
         private bool _readSignaled;
+        private bool _pumpFinished;
         private int _disposed;
 
+        // writeCommand writes the command. It is null when preparedSql is resolved to a statement
+        // and executed inside the reader's own barrier instead.
         internal MySqlRowReader(
             MySqlConnection connection,
-            Action writeCommand,
+            Action? writeCommand,
             bool binary,
             CancellationToken cancellationToken,
             MySqlStatement? statement = null,
             bool ownsStatement = false,
-            bool preserveResultBoundaries = false)
+            bool preserveResultBoundaries = false,
+            string? preparedSql = null,
+            SqlParameters preparedParameters = default)
         {
+            Debug.Assert((writeCommand is null) == (preparedSql is not null));
+            _preparedSql = preparedSql;
+            _preparedParameters = preparedParameters;
             _connection = connection;
             _results = preserveResultBoundaries ? new SqlResultReaderState() : null;
             _binary = binary;
@@ -85,13 +98,15 @@ public sealed partial class MySqlConnection
               async token =>
               {
                   token.ThrowIfCancellationRequested();
+                  if (writeCommand is null)
+                  {
+                      // Prepared from SQL: resolved, written and flushed by the receive phase.
+                      return;
+                  }
+
                   writeCommand();
                   await connection._writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
-                  lock (_gate)
-                  {
-                      _sent = true;
-                      _cancelRequest ??= _canceled ? connection.CancelRunningCommandAsync() : null;
-                  }
+                  MarkSent();
               },
               _ => PumpAsync(),
               barrier: true,
@@ -417,96 +432,148 @@ public sealed partial class MySqlConnection
             }
         }
 
+        private void MarkSent()
+        {
+            lock (_gate)
+            {
+                _sent = true;
+                _cancelRequest ??= _canceled ? _connection.CancelRunningCommandAsync() : null;
+            }
+        }
+
+        /// <summary>
+        /// Resolves the SQL to a prepared statement and sends the execute. This runs in the
+        /// receive phase of the reader's barrier, so the statement cannot be evicted (and closed on
+        /// the server) by another command before the execute reaches the server.
+        /// </summary>
+        private async ValueTask<bool> SendPreparedAsync(string sql)
+        {
+            var statement = await _connection.GetOrPrepareAsync(sql).ConfigureAwait(false);
+            _statement = statement;
+            if (!statement.IsCached)
+            {
+                _ownedStatement = statement;
+            }
+
+            lock (_gate)
+            {
+                if (_canceled)
+                {
+                    return false;
+                }
+            }
+
+            _connection.WriteExecute(statement, _preparedParameters, MySqlCursorType.NoCursor);
+            await _connection._writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+            MarkSent();
+            return true;
+        }
+
         private async ValueTask<bool> PumpAsync()
         {
+            Exception? failure = null;
             try
             {
-                while (true)
+                if (_preparedSql is not null && !await SendPreparedAsync(_preparedSql).ConfigureAwait(false))
                 {
-                    int columnCount;
-                    long affectedRows = -1;
-                    using (var header =
-                      await _connection._reader.ReadAsync(CancellationToken.None).ConfigureAwait(false))
-                    {
-                        var result = _connection.ReadResultHeader(header.Span);
-                        if (result.IsLocalInfile)
-                        {
-                            var fileName = s_utf8.GetString(header.Span[1..]);
-                            await _connection.HandleLocalInfileAsync(
-                                fileName,
-                                header.Sequence,
-                                CancellationToken.None)
-                              .ConfigureAwait(false);
-                            // The rows loaded are reported by the OK packet that follows the file.
-                            affectedRows = _connection._lastCommandInfo.AffectedRows;
-                        }
-
-                        columnCount = result.IsCompletion ? 0 : result.ColumnCount;
-                        if (result.IsCompletion)
-                        {
-                            affectedRows = result.AffectedRows;
-                        }
-                    }
-
-                    if (columnCount > 0)
-                    {
-                        await PumpResultSetAsync(columnCount).ConfigureAwait(false);
-                    }
-                    else if (_results is not null)
-                    {
-                        _results.AddRecordsAffected(affectedRows);
-                        _columns = Array.Empty<SqlColumn>();
-                        ResultStarted();
-                        await ResultCompletedAsync().ConfigureAwait(false);
-                    }
-
-                    if ((_connection._status & MySqlServerStatus.MoreResultsExist) == 0)
-                    {
-                        break;
-                    }
+                    failure = new OperationCanceledException(_cancellationToken);
                 }
-
-                await AwaitCancellationAsync().ConfigureAwait(false);
-                bool canceled;
-                lock (_gate)
+                else
                 {
-                    canceled = _canceled;
+                    await PumpResultsAsync().ConfigureAwait(false);
                 }
-
-                if (canceled)
-                {
-                    throw new OperationCanceledException(_cancellationToken);
-                }
-
-                Complete(error: null);
-                return true;
             }
             catch (Exception exception)
             {
-                if (exception is MySqlException { ErrorNumber: 1243 or 1615 } &&
-                    _statement is { IsCached: true } statement)
+                failure = exception;
+            }
+
+            if (failure is MySqlException { ErrorNumber: 1243 or 1615 } &&
+                _statement is { IsCached: true } statement)
+            {
+                _connection.RemoveCachedStatement(statement.Sql, statement);
+            }
+
+            // From here on Cancel() no longer starts a KILL QUERY, and the one it may already have
+            // started is awaited before the barrier is released, on every exit path. Otherwise the
+            // KILL could land on the next command on this connection.
+            Task<bool>? cancelRequest;
+            bool canceled;
+            lock (_gate)
+            {
+                _pumpFinished = true;
+                cancelRequest = _cancelRequest;
+                canceled = _canceled;
+            }
+
+            if (cancelRequest is not null && await cancelRequest.ConfigureAwait(false))
+            {
+                await _connection.AbsorbPendingKillAsync(failure).ConfigureAwait(false);
+            }
+
+            if (canceled &&
+                (failure is null or OperationCanceledException or MySqlException { IsInterrupted: true } ||
+                 IsFatalConnectionError(failure)))
+            {
+                OperationCanceledException cancellation = new(_cancellationToken);
+                Complete(cancellation);
+                throw cancellation;
+            }
+
+            Complete(failure);
+            if (failure is not null)
+            {
+                ExceptionDispatchInfo.Throw(failure);
+            }
+
+            return true;
+        }
+
+        private async ValueTask PumpResultsAsync()
+        {
+            while (true)
+            {
+                int columnCount;
+                long affectedRows = -1;
+                using (var header =
+                  await _connection._reader.ReadAsync(CancellationToken.None).ConfigureAwait(false))
                 {
-                    _connection.RemoveCachedStatement(statement.Sql, statement);
+                    var result = _connection.ReadResultHeader(header.Span);
+                    if (result.IsLocalInfile)
+                    {
+                        var fileName = s_utf8.GetString(header.Span[1..]);
+                        await _connection.HandleLocalInfileAsync(
+                            fileName,
+                            header.Sequence,
+                            CancellationToken.None)
+                          .ConfigureAwait(false);
+                        // The rows loaded are reported by the OK packet that follows the file.
+                        affectedRows = _connection._lastCommandInfo.AffectedRows;
+                    }
+
+                    columnCount = result.IsCompletion ? 0 : result.ColumnCount;
+                    if (result.IsCompletion)
+                    {
+                        affectedRows = result.AffectedRows;
+                    }
                 }
 
-                bool canceled;
-                lock (_gate)
+                if (columnCount > 0)
                 {
-                    canceled = _canceled;
+                    await PumpResultSetAsync(columnCount).ConfigureAwait(false);
+                }
+                else if (_results is not null)
+                {
+                    _results.AddRecordsAffected(affectedRows);
+                    _columns = Array.Empty<SqlColumn>();
+                    ResultStarted();
+                    await ResultCompletedAsync().ConfigureAwait(false);
                 }
 
-                if (canceled &&
-                    (exception is MySqlException { IsInterrupted: true } ||
-                     IsFatalConnectionError(exception)))
+                if ((_connection._status & MySqlServerStatus.MoreResultsExist) == 0)
                 {
-                    await AwaitCancellationAsync().ConfigureAwait(false);
-                    OperationCanceledException cancellation = new(_cancellationToken);
-                    Complete(cancellation);
-                    throw cancellation;
+                    return;
                 }
-
-                Complete(exception);
-                throw;
             }
         }
 
@@ -564,20 +631,6 @@ public sealed partial class MySqlConnection
             }
         }
 
-        private async ValueTask AwaitCancellationAsync()
-        {
-            Task? cancelRequest;
-            lock (_gate)
-            {
-                cancelRequest = _cancelRequest;
-            }
-
-            if (cancelRequest is not null)
-            {
-                await cancelRequest.ConfigureAwait(false);
-            }
-        }
-
         private async Task ObserveOperationAsync()
         {
             try
@@ -595,7 +648,7 @@ public sealed partial class MySqlConnection
             bool advance;
             lock (_gate)
             {
-                if (_completed || _canceled)
+                if (_completed || _canceled || _pumpFinished)
                 {
                     return;
                 }
