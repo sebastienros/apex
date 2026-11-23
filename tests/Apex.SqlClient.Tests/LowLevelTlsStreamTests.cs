@@ -56,8 +56,8 @@ public sealed class LowLevelTlsStreamTests
         await Assert.ThrowsExactlyAsync<ObjectDisposedException>(
             () => tls.ReadAsync(new byte[64]).AsTask());
 
-        serverStop.Cancel();
-        await server;
+        client.Close();
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     [TestMethod]
@@ -102,8 +102,8 @@ public sealed class LowLevelTlsStreamTests
         await Assert.ThrowsExactlyAsync<IOException>(() => read);
         Assert.IsTrue(tls.ResourcesReleased);
 
-        serverStop.Cancel();
-        await server;
+        client.Close();
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     [TestMethod]
@@ -134,27 +134,30 @@ public sealed class LowLevelTlsStreamTests
         Assert.IsTrue(tls.ResourcesReleased);
         Assert.ThrowsExactly<ObjectDisposedException>(() => tls.Write("x"u8));
 
-        serverStop.Cancel();
-        await server;
+        client.Close();
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
+    // Accepts one TLS client and reads until it goes away. The client side of each test
+    // closes the connection, possibly before this side has finished its handshake, so every
+    // transport failure (and the safety timeout) ends the server quietly.
     private static async Task RunServerAsync(
         TcpListener listener,
         X509Certificate2 certificate,
         CancellationToken cancellationToken)
     {
-        using var accepted = await listener.AcceptTcpClientAsync(cancellationToken);
-        await using SslStream tls = new(accepted.GetStream(), leaveInnerStreamOpen: false);
-        await tls.AuthenticateAsServerAsync(
-            new SslServerAuthenticationOptions
-            {
-                ServerCertificate = certificate,
-                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
-            },
-            cancellationToken);
-        var buffer = new byte[256];
         try
         {
+            using var accepted = await listener.AcceptTcpClientAsync(cancellationToken);
+            await using SslStream tls = new(accepted.GetStream(), leaveInnerStreamOpen: false);
+            await tls.AuthenticateAsServerAsync(
+                new SslServerAuthenticationOptions
+                {
+                    ServerCertificate = certificate,
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                },
+                cancellationToken);
+            var buffer = new byte[256];
             while (await tls.ReadAsync(buffer, cancellationToken) > 0)
             {
             }
@@ -162,7 +165,6 @@ public sealed class LowLevelTlsStreamTests
         catch (Exception exception) when (
             exception is IOException or OperationCanceledException or AuthenticationException)
         {
-            // The client closes the connection abruptly in these tests.
         }
     }
 
