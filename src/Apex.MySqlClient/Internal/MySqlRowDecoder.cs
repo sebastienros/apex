@@ -81,26 +81,55 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
           _ => LengthEncodedWidth,
       };
 
+    /// <summary>
+    /// Checks that a row packet holds exactly one well-formed value per column, so later field
+    /// reads cannot run past it. Binary rows are walked with the per-column width table, and
+    /// temporal length prefixes are checked here so a malformed row fails on the receive path.
+    /// </summary>
     internal void ValidateRow(ReadOnlySpan<byte> row)
     {
+        int position;
         if (_binary)
         {
-            if (row.Length < 1 + _nullBitmapLength || row[0] != MySqlProtocol.OkHeader)
+            var baseOffset = 1 + _nullBitmapLength;
+            if (row.Length < baseOffset || row[0] != MySqlProtocol.OkHeader)
             {
                 throw new InvalidDataException("MySQL binary row header is invalid.");
             }
 
             var bitmap = row.Slice(1, _nullBitmapLength);
-            MySqlPayloadReader reader = new(row[(1 + _nullBitmapLength)..]);
-            for (var i = 0; i < _metadata.Length; i++)
+            var widths = _binaryWidths;
+            position = baseOffset;
+            for (var i = 0; i < widths.Length; i++)
             {
-                if (!IsNullInBitmap(bitmap, i))
+                if (IsNullInBitmap(bitmap, i))
                 {
-                    SkipBinaryValue(ref reader, _metadata[i].Type);
+                    continue;
+                }
+
+                var width = widths[i];
+                if (width >= 0)
+                {
+                    position += width;
+                }
+                else if (width == BytePrefixedWidth)
+                {
+                    var length = ReadPrefix(row, position);
+                    ValidateTemporalLength(_metadata[i].Type, length);
+                    position += 1 + length;
+                }
+                else
+                {
+                    position = SkipLengthEncoded(row, position);
                 }
             }
 
-            if (reader.Remaining != 0)
+            if (position > row.Length)
+            {
+                throw TruncatedRow();
+            }
+
+            if (position != row.Length)
             {
                 throw new InvalidDataException("MySQL binary row has trailing data.");
             }
@@ -108,15 +137,50 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
             return;
         }
 
-        MySqlPayloadReader text = new(row);
+        position = 0;
         for (var i = 0; i < _metadata.Length; i++)
         {
-            _ = text.ReadLengthEncodedSpan(out _);
+            position = SkipLengthEncoded(row, position);
         }
 
-        if (text.Remaining != 0)
+        if (position > row.Length)
+        {
+            throw TruncatedRow();
+        }
+
+        if (position != row.Length)
         {
             throw new InvalidDataException("MySQL text row has trailing data.");
+        }
+    }
+
+    private static void ValidateTemporalLength(MySqlType type, byte length)
+    {
+        switch (type)
+        {
+            case MySqlType.Date:
+            case MySqlType.NewDate:
+                if (length is not (0 or 4))
+                {
+                    throw new InvalidDataException($"Invalid MySQL binary DATE length {length}.");
+                }
+
+                break;
+            case MySqlType.Time:
+            case MySqlType.Time2:
+                if (length is not (0 or 8 or 12))
+                {
+                    throw new InvalidDataException($"Invalid MySQL binary TIME length {length}.");
+                }
+
+                break;
+            default:
+                if (length is not (0 or 4 or 7 or 11))
+                {
+                    throw new InvalidDataException($"Invalid MySQL binary DATETIME length {length}.");
+                }
+
+                break;
         }
     }
 
@@ -1415,9 +1479,6 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
         var bit = ordinal + 2;
         return (bitmap[bit >> 3] & (1 << (bit & 7))) != 0;
     }
-
-    private static void SkipBinaryValue(scoped ref MySqlPayloadReader reader, MySqlType type) =>
-      _ = ReadBinaryValue(ref reader, type);
 
     private static ReadOnlySpan<byte> ReadBinaryValue(
         scoped ref MySqlPayloadReader reader,
