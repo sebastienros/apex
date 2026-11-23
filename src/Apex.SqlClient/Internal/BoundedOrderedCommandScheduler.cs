@@ -394,6 +394,14 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         private static readonly ConcurrentQueue<Command<T>> s_pool = new();
         private const int MaximumPoolSize = 256;
         private static int s_poolCount;
+
+        // A rental is owned by its caller until the completion is consumed and, when the channel
+        // write went asynchronous, by the writer continuation until it has observed the write.
+        // The channel publishes the command to the pump before that continuation runs, so the
+        // caller can consume the completion first. Whichever owner releases last returns the
+        // command to the pool, so a stale continuation never reads a later rental's state.
+        private const int CallerOwner = 1;
+        private const int EnqueueOwner = 2;
         private readonly Action _continueEnqueue;
         private ManualResetValueTaskSourceCore<T> _completion;
         private Func<CancellationToken, ValueTask>? _sendAsync;
@@ -403,7 +411,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         private ValueTask _pendingWrite;
         private long _completionState;
         private int _generation;
-        private int _pendingWriteGeneration;
+        private int _owners;
         private bool _isBarrier;
         private bool _flushBatch;
         private int _consumed;
@@ -472,24 +480,11 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             }
             finally
             {
-                _sendAsync = null;
-                _receiveAsync = null;
-                _scheduler = null;
-                _cancellationToken = default;
-                _pendingWrite = default;
-                _pendingWriteGeneration = 0;
-                _isBarrier = false;
-                _flushBatch = false;
+                // Resetting here invalidates the token, so a second await fails even while the
+                // writer continuation still owns the command. That continuation can only try to
+                // complete the generation that has already completed, which is a no-op.
                 _completion.Reset();
-                Volatile.Write(ref _consumed, 0);
-                if (Interlocked.Increment(ref s_poolCount) <= MaximumPoolSize)
-                {
-                    s_pool.Enqueue(this);
-                }
-                else
-                {
-                    Interlocked.Decrement(ref s_poolCount);
-                }
+                Release(CallerOwner);
             }
         }
 
@@ -549,8 +544,10 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 return;
             }
 
+            // The caller cannot consume the completion before Enqueue returns, so taking the
+            // second ownership here, before the continuation is registered, is never too late.
             _pendingWrite = write;
-            _pendingWriteGeneration = generation;
+            Interlocked.Or(ref _owners, EnqueueOwner);
             write.ConfigureAwait(false).GetAwaiter().UnsafeOnCompleted(_continueEnqueue);
         }
 
@@ -568,10 +565,10 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             _receiveAsync = receiveAsync;
             _cancellationToken = cancellationToken;
             _pendingWrite = default;
-            _pendingWriteGeneration = 0;
             _isBarrier = isBarrier;
             _flushBatch = flushBatch;
             Volatile.Write(ref _consumed, 0);
+            Volatile.Write(ref _owners, CallerOwner);
             var generation = unchecked(_generation + 1);
             Volatile.Write(ref _generation, generation);
             Volatile.Write(ref _completionState, GetIncompleteState(generation));
@@ -579,11 +576,36 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
         private void ContinueEnqueue()
         {
-            var generation = _pendingWriteGeneration;
+            // The enqueue ownership keeps this rental from being reset or rented again, so the
+            // pending write and the generation still belong to the write that registered us.
             var write = _pendingWrite;
             _pendingWrite = default;
-            _pendingWriteGeneration = 0;
-            CompleteEnqueue(generation, write);
+            CompleteEnqueue(Generation, write);
+            Release(EnqueueOwner);
+        }
+
+        private void Release(int owner)
+        {
+            if (Interlocked.And(ref _owners, ~owner) != owner)
+            {
+                return;
+            }
+
+            _sendAsync = null;
+            _receiveAsync = null;
+            _scheduler = null;
+            _cancellationToken = default;
+            _pendingWrite = default;
+            _isBarrier = false;
+            _flushBatch = false;
+            if (Interlocked.Increment(ref s_poolCount) <= MaximumPoolSize)
+            {
+                s_pool.Enqueue(this);
+            }
+            else
+            {
+                Interlocked.Decrement(ref s_poolCount);
+            }
         }
 
         private void CompleteEnqueue(int generation, ValueTask write)
