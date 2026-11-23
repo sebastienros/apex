@@ -25,7 +25,8 @@ namespace Apex.SqlClient.Internal;
 /// Disposal still waits for the pump to unwind before it returns, and does not abandon it: the
 /// connections release pooled buffers right after the scheduler is disposed, so a delegate must
 /// never run past that point. Without an abort callback, a pump stuck in I/O that ignores its token
-/// still keeps disposal waiting.
+/// still keeps disposal waiting. So does a receive that waits for something other than the
+/// transport, such as a row reader waiting for its consumer: aborting the transport cannot wake it.
 /// </para>
 /// </remarks>
 internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
@@ -248,9 +249,13 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
     private void DisposeAfterCloseTimeout()
     {
-        // Runs on the timer thread. CloseAsync's caller disposes again afterwards, and that
-        // DisposeAsync awaits the same pump, so this task needs no observer of its own.
-        _ = DisposeAsync().AsTask();
+        // Runs on the timer thread. CloseAsync's caller disposes again afterwards and awaits the
+        // same pump; this task is only observed so that a failure here is never unobserved.
+        DisposeAsync().AsTask().ContinueWith(
+          static task => _ = task.Exception,
+          CancellationToken.None,
+          TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+          TaskScheduler.Default);
     }
 
     private async Task PumpAsync()
@@ -407,6 +412,14 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         for (var index = 0; index < batch.Count; index++)
         {
             var entry = batch[index];
+            if (_shutdown.IsCancellationRequested)
+            {
+                // Disposal fails the unsent rest of the batch (FailBatch); sending it would only
+                // put commands on the wire that no caller will get a result for.
+                SignalRemaining(batch, index, pipelined);
+                return false;
+            }
+
             if (entry.Command.CancellationToken.IsCancellationRequested)
             {
                 entry.CanceledBeforeSend = true;
@@ -437,7 +450,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             }
         }
 
-        if (flushBatch && _flushBatchAsync is not null)
+        if (flushBatch && _flushBatchAsync is not null && !_shutdown.IsCancellationRequested)
         {
             try
             {

@@ -628,6 +628,46 @@ public sealed class BoundedOrderedCommandSchedulerTests
     }
 
     [TestMethod]
+    public async Task DisposalStopsSendingTheRestOfAPipelinedBatch()
+    {
+        var flushes = 0;
+        BoundedOrderedCommandScheduler scheduler = new(
+          3,
+          8,
+          flushBatchAsync: _ =>
+          {
+              Interlocked.Increment(ref flushes);
+              return ValueTask.CompletedTask;
+          });
+        ConcurrentQueue<string> events = [];
+        var sendStarted = NewGate();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+        var first = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1),
+          flushBatch: true);
+
+        // These sends ignore their token, like a driver that writes with CancellationToken.None.
+        var second = Execute(scheduler, 2, events: events, flushBatch: true);
+        var third = Execute(scheduler, 3, events: events, flushBatch: true);
+        releasePump.SetResult();
+        await blocker;
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(first);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(second);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(third);
+        Assert.IsEmpty(events);
+        Assert.AreEqual(0, Volatile.Read(ref flushes));
+    }
+
+    [TestMethod]
     public async Task DisposalCancelsABlockedSendOfACancellableCommand()
     {
         BoundedOrderedCommandScheduler scheduler = new(1, 2);
