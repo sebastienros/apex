@@ -130,11 +130,11 @@ public sealed class PgConnectOptionsTests
     public void SendsKnownStartupParametersUnderTheirCanonicalNames()
     {
         PgConnectOptions options = PgConnectOptions.Parse(
-          "host=db APPLICATION_NAME=billing datestyle='SQL, DMY' timezone=UTC " +
+          "host=db APPLICATION_NAME=billing datestyle='ISO, DMY' timezone=UTC " +
           "Search_Path=app options='-c statement_timeout=5s'");
 
         Assert.AreEqual("billing", options.Properties["application_name"]);
-        Assert.AreEqual("SQL, DMY", options.Properties["DateStyle"]);
+        Assert.AreEqual("ISO, DMY", options.Properties["DateStyle"]);
         Assert.AreEqual("UTC", options.Properties["TimeZone"]);
         Assert.AreEqual("app", options.Properties["search_path"]);
         Assert.AreEqual("-c statement_timeout=5s", options.Properties["options"]);

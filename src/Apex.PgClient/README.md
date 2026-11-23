@@ -28,7 +28,11 @@ Connection strings accept the driver keys (`host`, `port`, `user`/`username`,
 `pipelininglimit`, `useexperimentallowleveltls`, `cachepreparedstatements`) and
 these server parameters, which are sent in the startup message: `application_name`,
 `client_encoding`, `options`, `search_path`, `TimeZone`, `DateStyle`,
-`IntervalStyle` and `extra_float_digits`. Keys are case-insensitive.
+`IntervalStyle` and `extra_float_digits`. Keys are case-insensitive. The driver
+sets `client_encoding=UTF8`, `DateStyle=ISO`, `IntervalStyle=iso_8601` and
+`extra_float_digits=2` by default, and decodes text-format results (the simple
+query protocol) with those settings; keep `client_encoding` UTF-8 and the
+`DateStyle` output format `ISO` (for example `DateStyle='ISO, DMY'`).
 
 Any other key throws `FormatException`, which names the key (and the closest
 known key, for a likely typo) but not its value. Earlier versions sent every

@@ -692,6 +692,7 @@ public sealed class MySqlConnectionWireTests
     }
 
     [TestMethod]
+    [Timeout(60_000)]
     public async Task EachCancelledCommandOnAConnectionSendsItsOwnKill()
     {
         // The KILL state lives on the connection, so it must be reset after every command: a
