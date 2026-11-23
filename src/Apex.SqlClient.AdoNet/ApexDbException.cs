@@ -97,7 +97,8 @@ internal sealed class ApexOperationCancellation : IDisposable
             _canceled ||
             !_source.IsCancellationRequested ||
             _callerToken.IsCancellationRequested ||
-            callToken.IsCancellationRequested)
+            // The operation's own token is passed to initialization; only a separate call token counts.
+            (callToken != _source.Token && callToken.IsCancellationRequested))
         {
             return null;
         }
