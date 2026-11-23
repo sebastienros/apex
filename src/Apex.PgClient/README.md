@@ -48,6 +48,12 @@ await using ISqlPreparedStatement statement = await pool.PrepareAsync(
 SqlRowSet rows = await statement.QueryAsync();
 ```
 
+If a pipeline connection dies (a server restart, `pg_terminate_backend`, or a
+network failure), the pool stops sending it work and reconnects in the
+background with backoff. Statements from `pool.PrepareAsync` are prepared again
+on the new connection. Commands that were already running on the dead
+connection fail with its error and are not retried.
+
 ## Supported features
 
 - Simple and extended query protocols with ordered automatic pipelining.

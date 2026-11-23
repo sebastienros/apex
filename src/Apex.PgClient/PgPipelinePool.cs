@@ -28,6 +28,7 @@ public sealed class PgPipelinePool : ISqlPipelinePool
             poolOptions ?? new SqlPipelinePoolOptions(),
             async token => await PgClient.ConnectAsync(connectOptions, token)
                 .ConfigureAwait(false),
+            static connection => ((PgConnection)connection).IsUsable,
             cancellationToken).ConfigureAwait(false);
         return new PgPipelinePool(pool);
     }
