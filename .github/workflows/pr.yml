@@ -58,6 +58,7 @@ jobs:
       # --locked-mode fails the restore when a packages.lock.json is out of date.
       # On a cache miss, every test project is restored, so whichever job saves the shared cache
       # first saves all the packages the other jobs need.
+      # jq writes CRLF line endings on Windows, hence the tr.
       - name: Restore
         timeout-minutes: 5
         shell: bash
@@ -65,7 +66,7 @@ jobs:
           if [ "${{ steps.nuget-cache.outputs.cache-hit }}" = true ]; then
             projects="${{ matrix.project }}"
           else
-            projects=$(jq -r '.[]' .github/test-projects.json)
+            projects=$(jq -r '.[]' .github/test-projects.json | tr -d '\r')
           fi
           for project in $projects; do
             dotnet restore "${{ github.workspace }}/$project" --locked-mode

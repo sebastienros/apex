@@ -93,7 +93,8 @@ jobs:
         if: steps.nuget-cache.outputs.cache-hit != 'true'
         timeout-minutes: 5
         shell: bash
+        # jq writes CRLF line endings on Windows, hence the tr.
         run: |
-          for project in $(jq -r '.[]' .github/test-projects.json); do
+          for project in $(jq -r '.[]' .github/test-projects.json | tr -d '\r'); do
             dotnet restore "$project" --locked-mode
           done
