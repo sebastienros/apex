@@ -24,9 +24,17 @@ internal sealed class PgAdapterWireSession(Stream stream, CancellationToken canc
         await WriteAsync('Z', [(byte)'I']);
     }
 
+    // True when the last query used the simple protocol (one 'Q' message), which parameterless
+    // multi-statement command text needs; single statements use Parse/Bind/Describe/Execute/Sync.
+    internal bool SimpleQuery { get; private set; }
+
     internal override async Task ExpectQueryAsync()
     {
-        foreach (var expected in "PBDES")
+        var first = await ReadAsync();
+        SimpleQuery = first == (byte)'Q';
+        if (SimpleQuery) return;
+        Assert.AreEqual((byte)'P', first);
+        foreach (var expected in "BDES")
         {
             Assert.AreEqual((byte)expected, await ReadAsync());
         }
@@ -34,19 +42,26 @@ internal sealed class PgAdapterWireSession(Stream stream, CancellationToken canc
 
     internal override async Task WriteResultsAsync(WireResult[] results)
     {
-        Assert.HasCount(1, results);
-        await WriteAsync('1', []);
-        await WriteAsync('2', []);
-        var result = results[0];
-        await WriteAsync('T',
-            [.. Int16(1), .. CString(result.Name), .. Int32(0), .. Int16(0),
-                .. Int32(23), .. Int16(4), .. Int32(-1), .. Int16(0)]);
-        foreach (var value in result.Rows)
+        if (!SimpleQuery)
         {
-            var bytes = Encoding.UTF8.GetBytes(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            await WriteAsync('D', [.. Int16(1), .. Int32(bytes.Length), .. bytes]);
+            Assert.HasCount(1, results);
+            await WriteAsync('1', []);
+            await WriteAsync('2', []);
         }
-        await WriteAsync('C', CString($"SELECT {result.Rows.Length}"));
+
+        foreach (var result in results)
+        {
+            await WriteAsync('T',
+                [.. Int16(1), .. CString(result.Name), .. Int32(0), .. Int16(0),
+                    .. Int32(23), .. Int16(4), .. Int32(-1), .. Int16(0)]);
+            foreach (var value in result.Rows)
+            {
+                var bytes = Encoding.UTF8.GetBytes(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                await WriteAsync('D', [.. Int16(1), .. Int32(bytes.Length), .. bytes]);
+            }
+            await WriteAsync('C', CString($"SELECT {result.Rows.Length}"));
+        }
+
         await WriteAsync('Z', [(byte)'I']);
     }
 

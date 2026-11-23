@@ -233,6 +233,7 @@ public abstract class ApexDbCommand : DbCommand
                 _preparedConnection = execution.Connection;
                 _preparedConnectionOwner = execution.ConnectionOwner;
                 _preparedConnectionWasAutoOpened = execution.CloseWhenDone;
+                execution.ConnectionOwner.RegisterPreparedCommand(this);
             }
             catch
             {
@@ -560,6 +561,7 @@ public abstract class ApexDbCommand : DbCommand
         _preparedConnection = null;
         var connectionOwner = _preparedConnectionOwner;
         _preparedConnectionOwner = null;
+        connectionOwner?.UnregisterPreparedCommand(this);
         try
         {
             ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException)
@@ -594,6 +596,7 @@ public abstract class ApexDbCommand : DbCommand
         _preparedConnection = null;
         var connectionOwner = _preparedConnectionOwner;
         _preparedConnectionOwner = null;
+        connectionOwner?.UnregisterPreparedCommand(this);
         try
         {
             await ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException).ConfigureAwait(false);
@@ -611,6 +614,29 @@ public abstract class ApexDbCommand : DbCommand
 
             _preparedConnectionWasAutoOpened = false;
             _preparedInvalidated = false;
+        }
+    }
+
+    /// <summary>
+    /// Releases the prepared statement while its connection closes: the statement belongs to that native
+    /// connection (a pooled lease stays pinned until it is released), and the command then executes
+    /// unprepared until it is prepared again.
+    /// </summary>
+    internal async ValueTask ReleasePreparedForCloseAsync()
+    {
+        if (_preparedStatement is not { } statement) return;
+        _preparedStatement = null;
+        _preparedConnection = null;
+        _preparedConnectionOwner = null;
+        _preparedConnectionWasAutoOpened = false;
+        _preparedInvalidated = false;
+        try
+        {
+            await statement.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // The connection is closing; a failure to release the statement must not keep it open.
         }
     }
 
@@ -1178,6 +1204,11 @@ public abstract class ApexDbConnection : DbConnection
     protected ISqlConnection NativeConnection =>
         _connection ?? throw new InvalidOperationException("The connection is not open.");
     internal ISqlConnection? CurrentConnection => _connection;
+    private List<ApexDbCommand>? _preparedCommands;
+
+    internal void RegisterPreparedCommand(ApexDbCommand command) => (_preparedCommands ??= []).Add(command);
+
+    internal void UnregisterPreparedCommand(ApexDbCommand command) => _preparedCommands?.Remove(command);
 
     protected abstract Task<ISqlConnection> OpenCoreAsync(CancellationToken cancellationToken);
     internal virtual DbException TranslateException(SqlClientException exception) => new ApexDbException(exception);
@@ -1250,6 +1281,15 @@ public abstract class ApexDbConnection : DbConnection
     private async Task CloseConnectionAsync()
     {
         if (_connection is null) return;
+        if (_preparedCommands is { Count: > 0 } prepared)
+        {
+            _preparedCommands = null;
+            foreach (var command in prepared)
+            {
+                await command.ReleasePreparedForCloseAsync().ConfigureAwait(false);
+            }
+        }
+
         var connection = _connection;
         _connection = null;
         var previous = _state;
