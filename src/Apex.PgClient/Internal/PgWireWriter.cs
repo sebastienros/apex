@@ -74,7 +74,8 @@ internal sealed class PgWireWriter
 
     public async ValueTask WriteQueryAsync(
         string sql,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool flush = true)
     {
         var byteCount = s_utf8.GetByteCount(sql);
         var totalLength = 1 + sizeof(int) + byteCount + 1;
@@ -86,13 +87,17 @@ internal sealed class PgWireWriter
         var written = s_utf8.GetBytes(sql, message[5..]);
         message[5 + written] = 0;
         _writer.Advance(totalLength);
-        await FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (flush)
+        {
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask WriteExtendedQueryAsync(
         string sql,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool flush = true)
     {
         if (parameters.Count == 0)
         {
@@ -101,7 +106,11 @@ internal sealed class PgWireWriter
               portalName: string.Empty,
               statementName: string.Empty,
               fetchSize: 0);
-            await FlushAsync(cancellationToken).ConfigureAwait(false);
+            if (flush)
+            {
+                await FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return;
         }
 
@@ -117,7 +126,10 @@ internal sealed class PgWireWriter
             throw;
         }
 
-        await FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (flush)
+        {
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask WriteExtendedQueryAsync(
