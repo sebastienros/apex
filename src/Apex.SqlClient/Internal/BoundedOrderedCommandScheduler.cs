@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using System.Threading.Tasks.Sources;
 
@@ -11,6 +12,24 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
     private readonly Func<Exception, bool> _isFatal;
     private readonly Func<CancellationToken, ValueTask>? _flushBatchAsync;
     private readonly CancellationTokenSource _shutdown = new();
+
+    // Batch entries are reused by the pump, which is their only user: an entry goes back here once
+    // its batch (or its cancel skip) is finished.
+    private readonly Stack<BatchEntry> _freeEntries = new();
+
+    // In a multi-command batch, the receiver handles entry i once i + 1 entries are ready (the
+    // count semantics of the semaphore this replaces). Reused across batches: the count is reset
+    // when a batch starts, after the previous batch's sender and receiver have both finished, and a
+    // stale signal left in the event only makes the receiver re-check the count.
+    private readonly AsyncAutoResetEvent _ready = new();
+    private int _readyCount;
+
+    // The token a cancellable command's send runs with: cancelled by the command's own token or by
+    // shutdown. Sends run one at a time on the pump, so a single source is reused (TryReset) and
+    // only replaced after it was actually cancelled, instead of linking a new one per command.
+    private static readonly Action<object?> s_cancelSource =
+      static state => ((CancellationTokenSource)state!).Cancel();
+    private CancellationTokenSource _sendCancellation = new();
     private readonly Task _pump;
     private Exception? _terminalError;
     private int _disposed;
@@ -36,6 +55,9 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
               SingleReader = true,
               SingleWriter = false,
           });
+        _shutdown.Token.UnsafeRegister(
+          static state => ((BoundedOrderedCommandScheduler)state!).CancelSend(),
+          this);
         _pump = PumpAsync();
     }
 
@@ -87,8 +109,14 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 0)
         {
-            Stop(new ObjectDisposedException(nameof(BoundedOrderedCommandScheduler)));
+            // Cancel before completing the writer: the pump waits for commands without a token,
+            // so the writer completion is what wakes it, and it must then see the shutdown.
+            Interlocked.CompareExchange(
+              ref _terminalError,
+              new ObjectDisposedException(nameof(BoundedOrderedCommandScheduler)),
+              null);
             _shutdown.Cancel();
+            _commands.Writer.TryComplete();
         }
 
         await _pump.ConfigureAwait(false);
@@ -113,6 +141,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 {
                     next.Command.Cancel(next.Generation);
                     next.ReleasePump();
+                    ReturnEntry(next);
                     continue;
                 }
 
@@ -121,7 +150,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 {
                     while (batch.Count < _inFlightLimit && _commands.Reader.TryRead(out var candidate))
                     {
-                        var entry = new BatchEntry(candidate);
+                        var entry = RentEntry(candidate);
                         if (candidate.IsBarrier)
                         {
                             // A deferred barrier is still queued from its caller's point of view,
@@ -138,6 +167,11 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 if (!await ProcessBatchAsync(batch).ConfigureAwait(false))
                 {
                     return;
+                }
+
+                foreach (var entry in batch)
+                {
+                    ReturnEntry(entry);
                 }
 
                 batch.Clear();
@@ -162,50 +196,85 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             FailBatch(batch, terminalError);
             while (_commands.Reader.TryRead(out var command))
             {
-                var entry = new BatchEntry(command);
+                var entry = RentEntry(command);
                 command.Fail(entry.Generation, terminalError);
                 entry.ReleasePump();
+                ReturnEntry(entry);
             }
         }
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<BatchEntry?> TryGetNextAsync(BatchEntry? deferred)
     {
+        // Disposal leaves the commands still queued (and a deferred barrier) for the drain in
+        // PumpAsync's finally, which fails them without running them.
+        if (_shutdown.IsCancellationRequested)
+        {
+            return null;
+        }
+
         if (deferred is not null)
         {
             return deferred;
         }
 
-        while (await _commands.Reader.WaitToReadAsync(_shutdown.Token).ConfigureAwait(false))
+        // No token: a cancellable one makes the channel allocate a waiter each time the pump goes
+        // idle. Disposal completes the writer, which ends this wait.
+        while (await _commands.Reader.WaitToReadAsync(CancellationToken.None).ConfigureAwait(false))
         {
+            if (_shutdown.IsCancellationRequested)
+            {
+                return null;
+            }
+
             if (_commands.Reader.TryRead(out var command))
             {
-                return new BatchEntry(command);
+                return RentEntry(command);
             }
         }
 
         return null;
     }
 
+    private BatchEntry RentEntry(ICommand command)
+    {
+        if (!_freeEntries.TryPop(out var entry))
+        {
+            entry = new BatchEntry();
+        }
+
+        entry.Initialize(command);
+        return entry;
+    }
+
+    private void ReturnEntry(BatchEntry entry)
+    {
+        entry.Clear();
+        _freeEntries.Push(entry);
+    }
+
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> ProcessBatchAsync(List<BatchEntry> batch)
     {
         if (batch.Count == 1)
         {
-            var sent = await SendBatchAsync(batch, null).ConfigureAwait(false);
+            var sent = await SendBatchAsync(batch, pipelined: false).ConfigureAwait(false);
             return sent &&
-              await ReceiveBatchAsync(batch, null).ConfigureAwait(false);
+              await ReceiveBatchAsync(batch, pipelined: false).ConfigureAwait(false);
         }
 
-        using SemaphoreSlim ready = new(0, batch.Count);
-        var receive = ReceiveBatchAsync(batch, ready);
-        var batchSent = await SendBatchAsync(batch, ready).ConfigureAwait(false);
+        Volatile.Write(ref _readyCount, 0);
+        var receive = ReceiveBatchAsync(batch, pipelined: true);
+        var batchSent = await SendBatchAsync(batch, pipelined: true).ConfigureAwait(false);
         var received = await receive.ConfigureAwait(false);
         return batchSent && received;
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> SendBatchAsync(
         List<BatchEntry> batch,
-        SemaphoreSlim? ready)
+        bool pipelined)
     {
         var flushBatch = false;
         for (var index = 0; index < batch.Count; index++)
@@ -214,29 +283,28 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             if (entry.Command.CancellationToken.IsCancellationRequested)
             {
                 entry.CanceledBeforeSend = true;
-                SignalReady(entry, ready);
+                SignalReady(entry, pipelined);
                 continue;
             }
 
             try
             {
-                using var cancellation = CreateDelegateCancellation(entry.Command);
-                await entry.Command.SendAsync(cancellation.Token).ConfigureAwait(false);
+                await SendAsync(entry.Command).ConfigureAwait(false);
                 entry.WasSent = true;
                 flushBatch |= entry.Command.FlushBatch;
                 if (!entry.Command.FlushBatch)
                 {
-                    SignalReady(entry, ready);
+                    SignalReady(entry, pipelined);
                 }
             }
             catch (Exception exception)
             {
                 entry.SendError = exception;
-                SignalReady(entry, ready);
+                SignalReady(entry, pipelined);
                 if (IsFatal(exception))
                 {
                     Stop(exception);
-                    SignalRemaining(batch, index + 1, ready);
+                    SignalRemaining(batch, index + 1, pipelined);
                     return false;
                 }
             }
@@ -247,33 +315,39 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             try
             {
                 var flush = _flushBatchAsync(_shutdown.Token);
-                SignalRemaining(batch, 0, ready);
+                SignalRemaining(batch, 0, pipelined);
                 await flush.ConfigureAwait(false);
             }
             catch (Exception exception)
             {
                 Stop(exception);
-                SignalRemaining(batch, 0, ready);
+                SignalRemaining(batch, 0, pipelined);
                 return false;
             }
         }
         else
         {
-            SignalRemaining(batch, 0, ready);
+            SignalRemaining(batch, 0, pipelined);
         }
 
         return true;
     }
 
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<bool> ReceiveBatchAsync(
         List<BatchEntry> batch,
-        SemaphoreSlim? ready)
+        bool pipelined)
     {
-        foreach (var entry in batch)
+        for (var index = 0; index < batch.Count; index++)
         {
-            if (ready is not null)
+            var entry = batch[index];
+            if (pipelined)
             {
-                await ready.WaitAsync(_shutdown.Token).ConfigureAwait(false);
+                // The sender signals every entry on all of its paths, so this wait needs no token.
+                while (Volatile.Read(ref _readyCount) <= index)
+                {
+                    await _ready.WaitAsync().ConfigureAwait(false);
+                }
             }
 
             if (entry.CanceledBeforeSend)
@@ -299,8 +373,11 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
             try
             {
-                using var cancellation = CreateDelegateCancellation(entry.Command);
-                await entry.Command.ReceiveAsync(entry.Generation, cancellation.Token).ConfigureAwait(false);
+                // Only the shutdown token: once a command is sent its response must be read to
+                // keep the connection in sync, so the caller's token cannot stop the receive. The
+                // drivers observe their own cancellation inside the receive delegate where it is
+                // safe (for example, PostgreSQL's cancel request).
+                await entry.Command.ReceiveAsync(entry.Generation, _shutdown.Token).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
@@ -320,38 +397,64 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         return true;
     }
 
-    private static void SignalReady(BatchEntry entry, SemaphoreSlim? ready)
+    private void SignalReady(BatchEntry entry, bool pipelined)
     {
-        if (ready is not null && !entry.IsReady)
+        if (pipelined && !entry.IsReady)
         {
             entry.IsReady = true;
-            ready.Release();
+            Interlocked.Increment(ref _readyCount);
+            _ready.Set();
         }
     }
 
-    private static void SignalRemaining(
+    private void SignalRemaining(
         List<BatchEntry> batch,
         int startIndex,
-        SemaphoreSlim? ready)
+        bool pipelined)
     {
         for (var index = startIndex; index < batch.Count; index++)
         {
-            SignalReady(batch[index], ready);
+            SignalReady(batch[index], pipelined);
         }
     }
 
-    private DelegateCancellation CreateDelegateCancellation(ICommand command)
+    private ValueTask SendAsync(ICommand command)
     {
-        if (!command.CancellationToken.CanBeCanceled)
-        {
-            return new DelegateCancellation(_shutdown.Token, null);
-        }
-
-        var source = CancellationTokenSource.CreateLinkedTokenSource(
-            command.CancellationToken,
-            _shutdown.Token);
-        return new DelegateCancellation(source.Token, source);
+        var cancellationToken = command.CancellationToken;
+        return cancellationToken.CanBeCanceled
+          ? SendCancellableAsync(command, cancellationToken)
+          : command.SendAsync(_shutdown.Token);
     }
+
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask SendCancellableAsync(ICommand command, CancellationToken cancellationToken)
+    {
+        var source = Volatile.Read(ref _sendCancellation);
+        var registration = cancellationToken.UnsafeRegister(s_cancelSource, source);
+        try
+        {
+            await command.SendAsync(source.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Waits for a cancellation callback that is already running, so the source is quiet
+            // before it is reset or replaced.
+            registration.Dispose();
+            if (!source.TryReset())
+            {
+                CancellationTokenSource next = new();
+                Volatile.Write(ref _sendCancellation, next);
+
+                // Pairs with CancelSend: either shutdown sees the new source, or this sees shutdown.
+                if (_shutdown.IsCancellationRequested)
+                {
+                    next.Cancel();
+                }
+            }
+        }
+    }
+
+    private void CancelSend() => Volatile.Read(ref _sendCancellation).Cancel();
 
     private bool IsFatal(Exception exception) => _isFatal(exception);
 
@@ -494,6 +597,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         public ValueTask SendAsync(CancellationToken delegateCancellationToken) =>
           _sendAsync!(delegateCancellationToken);
 
+        [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
         public async ValueTask ReceiveAsync(
             int generation,
             CancellationToken delegateCancellationToken)
@@ -736,16 +840,16 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         private static long GetIncompleteState(int generation) => (long)(uint)generation << 1;
     }
 
-    private sealed class BatchEntry(ICommand command)
+    private sealed class BatchEntry
     {
-        public ICommand Command { get; } = command;
+        private bool _holdsPump;
+
+        public ICommand Command { get; private set; } = null!;
 
         // Both are captured when the pump takes the command, while the rental is still live. A
         // command the pump does not hold can be recycled as soon as it completes, so they must
         // never be re-read from the command after that.
-        public int Generation { get; } = command.Generation;
-
-        private bool _holdsPump = command.HoldsPump;
+        public int Generation { get; private set; }
 
         public bool CanceledBeforeSend { get; set; }
 
@@ -754,6 +858,24 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         public Exception? SendError { get; set; }
 
         public bool IsReady { get; set; }
+
+        public void Initialize(ICommand command)
+        {
+            Command = command;
+            Generation = command.Generation;
+            _holdsPump = command.HoldsPump;
+        }
+
+        public void Clear()
+        {
+            Command = null!;
+            Generation = 0;
+            _holdsPump = false;
+            CanceledBeforeSend = false;
+            WasSent = false;
+            SendError = null;
+            IsReady = false;
+        }
 
         public void OnDequeued()
         {
@@ -773,14 +895,5 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 Command.ReleasePump();
             }
         }
-    }
-
-    private readonly struct DelegateCancellation(
-        CancellationToken token,
-        CancellationTokenSource? source) : IDisposable
-    {
-        public CancellationToken Token { get; } = token;
-
-        public void Dispose() => source?.Dispose();
     }
 }

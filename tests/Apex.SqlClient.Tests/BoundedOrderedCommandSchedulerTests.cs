@@ -568,6 +568,98 @@ public sealed class BoundedOrderedCommandSchedulerTests
     }
 
     [TestMethod]
+    public async Task DisposalNeverRunsQueuedCommandsOrADeferredBarrier()
+    {
+        BoundedOrderedCommandScheduler scheduler = new(2, 8);
+        ConcurrentQueue<string> events = [];
+        var sendStarted = NewGate();
+        var first = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1));
+        var barrier = Execute(scheduler, 2, events: events, barrier: true);
+        var third = Execute(scheduler, 3, events: events);
+        var fourth = Execute(scheduler, 4, events: events);
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync();
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(first);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(barrier);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(third);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(fourth);
+        Assert.IsEmpty(events);
+    }
+
+    [TestMethod]
+    public async Task DisposalCancelsABlockedSendOfACancellableCommand()
+    {
+        BoundedOrderedCommandScheduler scheduler = new(1, 2);
+        using CancellationTokenSource cancellation = new();
+        var sendStarted = NewGate();
+        var blocked = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1),
+          cancellationToken: cancellation.Token);
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocked);
+    }
+
+    [TestMethod]
+    public async Task ACancelledSendDoesNotCancelLaterSends()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 2);
+        using CancellationTokenSource cancellation = new();
+        var sendStarted = NewGate();
+        var canceled = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1),
+          cancellationToken: cancellation.Token);
+        await sendStarted.Task;
+        cancellation.Cancel();
+        await AssertValueTaskThrowsExactlyAsync<OperationCanceledException, int>(canceled);
+
+        for (var i = 0; i < 3; i++)
+        {
+            using CancellationTokenSource later = new();
+            var canceledOnEntry = true;
+            var canceledAfterCallerCancel = false;
+            Assert.AreEqual(
+              i,
+              await scheduler.ExecuteAsync(
+                cancellationToken =>
+                {
+                    canceledOnEntry = cancellationToken.IsCancellationRequested;
+
+                    // The caller's token still reaches the send it runs with.
+                    later.Cancel();
+                    canceledAfterCallerCancel = cancellationToken.IsCancellationRequested;
+                    return ValueTask.CompletedTask;
+                },
+                _ => ValueTask.FromResult(i),
+                cancellationToken: later.Token));
+            Assert.IsFalse(canceledOnEntry);
+            Assert.IsTrue(canceledAfterCallerCancel);
+        }
+
+        Assert.AreEqual(3, await Execute(scheduler, 3));
+    }
+
+    [TestMethod]
     public async Task DisposalFailsCommandsWaitingForChannelCapacity()
     {
         BoundedOrderedCommandScheduler scheduler = new(1, 1);
