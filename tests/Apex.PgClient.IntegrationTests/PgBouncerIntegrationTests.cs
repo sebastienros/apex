@@ -59,6 +59,20 @@ public sealed class PgBouncerIntegrationTests
                 Assert.AreEqual(i, rows[0].Get<int>(0));
             }
 
+            // The driver waits for the cancel connection to close, so PgBouncer must close it
+            // promptly once it has forwarded the request.
+            using (CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(300)))
+            {
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                await Assert.ThrowsAsync<OperationCanceledException>(
+                  () => connection.QueryAsync("SELECT pg_sleep(10)", cancellation.Token).AsTask());
+                Assert.IsLessThan(
+                  TimeSpan.FromSeconds(5),
+                  System.Diagnostics.Stopwatch.GetElapsedTime(started));
+            }
+
+            Assert.AreEqual(7, (await connection.QueryAsync("SELECT 7::int4"))[0].Get<int>(0));
+
             await using var transaction = await connection.BeginTransactionAsync();
             await using var statement =
               await connection.PrepareAsync("SELECT $1::int4 AS value");

@@ -647,7 +647,7 @@ public sealed class PgConnectionWireTests
         Assert.AreEqual(0, payload.Length);
     }
 
-    private static async Task ReadStartupAsync(
+    internal static async Task ReadStartupAsync(
         Stream stream,
         CancellationToken cancellationToken = default)
     {
@@ -659,7 +659,7 @@ public sealed class PgConnectionWireTests
         Assert.AreEqual(196608, BinaryPrimitives.ReadInt32BigEndian(startup));
     }
 
-    private static async Task WriteStartupCompleteAsync(
+    internal static async Task WriteStartupCompleteAsync(
         Stream stream,
         CancellationToken cancellationToken = default)
     {
@@ -677,13 +677,13 @@ public sealed class PgConnectionWireTests
         await WriteMessageAsync(stream, (byte)'Z', [(byte)'I'], cancellationToken);
     }
 
-    private static byte[] RowDescription() =>
+    internal static byte[] RowDescription() =>
         Join(
             Int16(2),
             Column("id", 23, 4),
             Column("message", 25, -1));
 
-    private static byte[] Column(string name, int typeId, short typeSize) =>
+    internal static byte[] Column(string name, int typeId, short typeSize) =>
         Join(
             CString(name),
             Int32(0),
@@ -693,7 +693,7 @@ public sealed class PgConnectionWireTests
             Int32(-1),
             Int16(0));
 
-    private static byte[] DataRow(params string[] values)
+    internal static byte[] DataRow(params string[] values)
     {
         List<byte[]> parts = [Int16(checked((short)values.Length))];
         foreach (var value in values)
@@ -706,7 +706,7 @@ public sealed class PgConnectionWireTests
         return Join(parts.ToArray());
     }
 
-    private static byte[] DataRowBytes(params byte[][] values)
+    internal static byte[] DataRowBytes(params byte[][] values)
     {
         List<byte[]> parts = [Int16(checked((short)values.Length))];
         foreach (var value in values)
@@ -718,7 +718,7 @@ public sealed class PgConnectionWireTests
         return Join(parts.ToArray());
     }
 
-    private static async Task WriteSingleTextResultAsync(
+    internal static async Task WriteSingleTextResultAsync(
         Stream stream,
         string value,
         CancellationToken cancellationToken = default)
@@ -737,7 +737,7 @@ public sealed class PgConnectionWireTests
         await WriteMessageAsync(stream, (byte)'Z', [(byte)'I'], cancellationToken);
     }
 
-    private static async Task WriteMessageAsync(
+    internal static async Task WriteMessageAsync(
         Stream stream,
         byte type,
         byte[] payload,
@@ -751,7 +751,7 @@ public sealed class PgConnectionWireTests
         await stream.FlushAsync(cancellationToken);
     }
 
-    private static async Task<(byte Type, byte[] Payload)> ReadMessageAsync(
+    internal static async Task<(byte Type, byte[] Payload)> ReadMessageAsync(
         Stream stream,
         CancellationToken cancellationToken = default)
     {
@@ -763,33 +763,33 @@ public sealed class PgConnectionWireTests
         return (header[0], payload);
     }
 
-    private static byte[] CString(string value) =>
+    internal static byte[] CString(string value) =>
         [.. System.Text.Encoding.UTF8.GetBytes(value), 0];
 
-    private static string CStringValue(byte[] value) =>
+    internal static string CStringValue(byte[] value) =>
         System.Text.Encoding.UTF8.GetString(value.AsSpan(0, value.Length - 1));
 
-    private static string FirstCStringValue(byte[] value)
+    internal static string FirstCStringValue(byte[] value)
     {
         var length = Array.IndexOf(value, (byte)0);
         return System.Text.Encoding.UTF8.GetString(value.AsSpan(0, length));
     }
 
-    private static byte[] Int16(short value)
+    internal static byte[] Int16(short value)
     {
         var bytes = new byte[2];
         BinaryPrimitives.WriteInt16BigEndian(bytes, value);
         return bytes;
     }
 
-    private static byte[] Int32(int value)
+    internal static byte[] Int32(int value)
     {
         var bytes = new byte[4];
         BinaryPrimitives.WriteInt32BigEndian(bytes, value);
         return bytes;
     }
 
-    private static byte[] Join(params byte[][] parts)
+    internal static byte[] Join(params byte[][] parts)
     {
         var result = new byte[parts.Sum(static part => part.Length)];
         var offset = 0;
