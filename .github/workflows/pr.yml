@@ -29,9 +29,17 @@ jobs:
           global-json-file: global.json
       - name: Version
         run: dotnet --version
+      # Restore and build outside the Test step: on a cold Windows runner the build alone
+      # takes about a minute, while the tests finish in seconds.
+      - name: Restore
+        timeout-minutes: 5
+        run: dotnet restore "${{ github.workspace }}/${{ matrix.project }}"
+      - name: Build
+        timeout-minutes: 5
+        run: dotnet build "${{ github.workspace }}/${{ matrix.project }}" --configuration Release --no-restore
       - name: Test
-        timeout-minutes: 1
-        run: dotnet test --project "${{ github.workspace }}/${{ matrix.project }}" --configuration Release
+        timeout-minutes: 2
+        run: dotnet test --project "${{ github.workspace }}/${{ matrix.project }}" --configuration Release --no-build
 
   databases:
     uses: ./.github/workflows/tests.yml

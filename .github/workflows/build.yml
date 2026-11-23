@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, sebros/dazzling-visvesvaraya-ea2bac ] # TEMP: remove branch before merge
 
 jobs:
   test:
@@ -14,17 +14,32 @@ jobs:
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      TEST_PROJECTS: >-
+        tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj
+        tests/Apex.SqlClient.AdoNet.Tests/Apex.SqlClient.AdoNet.Tests.csproj
+        tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj
+        tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj
+        tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj
+        tests/Apex.SqlClient.AzureIdentity.Tests/Apex.SqlClient.AzureIdentity.Tests.csproj
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
+      # Restore and build once, then run the already-built tests. Each step has its own
+      # budget: compiling the drivers for both TFMs dominates the job, while the tests
+      # themselves finish in seconds, so the Test step can stay tight enough to flag a hang.
+      - name: Restore
+        timeout-minutes: 5
+        run: for project in $TEST_PROJECTS; do dotnet restore "$project"; done
+      - name: Build
+        timeout-minutes: 5
+        run: for project in $TEST_PROJECTS; do dotnet build "$project" --configuration Release --no-restore; done
       - name: Test
-        timeout-minutes: 1
+        timeout-minutes: 3
         run: |
-          dotnet test --project "${{ github.workspace }}/tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj" --configuration Release
-          dotnet test --project "${{ github.workspace }}/tests/Apex.SqlClient.AdoNet.Tests/Apex.SqlClient.AdoNet.Tests.csproj" --configuration Release
-          dotnet test --project "${{ github.workspace }}/tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj" --configuration Release
-          dotnet test --project "${{ github.workspace }}/tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj" --configuration Release
-          dotnet test --project "${{ github.workspace }}/tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj" --configuration Release
-          dotnet test --project "${{ github.workspace }}/tests/Apex.SqlClient.AzureIdentity.Tests/Apex.SqlClient.AzureIdentity.Tests.csproj" --configuration Release
+          status=0
+          for project in $TEST_PROJECTS; do
+            dotnet test --project "$project" --configuration Release --no-build || status=1
+          done
+          exit $status

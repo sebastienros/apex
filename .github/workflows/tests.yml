@@ -54,6 +54,11 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
+      - name: Build
+        timeout-minutes: 5
+        run: dotnet build "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release
+      # Longer than the 90 s readiness retry in DatabaseServiceTests.ConnectWithRetryAsync, so a
+      # service that never comes up fails with the test's own TimeoutException and last error.
       - name: Test database services
-        timeout-minutes: 1
-        run: dotnet test --project "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release
+        timeout-minutes: 3
+        run: dotnet test --project "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release --no-build
