@@ -131,6 +131,35 @@ public sealed class PgWireReaderTests
         await reader.CompleteAsync();
     }
 
+    [TestMethod]
+    public async Task ReleasesGrownBufferAfterLargeMessage()
+    {
+        var large = CreateFrame((byte)'D', new byte[4 * 1024 * 1024]);
+        var small = CreateFrame((byte)'C', [(byte)'O', (byte)'K', 0]);
+        using MemoryStream stream = new([.. large, .. small, .. small]);
+        PgWireReader reader = new(stream);
+
+        using (var message = await reader.ReadAsync(CancellationToken.None))
+        {
+            Assert.AreEqual(4 * 1024 * 1024, message.PayloadLength);
+            Assert.IsGreaterThanOrEqualTo(4 * 1024 * 1024, reader.BufferLength);
+        }
+
+        using (var message = await reader.ReadAsync(CancellationToken.None))
+        {
+            Assert.AreEqual((byte)'C', message.Type);
+            CollectionAssert.AreEqual(new byte[] { (byte)'O', (byte)'K', 0 }, message.Payload.ToArray());
+            Assert.IsLessThanOrEqualTo(PgWireReader.MaximumRetainedBufferLength, reader.BufferLength);
+        }
+
+        using (var message = await reader.ReadAsync(CancellationToken.None))
+        {
+            CollectionAssert.AreEqual(new byte[] { (byte)'O', (byte)'K', 0 }, message.Payload.ToArray());
+        }
+
+        await reader.CompleteAsync();
+    }
+
     private static byte[] CreateFrame(byte type, ReadOnlySpan<byte> payload)
     {
         var frame = GC.AllocateUninitializedArray<byte>(payload.Length + 5);

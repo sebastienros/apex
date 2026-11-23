@@ -23,6 +23,11 @@ internal readonly struct PgWireMessage : IDisposable
 internal sealed class PgWireReader
 {
     private const int MaximumMessageLength = 64 * 1024 * 1024;
+    private const int InitialBufferLength = 32 * 1024;
+
+    // A buffer grown past this for one large message goes back to the pool once the data still
+    // buffered fits in a fresh initial-size buffer, so a connection does not hold up to 64 MB forever.
+    internal const int MaximumRetainedBufferLength = 1024 * 1024;
     private readonly Stream _stream;
     private byte[]? _buffer;
     private int _start;
@@ -31,11 +36,20 @@ internal sealed class PgWireReader
     public PgWireReader(Stream stream)
     {
         _stream = stream;
-        _buffer = ArrayPool<byte>.Shared.Rent(32 * 1024);
+        _buffer = ArrayPool<byte>.Shared.Rent(InitialBufferLength);
     }
+
+    internal int BufferLength => _buffer?.Length ?? 0;
 
     public async ValueTask<PgWireMessage> ReadAsync(CancellationToken cancellationToken)
     {
+        // The previous message's payload is only valid until this call, so the buffer it points
+        // into can be released here.
+        if (_buffer is { Length: > MaximumRetainedBufferLength })
+        {
+            ShrinkBuffer();
+        }
+
         await EnsureBufferedAsync(5, cancellationToken).ConfigureAwait(false);
         var buffer = _buffer!;
         var length = BinaryPrimitives.ReadInt32BigEndian(
@@ -77,6 +91,29 @@ internal sealed class PgWireReader
         }
 
         return ValueTask.CompletedTask;
+    }
+
+    private void ShrinkBuffer()
+    {
+        var buffer = _buffer!;
+        var available = _end - _start;
+        if (available > InitialBufferLength)
+        {
+            return;
+        }
+
+        var shrunk = ArrayPool<byte>.Shared.Rent(InitialBufferLength);
+        buffer.AsSpan(_start, available).CopyTo(shrunk);
+        if (Interlocked.CompareExchange(ref _buffer, shrunk, buffer) != buffer)
+        {
+            // CompleteAsync released the buffer concurrently; EnsureBufferedAsync reports it.
+            ArrayPool<byte>.Shared.Return(shrunk);
+            return;
+        }
+
+        _start = 0;
+        _end = available;
+        ArrayPool<byte>.Shared.Return(buffer);
     }
 
     private async ValueTask EnsureBufferedAsync(
