@@ -100,7 +100,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
     private async Task PumpAsync()
     {
-        ICommand? deferred = null;
+        BatchEntry? deferred = null;
         List<BatchEntry> batch = [];
 
         try
@@ -108,24 +108,30 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             while (await TryGetNextAsync(deferred).ConfigureAwait(false) is { } next)
             {
                 deferred = null;
-                if (next.CancellationToken.IsCancellationRequested)
+                next.OnDequeued();
+                if (next.Command.CancellationToken.IsCancellationRequested)
                 {
-                    next.Cancel(next.Generation);
+                    next.Command.Cancel(next.Generation);
+                    next.ReleasePump();
                     continue;
                 }
 
-                batch.Add(new BatchEntry(next));
-                if (!next.IsBarrier)
+                batch.Add(next);
+                if (!next.Command.IsBarrier)
                 {
                     while (batch.Count < _inFlightLimit && _commands.Reader.TryRead(out var candidate))
                     {
+                        var entry = new BatchEntry(candidate);
                         if (candidate.IsBarrier)
                         {
-                            deferred = candidate;
+                            // A deferred barrier is still queued from its caller's point of view,
+                            // so it keeps its early-cancellation registration until it runs.
+                            deferred = entry;
                             break;
                         }
 
-                        batch.Add(new BatchEntry(candidate));
+                        entry.OnDequeued();
+                        batch.Add(entry);
                     }
                 }
 
@@ -147,16 +153,23 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         finally
         {
             var terminalError = GetTerminalError();
-            deferred?.Fail(deferred.Generation, terminalError);
+            if (deferred is not null)
+            {
+                deferred.Command.Fail(deferred.Generation, terminalError);
+                deferred.ReleasePump();
+            }
+
             FailBatch(batch, terminalError);
             while (_commands.Reader.TryRead(out var command))
             {
-                command.Fail(command.Generation, terminalError);
+                var entry = new BatchEntry(command);
+                command.Fail(entry.Generation, terminalError);
+                entry.ReleasePump();
             }
         }
     }
 
-    private async ValueTask<ICommand?> TryGetNextAsync(ICommand? deferred)
+    private async ValueTask<BatchEntry?> TryGetNextAsync(BatchEntry? deferred)
     {
         if (deferred is not null)
         {
@@ -167,7 +180,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         {
             if (_commands.Reader.TryRead(out var command))
             {
-                return command;
+                return new BatchEntry(command);
             }
         }
 
@@ -266,17 +279,21 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             if (entry.CanceledBeforeSend)
             {
                 entry.Command.Cancel(entry.Generation);
+                entry.ReleasePump();
                 continue;
             }
 
             if (entry.SendError is { } sendError)
             {
                 CompleteFromDelegateError(entry, sendError);
+                entry.ReleasePump();
                 continue;
             }
 
             if (!entry.WasSent)
             {
+                // A fatal send error stopped the batch before this command; FailBatch completes
+                // and releases it once the batch unwinds.
                 continue;
             }
 
@@ -289,12 +306,15 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             {
                 if (IsFatal(exception))
                 {
+                    // Left incomplete and held: FailBatch fails it with the terminal error.
                     Stop(exception);
                     return false;
                 }
 
                 CompleteFromDelegateError(entry, exception);
             }
+
+            entry.ReleasePump();
         }
 
         return true;
@@ -367,6 +387,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         foreach (var entry in batch)
         {
             entry.Command.Fail(entry.Generation, exception);
+            entry.ReleasePump();
         }
     }
 
@@ -379,6 +400,17 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         int Generation { get; }
 
         CancellationToken CancellationToken { get; }
+
+        // True when the pump holds an ownership of this rental that it must give back with
+        // ReleasePump. Only read when the pump takes the command from the channel, while the
+        // rental is guaranteed to be live.
+        bool HoldsPump { get; }
+
+        // Called by the pump when it takes the command to run it: from then on, cancellation is
+        // observed by the pump rather than completing the command early.
+        void OnDequeued();
+
+        void ReleasePump();
 
         ValueTask SendAsync(CancellationToken cancellationToken);
 
@@ -400,8 +432,18 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         // The channel publishes the command to the pump before that continuation runs, so the
         // caller can consume the completion first. Whichever owner releases last returns the
         // command to the pool, so a stale continuation never reads a later rental's state.
+        //
+        // A command whose token can be cancelled is also owned by the pump from the moment it is
+        // written to the channel until the pump is done with it. Such a command completes early
+        // when it is cancelled while queued, so its caller can consume it and release while the
+        // object is still in the channel; the pump's ownership keeps it from being recycled and
+        // rented again under the stale channel entry. A command whose token cannot be cancelled
+        // is only ever completed by the pump once it is queued, so it needs no such ownership.
         private const int CallerOwner = 1;
         private const int EnqueueOwner = 2;
+        private const int PumpOwner = 4;
+        private static readonly Action<object?> s_cancelQueued =
+          static state => ((Command<T>)state!).CancelQueued();
         private readonly Action _continueEnqueue;
         private ManualResetValueTaskSourceCore<T> _completion;
         private Func<CancellationToken, ValueTask>? _sendAsync;
@@ -409,11 +451,13 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         private BoundedOrderedCommandScheduler? _scheduler;
         private CancellationToken _cancellationToken;
         private ValueTask _pendingWrite;
+        private CancellationTokenRegistration _queuedCancellation;
         private long _completionState;
         private int _generation;
         private int _owners;
         private bool _isBarrier;
         private bool _flushBatch;
+        private bool _holdsPump;
         private int _consumed;
 
         private Command()
@@ -430,6 +474,22 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         public int Generation => Volatile.Read(ref _generation);
 
         public CancellationToken CancellationToken => _cancellationToken;
+
+        public bool HoldsPump => _holdsPump;
+
+        public void OnDequeued()
+        {
+            // Dispose waits for a callback that is already running, so once this returns no
+            // early cancellation can complete the command behind the pump's back.
+            _queuedCancellation.Dispose();
+            _queuedCancellation = default;
+        }
+
+        public void ReleasePump()
+        {
+            OnDequeued();
+            Release(PumpOwner);
+        }
 
         public ValueTask SendAsync(CancellationToken delegateCancellationToken) =>
           _sendAsync!(delegateCancellationToken);
@@ -527,6 +587,14 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         public void Enqueue(ChannelWriter<ICommand> writer)
         {
             var generation = Generation;
+            if (_holdsPump)
+            {
+                // Registered before the write publishes the command, so the pump always sees the
+                // registration it must dispose. If the token is already cancelled the callback
+                // runs inline and the write below fails fast with the same cancellation.
+                _queuedCancellation = _cancellationToken.UnsafeRegister(s_cancelQueued, this);
+            }
+
             ValueTask write;
             try
             {
@@ -535,6 +603,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             catch (Exception exception)
             {
                 Fail(generation, exception);
+                ReleaseUnqueuedPumpOwnership();
                 return;
             }
 
@@ -566,8 +635,9 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             _cancellationToken = cancellationToken;
             _isBarrier = isBarrier;
             _flushBatch = flushBatch;
+            _holdsPump = cancellationToken.CanBeCanceled;
             Volatile.Write(ref _consumed, 0);
-            Volatile.Write(ref _owners, CallerOwner);
+            Volatile.Write(ref _owners, _holdsPump ? CallerOwner | PumpOwner : CallerOwner);
             var generation = unchecked(_generation + 1);
             Volatile.Write(ref _generation, generation);
             Volatile.Write(ref _completionState, GetIncompleteState(generation));
@@ -599,8 +669,10 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             _scheduler = null;
             _cancellationToken = default;
             _pendingWrite = default;
+            _queuedCancellation = default;
             _isBarrier = false;
             _flushBatch = false;
+            _holdsPump = false;
             if (Interlocked.Increment(ref s_poolCount) <= MaximumPoolSize)
             {
                 s_pool.Enqueue(this);
@@ -616,6 +688,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             try
             {
                 write.GetAwaiter().GetResult();
+                return;
             }
             catch (OperationCanceledException) when (_cancellationToken.IsCancellationRequested)
             {
@@ -629,6 +702,26 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             {
                 Fail(generation, exception);
             }
+
+            // The write failed, so the command never reached the pump: give its ownership back
+            // on its behalf. This runs while the caller or the writer continuation still owns
+            // the rental, so the fields are still this rental's.
+            ReleaseUnqueuedPumpOwnership();
+        }
+
+        private void ReleaseUnqueuedPumpOwnership()
+        {
+            if (_holdsPump)
+            {
+                ReleasePump();
+            }
+        }
+
+        private void CancelQueued()
+        {
+            // The registration is disposed before the pump releases its ownership, and the pump
+            // releases before the rental can be recycled, so this generation is still ours.
+            Cancel(Generation);
         }
 
         private bool TryBeginCompletion(int generation)
@@ -647,7 +740,12 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
     {
         public ICommand Command { get; } = command;
 
+        // Both are captured when the pump takes the command, while the rental is still live. A
+        // command the pump does not hold can be recycled as soon as it completes, so they must
+        // never be re-read from the command after that.
         public int Generation { get; } = command.Generation;
+
+        private bool _holdsPump = command.HoldsPump;
 
         public bool CanceledBeforeSend { get; set; }
 
@@ -656,6 +754,25 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         public Exception? SendError { get; set; }
 
         public bool IsReady { get; set; }
+
+        public void OnDequeued()
+        {
+            if (_holdsPump)
+            {
+                Command.OnDequeued();
+            }
+        }
+
+        // Gives the pump's ownership back exactly once. Callers complete the command first: the
+        // release may return the rental to the pool.
+        public void ReleasePump()
+        {
+            if (_holdsPump)
+            {
+                _holdsPump = false;
+                Command.ReleasePump();
+            }
+        }
     }
 
     private readonly struct DelegateCancellation(

@@ -490,6 +490,84 @@ public sealed class BoundedOrderedCommandSchedulerTests
     }
 
     [TestMethod]
+    public async Task CancellationWhileQueuedCompletesBeforeEarlierCommandsFinish()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 4);
+        ConcurrentQueue<string> events = [];
+        using CancellationTokenSource cancellation = new();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+
+        var canceled = Execute(scheduler, 2, events: events, cancellationToken: cancellation.Token);
+        var third = Execute(scheduler, 3, events: events);
+        Assert.IsFalse(canceled.IsCompleted);
+
+        cancellation.Cancel();
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+          async () =>
+          {
+              _ = await canceled.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+          });
+        Assert.IsFalse(third.IsCompleted);
+
+        releasePump.SetResult();
+        await blocker;
+        Assert.AreEqual(3, await third);
+        CollectionAssert.AreEqual(new[] { "send-3", "receive-3" }, events.ToArray());
+
+        // The early-completed rental is still referenced by its channel entry until the pump skips
+        // it; renting again afterwards must not run any command twice.
+        for (var i = 0; i < 100; i++)
+        {
+            using CancellationTokenSource unused = new();
+            Assert.AreEqual(i, await Execute(scheduler, i, cancellationToken: unused.Token));
+        }
+    }
+
+    [TestMethod]
+    public async Task CancellationOfADeferredBarrierCompletesBeforeTheBatchFinishes()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(2, 4);
+        ConcurrentQueue<string> events = [];
+        using CancellationTokenSource cancellation = new();
+        var sendStarted = NewGate();
+        var releaseSend = NewGate();
+
+        var first = Execute(
+          scheduler,
+          1,
+          send: async _ =>
+          {
+              sendStarted.SetResult();
+              await releaseSend.Task;
+          },
+          events: events);
+        var barrier = Execute(
+          scheduler,
+          2,
+          events: events,
+          barrier: true,
+          cancellationToken: cancellation.Token);
+        var third = Execute(scheduler, 3, events: events);
+        await sendStarted.Task;
+
+        cancellation.Cancel();
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+          async () =>
+          {
+              _ = await barrier.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+          });
+        Assert.IsFalse(first.IsCompleted);
+
+        releaseSend.SetResult();
+        CollectionAssert.AreEqual(
+          new[] { 1, 3 },
+          await Task.WhenAll(first.AsTask(), third.AsTask()));
+        CollectionAssert.AreEqual(
+          new[] { "receive-1", "send-3", "receive-3" },
+          events.ToArray());
+    }
+
+    [TestMethod]
     public async Task DisposalFailsCommandsWaitingForChannelCapacity()
     {
         BoundedOrderedCommandScheduler scheduler = new(1, 1);
@@ -600,6 +678,134 @@ public sealed class BoundedOrderedCommandSchedulerTests
         }
     }
 
+    // Callers cancel some of their commands right after submitting them, while the channel is full
+    // and the pump is busy, so a command often completes early while its channel entry is still
+    // queued. Its caller then consumes and releases it before the pump has seen the entry. The pump's
+    // ownership must keep that rental from being re-rented under the stale entry.
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task PooledCommandsSurviveCancellationWhileQueuedUnderAFullChannel()
+    {
+        const int callers = 4;
+        const int maximumCallsPerCaller = 50_000;
+        var budget = TimeSpan.FromSeconds(2);
+        var commandDeadline = TimeSpan.FromSeconds(30);
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 1);
+        var sends = new int[callers * maximumCallsPerCaller];
+        var receives = new int[callers * maximumCallsPerCaller];
+        var outcomes = new CancelStressOutcome[callers * maximumCallsPerCaller];
+        var issued = new int[callers];
+        ConcurrentQueue<string> failures = [];
+        var elapsed = Stopwatch.StartNew();
+
+        var threads = Enumerable.Range(0, callers)
+          .Select(caller => new Thread(() => RunCaller(caller)) { IsBackground = true })
+          .ToArray();
+        foreach (var thread in threads)
+        {
+            thread.Start();
+        }
+
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        // The channel is FIFO, so once this completes the pump has skipped or run every earlier entry.
+        Assert.AreEqual(-1, await Execute(scheduler, -1));
+
+        Assert.IsEmpty(failures, string.Join(Environment.NewLine, failures.Take(10)));
+        var canceledCount = 0;
+        for (var caller = 0; caller < callers; caller++)
+        {
+            for (var call = 0; call < issued[caller]; call++)
+            {
+                var id = caller * maximumCallsPerCaller + call;
+                var expected = outcomes[id] == CancelStressOutcome.Completed ? 1 : 0;
+                canceledCount += 1 - expected;
+                if (sends[id] != expected || receives[id] != expected)
+                {
+                    Assert.Fail(
+                      $"Command {id} ({outcomes[id]}) was sent {sends[id]} and received {receives[id]} times.");
+                }
+            }
+        }
+
+        Assert.IsGreaterThan(0, canceledCount);
+
+        void RunCaller(int caller)
+        {
+            var random = new Random(caller);
+            for (var call = 0;
+                 call < maximumCallsPerCaller && failures.IsEmpty && elapsed.Elapsed < budget;
+                 call++)
+            {
+                var id = caller * maximumCallsPerCaller + call;
+                issued[caller] = call + 1;
+
+                // 0: no token; 1: a token that is never cancelled; 2: cancelled right after
+                // submission; 3: already cancelled.
+                var mode = random.Next(4);
+                using var cancellation = mode == 0 ? null : new CancellationTokenSource();
+                if (mode == 3)
+                {
+                    cancellation!.Cancel();
+                }
+
+                try
+                {
+                    var command = scheduler.ExecuteAsync(
+                      _ =>
+                      {
+                          Interlocked.Increment(ref sends[id]);
+                          return ValueTask.CompletedTask;
+                      },
+                      _ =>
+                      {
+                          Interlocked.Increment(ref receives[id]);
+                          return ValueTask.FromResult(new CancelStressResult(id));
+                      },
+                      cancellationToken: cancellation?.Token ?? default);
+                    if (mode == 2)
+                    {
+                        cancellation!.Cancel();
+                    }
+
+                    var submitted = elapsed.Elapsed;
+                    SpinWait spin = default;
+                    while (!command.IsCompleted)
+                    {
+                        if (elapsed.Elapsed - submitted > commandDeadline)
+                        {
+                            failures.Enqueue($"Command {id} did not complete.");
+                            return;
+                        }
+
+                        spin.SpinOnce(sleep1Threshold: -1);
+                    }
+
+                    try
+                    {
+                        var result = command.GetAwaiter().GetResult();
+                        outcomes[id] = CancelStressOutcome.Completed;
+                        if (result.Id != id)
+                        {
+                            failures.Enqueue($"Command {id} completed with the result of command {result.Id}.");
+                        }
+                    }
+                    catch (OperationCanceledException) when (mode >= 2)
+                    {
+                        outcomes[id] = CancelStressOutcome.Canceled;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    failures.Enqueue($"Command {id} (mode {mode}) failed: {exception.GetType().Name}: {exception.Message}");
+                }
+            }
+        }
+    }
+
     private static ValueTask<int> Execute(
         BoundedOrderedCommandScheduler scheduler,
         int value,
@@ -669,4 +875,13 @@ public sealed class BoundedOrderedCommandSchedulerTests
     // A dedicated result type gives the stress test its own static command pool, isolated from the
     // Command<int> pool that the other tests share.
     private readonly record struct StressResult(int Id);
+
+    private readonly record struct CancelStressResult(int Id);
+
+    private enum CancelStressOutcome
+    {
+        NotObserved,
+        Completed,
+        Canceled,
+    }
 }
