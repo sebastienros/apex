@@ -676,6 +676,8 @@ public sealed class MsSqlConnectionWireTests
         {
             var results = (ISqlResultBoundaryReader)reader;
             Assert.IsTrue(await results.InitializeAsync());
+            // The streaming reader takes its columns from the same connection cache.
+            Assert.AreSame(first.Columns, reader.Columns);
             Assert.AreEqual(1, reader.GetInt32(0));
             Assert.IsTrue(await reader.ReadAsync());
             Assert.AreEqual(2, reader.GetInt32(0));

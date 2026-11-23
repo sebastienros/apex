@@ -30,6 +30,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     private readonly MsSqlRowDecoder _rowDecoder;
     private readonly TdsResultShapeCache _resultShapes = new();
     private readonly TdsQueryParser _queryParser;
+    private readonly TdsStreamingTokenReader _queryTokens;
     private readonly Action<MsSqlInfo> _infoHandler;
     private readonly Action<TdsEnvironmentChangeInfo> _environmentHandler;
     private readonly BoundedOrderedCommandScheduler _scheduler;
@@ -62,6 +63,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
           options.StringCacheCapacity,
           options.StringCacheMaximumByteLength);
         _queryParser = new TdsQueryParser(_rowDecoder, _resultShapes);
+        _queryTokens = new TdsStreamingTokenReader(_reader, CancellationToken.None);
         _infoHandler = InvokeInfo;
         _environmentHandler = HandleEnvironmentChange;
         _scheduler = new BoundedOrderedCommandScheduler(
@@ -1111,7 +1113,8 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         using var attention = BeginAttention(cancellationToken);
         var parser = _queryParser;
         parser.Reset();
-        TdsStreamingTokenReader tokens = new(_reader, attention.ReadCancellationToken);
+        var tokens = _queryTokens;
+        tokens.Reset(attention.ReadCancellationToken);
         Action<TdsReturnValue>? returnValueHandler = preparingStatement is null
           ? null
           : preparingStatement.CaptureReturnValue;

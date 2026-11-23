@@ -352,8 +352,20 @@ internal static class TdsTypeCodec
     }
 }
 
-internal readonly record struct TdsColumn(SqlColumn Column, TdsTypeInfo TypeInfo)
+internal readonly record struct TdsColumn
 {
+    internal TdsColumn(SqlColumn column, TdsTypeInfo typeInfo)
+    {
+        Column = column;
+        TypeInfo = typeInfo;
+        Layout = TdsFieldLayout.For(typeInfo);
+    }
+
+    internal SqlColumn Column { get; }
+
+    // Get-only, so a `with` expression cannot change the type without the layout.
+    internal TdsTypeInfo TypeInfo { get; }
+
     /// <summary>The wire layout of this column's values, resolved once from its type.</summary>
-    internal TdsFieldLayout Layout { get; } = TdsFieldLayout.For(TypeInfo);
+    internal TdsFieldLayout Layout { get; }
 }

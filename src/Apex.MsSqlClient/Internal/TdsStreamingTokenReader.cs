@@ -11,8 +11,9 @@ internal sealed class TdsStreamingTokenReader
     private static readonly TdsTokenMeasure s_measureColumns = TdsTypeCodec.MeasureColumns;
     private static readonly TdsTokenMeasure s_measureReturnValueHeader =
       TdsTypeCodec.MeasureReturnValueHeader;
+    private const int RetainedValueBufferLimit = 64 * 1024;
     private readonly TdsPacketReader _reader;
-    private readonly CancellationToken _cancellationToken;
+    private CancellationToken _cancellationToken;
     private byte[]? _primitive;
     private TdsRowBuffer? _discarded;
     private byte[] _nullBitmap = [];
@@ -26,6 +27,19 @@ internal sealed class TdsStreamingTokenReader
     }
 
     internal bool HasRemaining => !_reader.EndOfMessage;
+
+    /// <summary>
+    /// Prepares a reader kept by its connection for the next command, which reads under
+    /// <paramref name="cancellationToken"/>.
+    /// </summary>
+    internal void Reset(CancellationToken cancellationToken)
+    {
+        _cancellationToken = cancellationToken;
+        if (_discarded?.Capacity > RetainedValueBufferLimit)
+        {
+            _discarded = null;
+        }
+    }
 
     // Only reads that cross a packet or receive boundary need it.
     private byte[] Primitive => _primitive ??= new byte[8];

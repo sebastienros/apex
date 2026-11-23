@@ -206,6 +206,37 @@ public sealed class TdsResultShapeCacheTests
         reader.Release();
     }
 
+    [TestMethod]
+    public void ReusedParserDropsARowBufferGrownForALargeValue()
+    {
+        ArrayBufferWriter<byte> response = new();
+        response.WriteByte(TdsTokenType.ColumnMetadata);
+        response.WriteUInt16LittleEndian(1);
+        response.WriteUInt32LittleEndian(0);
+        response.WriteUInt16LittleEndian(0);
+        response.WriteByte(TdsDataType.BigVarBinary);
+        response.WriteUInt16LittleEndian(ushort.MaxValue);
+        response.WriteBVarChar("blob");
+        var value = new byte[200_000];
+        response.WriteByte(TdsTokenType.Row);
+        response.WriteUInt64LittleEndian((ulong)value.Length);
+        response.WriteUInt32LittleEndian((uint)value.Length);
+        response.Write(value);
+        response.WriteUInt32LittleEndian(0);
+        response.WriteByte(TdsTokenType.Done);
+        response.WriteUInt16LittleEndian((ushort)TdsDoneStatus.Count);
+        response.WriteUInt16LittleEndian(0xC1);
+        response.WriteInt64LittleEndian(1);
+        TdsQueryParser parser = new(new MsSqlRowDecoder(), new TdsResultShapeCache());
+
+        var rows = parser.Parse(response.WrittenMemory).Rows;
+
+        Assert.HasCount(1, rows);
+        Assert.IsGreaterThan(value.Length, parser.RowBufferCapacity);
+        parser.Reset();
+        Assert.IsLessThanOrEqualTo(64 * 1024, parser.RowBufferCapacity);
+    }
+
     /// <summary>The TYPE_INFO of every supported type, with optional parts present.</summary>
     internal static byte[][] AllTypeInfos()
     {

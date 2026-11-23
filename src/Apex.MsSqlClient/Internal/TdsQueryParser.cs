@@ -36,6 +36,8 @@ internal sealed class TdsQueryParser
         _shapes = shapes;
     }
 
+    internal int RowBufferCapacity => _row.Capacity;
+
     /// <summary>Forgets the previous response so the parser can be reused for the next one.</summary>
     internal void Reset()
     {
