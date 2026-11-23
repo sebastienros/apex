@@ -7,6 +7,8 @@ public sealed class SqlPipelinePoolRecoveryTests
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
+    internal static readonly AsyncLocal<string?> Flow = new();
+
     [TestMethod]
     public async Task DeadConnectionIsSkippedWhileItsReplacementIsPending()
     {
@@ -42,13 +44,14 @@ public sealed class SqlPipelinePoolRecoveryTests
 
         var replacement = factory.Created[2];
         var before = second.QueryCount;
+        var replacementBefore = replacement.QueryCount;
         for (var i = 0; i < 10; i++)
         {
             await pool.QueryAsync("SELECT 1");
         }
 
         Assert.AreEqual(1, first.DisposeCount);
-        Assert.AreEqual(5, replacement.QueryCount);
+        Assert.AreEqual(replacementBefore + 5, replacement.QueryCount);
         Assert.AreEqual(before + 5, second.QueryCount);
         Assert.AreEqual(1, factory.ReplacementAttempts);
     }
@@ -301,10 +304,177 @@ public sealed class SqlPipelinePoolRecoveryTests
         Assert.IsTrue(factory.Created.All(static c => c.DisposeCount == 1));
     }
 
+    [TestMethod]
+    public async Task RejectsReconnectDelaysThatCannotBackOff()
+    {
+        (TimeSpan Initial, TimeSpan? Maximum)[] invalid =
+        [
+            (TimeSpan.Zero, null),
+            (TimeSpan.FromMilliseconds(-1), null),
+            (TimeSpan.FromMilliseconds(-5), null),
+            (TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(5)),
+        ];
+        var attempts = 0;
+        foreach (var (initial, maximum) in invalid)
+        {
+            await Assert.ThrowsExactlyAsync<ArgumentOutOfRangeException>(
+                () => SqlPipelinePool.CreateAsync(
+                    new SqlPipelinePoolOptions { ConnectionCount = 1 },
+                    _ =>
+                    {
+                        attempts++;
+                        return ValueTask.FromResult<ISqlConnection>(new FakeConnection(new(1)));
+                    },
+                    static _ => true,
+                    CancellationToken.None,
+                    initial,
+                    maximum).AsTask());
+        }
+
+        Assert.AreEqual(0, attempts);
+    }
+
+    [TestMethod]
+    public async Task ReconnectFailureIsReportedOnceEveryConnectionIsDown()
+    {
+        ConnectionFactory factory = new(initialConnections: 2) { FailuresBeforeSuccess = int.MaxValue };
+        await using var pool = await factory.CreatePoolAsync();
+        var (first, second) = (factory.Created[0], factory.Created[1]);
+        await using var statement = await pool.PrepareAsync("SELECT value");
+
+        first.Kill();
+        second.Kill();
+        await Assert.ThrowsExactlyAsync<IOException>(() => pool.QueryAsync("SELECT 1").AsTask());
+
+        // A third attempt means one slot already failed once and recorded why.
+        await factory.WaitForAttemptsAsync(3);
+        var queryError = await Assert.ThrowsExactlyAsync<SqlClientException>(
+            () => pool.QueryAsync("SELECT 1").AsTask());
+        Assert.IsInstanceOfType<IOException>(queryError.InnerException);
+        Assert.Contains("Connection refused.", queryError.Message);
+        var statementError = await Assert.ThrowsExactlyAsync<SqlClientException>(
+            () => statement.ExecuteAsync().AsTask());
+        Assert.IsInstanceOfType<IOException>(statementError.InnerException);
+
+        factory.FailuresBeforeSuccess = 0;
+        await Task.WhenAll(first.Disposed.Task, second.Disposed.Task).WaitAsync(Timeout);
+        await pool.QueryAsync("SELECT 1");
+        await statement.ExecuteAsync();
+    }
+
+    [TestMethod]
+    public async Task StatementHoleIsPreparedAgainOnceThePrepareWorks()
+    {
+        ConnectionFactory factory = new(initialConnections: 1);
+        await using var pool = await factory.CreatePoolAsync();
+        var first = factory.Created[0];
+        await using var statement = await pool.PrepareAsync("SELECT migrating");
+        factory.RejectedSql = "SELECT migrating";
+
+        first.Kill();
+        await Assert.ThrowsExactlyAsync<IOException>(() => pool.QueryAsync("SELECT 1").AsTask());
+        await first.Disposed.Task.WaitAsync(Timeout);
+        var replacement = factory.Created[1];
+        Assert.IsTrue(replacement.IsAlive);
+
+        var error = await Assert.ThrowsExactlyAsync<SqlClientException>(
+            () => statement.ExecuteAsync().AsTask());
+        Assert.Contains("could not be prepared", error.Message);
+        Assert.AreEqual("relation does not exist", error.InnerException?.Message);
+        Assert.DoesNotContain("reconnecting", error.Message);
+
+        factory.RejectedSql = null;
+        var deadline = DateTime.UtcNow + Timeout;
+        while (true)
+        {
+            try
+            {
+                await statement.ExecuteAsync();
+                break;
+            }
+            catch (SqlClientException) when (DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(5);
+            }
+        }
+
+        Assert.HasCount(1, replacement.Statements);
+        Assert.AreEqual("SELECT migrating", replacement.Statements[0].Sql);
+        Assert.AreEqual(1, replacement.Statements[0].ExecuteCount);
+    }
+
+    [TestMethod]
+    public async Task DeadSlotTrafficSpreadsAcrossEveryLiveSlot()
+    {
+        ConnectionFactory factory = new(initialConnections: 4);
+        await using var pool = await factory.CreatePoolAsync();
+        var created = factory.Created;
+        await using var statement = await pool.PrepareAsync("SELECT value");
+        factory.Block();
+
+        created[0].Kill();
+        for (var i = 0; i < 400; i++)
+        {
+            await pool.QueryAsync("SELECT 1");
+            await statement.ExecuteAsync();
+        }
+
+        for (var slot = 1; slot < 4; slot++)
+        {
+            Assert.IsInRange(120, 150, created[slot].QueryCount);
+            Assert.IsInRange(120, 150, created[slot].Statements[0].ExecuteCount);
+        }
+    }
+
+    [TestMethod]
+    public async Task PrepareSucceedsWhenAConnectionDiesWhilePreparing()
+    {
+        ConnectionFactory factory = new(initialConnections: 2);
+        await using var pool = await factory.CreatePoolAsync();
+        var (first, second) = (factory.Created[0], factory.Created[1]);
+        factory.DieDuringNextPrepare = true;
+
+        await using var statement = await pool.PrepareAsync("SELECT value");
+
+        Assert.IsFalse(first.IsAlive);
+        Assert.HasCount(1, second.Statements);
+        await first.Disposed.Task.WaitAsync(Timeout);
+        var replacement = factory.Created[2];
+        Assert.HasCount(1, replacement.Statements);
+        await statement.ExecuteAsync();
+        await statement.ExecuteAsync();
+        Assert.AreEqual(1, replacement.Statements[0].ExecuteCount);
+        Assert.AreEqual(1, second.Statements[0].ExecuteCount);
+    }
+
+    [TestMethod]
+    public async Task ReconnectDoesNotRunInTheCallersExecutionContext()
+    {
+        ConnectionFactory factory = new(initialConnections: 2) { FailuresBeforeSuccess = 1 };
+        await using var pool = await factory.CreatePoolAsync();
+        var first = factory.Created[0];
+
+        Flow.Value = "request";
+        try
+        {
+            first.Kill();
+            await pool.QueryAsync("SELECT 1");
+        }
+        finally
+        {
+            Flow.Value = null;
+        }
+
+        await first.Disposed.Task.WaitAsync(Timeout);
+        Assert.HasCount(2, factory.ObservedFlow);
+        Assert.IsTrue(factory.ObservedFlow.All(static value => value is null));
+    }
+
     private sealed class ConnectionFactory(int initialConnections)
     {
         private readonly object _gate = new();
         private readonly List<FakeConnection> _created = [];
+        private readonly List<string?> _observedFlow = [];
         private TaskCompletionSource _release = CompletedSource();
         private TaskCompletionSource _attempted = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _attempts;
@@ -312,17 +482,34 @@ public sealed class SqlPipelinePoolRecoveryTests
         private int _maximumConcurrentAttempts;
         private int _failures;
 
-        internal int FailuresBeforeSuccess { get; init; }
+        internal int FailuresBeforeSuccess { get; set; }
 
         internal bool IgnoreCancellation { get; init; }
 
         internal bool DieDuringNextPrepare { get; set; }
 
-        internal string? RejectedSql { get; set; }
+        internal string? RejectedSqlField;
+
+        internal string? RejectedSql
+        {
+            get => Volatile.Read(ref RejectedSqlField);
+            set => Volatile.Write(ref RejectedSqlField, value);
+        }
 
         internal int ReplacementAttempts => Math.Max(0, Volatile.Read(ref _attempts) - initialConnections);
 
         internal int MaximumConcurrentAttempts => Volatile.Read(ref _maximumConcurrentAttempts);
+
+        internal IReadOnlyList<string?> ObservedFlow
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _observedFlow.ToArray();
+                }
+            }
+        }
 
         internal IReadOnlyList<FakeConnection> Created
         {
@@ -341,8 +528,8 @@ public sealed class SqlPipelinePoolRecoveryTests
                 ConnectAsync,
                 static connection => ((FakeConnection)connection).IsAlive,
                 CancellationToken.None,
-                initialReconnectDelay: TimeSpan.Zero,
-                maximumReconnectDelay: TimeSpan.FromMilliseconds(1));
+                initialReconnectDelay: TimeSpan.FromMilliseconds(1),
+                maximumReconnectDelay: TimeSpan.FromMilliseconds(2));
 
         internal void Block()
         {
@@ -392,6 +579,11 @@ public sealed class SqlPipelinePoolRecoveryTests
 
                 if (attempt > initialConnections)
                 {
+                    lock (_gate)
+                    {
+                        _observedFlow.Add(Flow.Value);
+                    }
+
                     await (IgnoreCancellation ? release : release.WaitAsync(cancellationToken));
                     if (Interlocked.Increment(ref _failures) <= FailuresBeforeSuccess)
                     {
@@ -535,7 +727,7 @@ public sealed class SqlPipelinePoolRecoveryTests
                 ThrowIfDead();
             }
 
-            if (sql == factory.RejectedSql)
+            if (sql == Volatile.Read(ref factory.RejectedSqlField))
             {
                 throw new SqlClientException("relation does not exist");
             }
