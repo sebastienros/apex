@@ -31,8 +31,10 @@ these server parameters, which are sent in the startup message: `application_nam
 `IntervalStyle` and `extra_float_digits`. Keys are case-insensitive. The driver
 sets `client_encoding=UTF8`, `DateStyle=ISO`, `IntervalStyle=iso_8601` and
 `extra_float_digits=2` by default, and decodes text-format results (the simple
-query protocol) with those settings; keep `client_encoding` UTF-8 and the
-`DateStyle` output format `ISO` (for example `DateStyle='ISO, DMY'`).
+query protocol) with those settings: keep `client_encoding` UTF-8, the
+`DateStyle` output format `ISO` (for example `DateStyle='ISO, DMY'`),
+`IntervalStyle=iso_8601`, and `extra_float_digits` at 1 or more so text floats
+round-trip.
 
 Any other key throws `FormatException`, which names the key (and the closest
 known key, for a likely typo) but not its value. Earlier versions sent every
@@ -41,7 +43,10 @@ as `sslmod=require` failed at the server with an unrelated error, and a secret
 under a misspelled key such as `pasword=` was sent to the server. To set another
 server parameter, use the libpq `options` key, for example
 `options='-c statement_timeout=5s -c lock_timeout=1s'`, or add it to the
-`Properties` option.
+`Properties` option. libpq client options that this driver does not read from
+connection strings, such as `sslrootcert` or `connect_timeout`, are rejected with
+a message that says so; set the matching `PgConnectOptions` property instead
+(for example `CertificateValidationCallback` or `ConnectTimeout`).
 
 Use a pool for concurrent application work:
 

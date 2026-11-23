@@ -26,6 +26,19 @@ public sealed record PgConnectOptions : SqlConnectOptions
         "DateStyle", "IntervalStyle", "extra_float_digits",
     ];
 
+    // libpq connection keywords that configure the client, not the server. They are rejected
+    // like any other unknown key, but sending them with options='-c …' would not work either.
+    private static readonly string[] s_libpqClientKeywords =
+    [
+        "hostaddr", "passfile", "connect_timeout", "fallback_application_name", "keepalives",
+        "keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout",
+        "replication", "gssencmode", "requiressl", "sslcompression", "sslcert", "sslkey",
+        "sslkeylogfile", "sslpassword", "sslcertmode", "sslrootcert", "sslcrl", "sslcrldir",
+        "sslsni", "requirepeer", "require_auth", "ssl_min_protocol_version",
+        "ssl_max_protocol_version", "min_protocol_version", "max_protocol_version", "krbsrvname",
+        "gsslib", "gssdelegation", "service", "target_session_attrs", "load_balance_hosts",
+    ];
+
     public PgConnectOptions()
     {
         Port = 5432;
@@ -219,6 +232,17 @@ public sealed record PgConnectOptions : SqlConnectOptions
         }
 
         // The message names the key but never its value, which may be a secret.
+        foreach (var keyword in s_libpqClientKeywords)
+        {
+            if (string.Equals(key, keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new FormatException(
+                    $"Unsupported PostgreSQL connection option '{key}': Apex.PgClient does not " +
+                    "read this libpq client option from connection strings. Set the matching " +
+                    "PgConnectOptions property instead.");
+            }
+        }
+
         var suggestion = FindSuggestion(key);
         throw new FormatException(
             $"Unsupported PostgreSQL connection option '{key}'." +
