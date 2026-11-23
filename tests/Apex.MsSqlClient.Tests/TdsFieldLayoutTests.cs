@@ -135,7 +135,7 @@ public sealed class TdsFieldLayoutTests
     }
 
     [TestMethod]
-    public async Task NegativeLegacyLobLengthIsRejectedByEveryDecoder()
+    public async Task NegativeLegacyLobLengthIsDeclinedThenReported()
     {
         TdsColumn[] columns =
         [
@@ -147,8 +147,10 @@ public sealed class TdsFieldLayoutTests
         encoded.WriteInt32LittleEndian(-5);
         var bytes = encoded.WrittenSpan.ToArray();
 
-        Assert.ThrowsExactly<InvalidDataException>(
-          () => TdsRowCodec.TryReadRow(bytes, columns, nullCompressed: false, new TdsRowBuffer(), out _));
+        // The buffered decoder never throws for bad data: it declines, and the incremental
+        // reader reports the error.
+        Assert.IsFalse(
+          TdsRowCodec.TryReadRow(bytes, columns, nullCompressed: false, new TdsRowBuffer(), out _));
 
         // Split the row across packets so the incremental reader decodes it.
         var reader = TdsPacketReader.CreateBuffered(
@@ -159,6 +161,31 @@ public sealed class TdsFieldLayoutTests
         var error = await Assert.ThrowsExactlyAsync<InvalidDataException>(
           () => tokens.ReadRowAsync(columns, nullCompressed: false, new TdsRowBuffer()).AsTask());
         StringAssert.Contains(error.Message, "negative length");
+        reader.Release();
+    }
+
+    [TestMethod]
+    public async Task PlpLengthMismatchIsDeclinedThenReported()
+    {
+        TdsColumn[] columns =
+        [
+            Column(new TdsTypeInfo(TdsDataType.BigVarBinary, ushort.MaxValue), "blob"),
+        ];
+        ArrayBufferWriter<byte> encoded = new();
+        encoded.WriteUInt64LittleEndian(10);
+        encoded.WriteUInt32LittleEndian(3);
+        encoded.Write("abc"u8);
+        encoded.WriteUInt32LittleEndian(0);
+        var bytes = encoded.WrittenSpan.ToArray();
+
+        Assert.IsFalse(
+          TdsRowCodec.TryReadRow(bytes, columns, nullCompressed: false, new TdsRowBuffer(), out _));
+        var reader = TdsPacketReader.CreateBuffered(new ChunkedStream(await FrameAsync(4096, bytes), 64), 512);
+        _ = await reader.BeginMessageAsync(default);
+        TdsStreamingTokenReader tokens = new(reader, default);
+        var error = await Assert.ThrowsExactlyAsync<InvalidDataException>(
+          () => tokens.ReadRowAsync(columns, nullCompressed: false, new TdsRowBuffer()).AsTask());
+        StringAssert.Contains(error.Message, "declared 10 bytes");
         reader.Release();
     }
 

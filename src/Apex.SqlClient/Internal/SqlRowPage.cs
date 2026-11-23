@@ -149,7 +149,11 @@ internal sealed class SqlRowPageCollectionBuilder
         _pageLength += row.Length;
     }
 
-    internal SqlRow[] Build(IReadOnlyList<SqlColumn> columns)
+    internal SqlRow[] Build(IReadOnlyList<SqlColumn> columns) =>
+      _built ?? Build(columns, SqlColumnOrdinalMapCache.GetOrAdd(columns));
+
+    /// <summary>Builds the rows with an ordinal map the caller already holds for these columns.</summary>
+    internal SqlRow[] Build(IReadOnlyList<SqlColumn> columns, SqlColumnOrdinalMap ordinals)
     {
         if (_built is not null)
         {
@@ -163,7 +167,6 @@ internal sealed class SqlRowPageCollectionBuilder
             return _built = [];
         }
 
-        var ordinals = SqlColumnOrdinalMapCache.GetOrAdd(columns);
         var rows = new SqlRow[_count];
         var index = FillPage(rows, columns, ordinals, _firstPage, 0);
         if (_additionalPages is not null)

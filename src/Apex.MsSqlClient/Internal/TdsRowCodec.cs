@@ -12,13 +12,13 @@ internal static class TdsRowCodec
 {
     internal static void ReadRow(
         ref TdsPayloadReader reader,
-        IReadOnlyList<TdsColumn> columns,
+        ReadOnlySpan<TdsColumn> columns,
         bool nullCompressed,
         TdsRowBuffer row)
     {
         if (!TryReadRow(reader.RemainingSpan, columns, nullCompressed, row, out var consumed))
         {
-            throw TdsPayloadReader.Truncated();
+            throw InvalidRow();
         }
 
         reader.Position += consumed;
@@ -26,20 +26,20 @@ internal static class TdsRowCodec
 
     /// <summary>
     /// Decodes a ROW or NBCROW token from <paramref name="source"/> in one pass. Returns
-    /// <see langword="false"/> when the row continues past the end of <paramref name="source"/>,
-    /// leaving <paramref name="row"/> partly written, so the caller can fall back to the
-    /// incremental reader. Throws <see cref="InvalidDataException"/> when the row is complete but
-    /// invalid.
+    /// <see langword="false"/> when the row continues past the end of <paramref name="source"/> or
+    /// has invalid lengths, so the caller can fall back to the incremental reader, which reads
+    /// across packets and reports the error. It never throws for bad data, and on
+    /// <see langword="false"/> <paramref name="row"/> may be partly written.
     /// </summary>
     internal static bool TryReadRow(
         ReadOnlySpan<byte> source,
-        IReadOnlyList<TdsColumn> columns,
+        ReadOnlySpan<TdsColumn> columns,
         bool nullCompressed,
         TdsRowBuffer row,
         out int consumed)
     {
         consumed = 0;
-        var count = columns.Count;
+        var count = columns.Length;
         var position = 0;
         ReadOnlySpan<byte> nullBitmap = default;
         if (nullCompressed)
@@ -83,7 +83,7 @@ internal static class TdsRowCodec
         var position = 0;
         if (!TryReadField(reader.RemainingSpan, ref position, TdsFieldLayout.For(typeInfo), value))
         {
-            throw TdsPayloadReader.Truncated();
+            throw InvalidRow();
         }
 
         reader.Position += position;
@@ -91,7 +91,7 @@ internal static class TdsRowCodec
 
     /// <summary>
     /// Appends one field from <paramref name="source"/> at <paramref name="position"/>. Returns
-    /// <see langword="false"/> when the field is incomplete.
+    /// <see langword="false"/> when the field is incomplete or invalid.
     /// </summary>
     private static bool TryReadField(
         ReadOnlySpan<byte> source,
@@ -168,7 +168,8 @@ internal static class TdsRowCodec
 
     /// <summary>
     /// Reads a legacy LOB header. <paramref name="length"/> is -1 for a null value (no text
-    /// pointer).
+    /// pointer). Returns <see langword="false"/> when the header is incomplete or its length is
+    /// negative.
     /// </summary>
     private static bool TryReadTextPointerLength(
         ReadOnlySpan<byte> source,
@@ -198,7 +199,8 @@ internal static class TdsRowCodec
         length = BinaryPrimitives.ReadInt32LittleEndian(source[(position + header - sizeof(int))..]);
         if (length < 0)
         {
-            throw NegativeLobLength();
+            // Invalid; the incremental reader reports it.
+            return false;
         }
 
         position += header;
@@ -246,7 +248,14 @@ internal static class TdsRowCodec
             position += (int)chunkLength;
         }
 
-        CompletePlp(row, lengthOffset, valueOffset, totalLength);
+        var valueLength = row.WrittenCount - valueOffset;
+        if (!PlpLengthMatches(totalLength, valueLength))
+        {
+            // Invalid; the incremental reader reports it.
+            return false;
+        }
+
+        row.PatchInt32LittleEndian(lengthOffset, valueLength);
         return true;
     }
 
@@ -258,7 +267,7 @@ internal static class TdsRowCodec
         ulong totalLength)
     {
         var valueLength = checked(row.WrittenCount - valueOffset);
-        if (totalLength != UnknownPlpLength && totalLength != (ulong)valueLength)
+        if (!PlpLengthMatches(totalLength, valueLength))
         {
             throw new InvalidDataException(
               $"SQL Server PLP value declared {totalLength} bytes but contained {valueLength}.");
@@ -268,6 +277,12 @@ internal static class TdsRowCodec
     }
 
     internal const ulong UnknownPlpLength = 0xFFFF_FFFF_FFFF_FFFE;
+
+    private static bool PlpLengthMatches(ulong totalLength, int valueLength) =>
+      totalLength == UnknownPlpLength || totalLength == (ulong)valueLength;
+
+    private static InvalidDataException InvalidRow() =>
+      new("A SQL Server row is truncated or has invalid lengths.");
 
     internal static InvalidDataException NegativeLobLength() =>
       new("SQL Server LOB value has a negative length.");

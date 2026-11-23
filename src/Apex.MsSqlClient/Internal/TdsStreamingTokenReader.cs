@@ -2,13 +2,19 @@ using System.Buffers.Binary;
 
 namespace Apex.MsSqlClient.Internal;
 
+/// <summary>Returns the length of a complete token body at the start of a span, or -1.</summary>
+internal delegate int TdsTokenMeasure(ReadOnlySpan<byte> source);
+
 internal sealed class TdsStreamingTokenReader
 {
     private const int DoneTokenLength = 12;
+    private static readonly TdsTokenMeasure s_measureColumns = TdsTypeCodec.MeasureColumns;
+    private static readonly TdsTokenMeasure s_measureReturnValueHeader =
+      TdsTypeCodec.MeasureReturnValueHeader;
     private readonly TdsPacketReader _reader;
     private readonly CancellationToken _cancellationToken;
-    private readonly byte[] _primitive = new byte[8];
-    private readonly TdsRowBuffer _discarded = new(32);
+    private byte[]? _primitive;
+    private TdsRowBuffer? _discarded;
     private byte[] _nullBitmap = [];
 
     internal TdsStreamingTokenReader(
@@ -21,28 +27,43 @@ internal sealed class TdsStreamingTokenReader
 
     internal bool HasRemaining => !_reader.EndOfMessage;
 
+    // Only reads that cross a packet or receive boundary need it.
+    private byte[] Primitive => _primitive ??= new byte[8];
+
     internal ValueTask<byte> ReadTokenTypeAsync() => ReadByteAsync();
 
-    internal async ValueTask<IReadOnlyList<TdsColumn>> ReadColumnsAsync()
+    /// <summary>Reads COLMETADATA without caching it.</summary>
+    internal async ValueTask<IReadOnlyList<TdsColumn>> ReadColumnsAsync() =>
+      (await ReadColumnMetadataAsync(cache: null).ConfigureAwait(false)).Columns;
+
+    /// <summary>
+    /// Reads COLMETADATA. With a <paramref name="cache"/>, a result shape seen before is reused
+    /// instead of parsed again.
+    /// </summary>
+    internal ValueTask<TdsResultShape> ReadColumnMetadataAsync(TdsResultShapeCache? cache)
     {
-        int count = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-        if (count == ushort.MaxValue)
+        var buffered = _reader.GetBufferedPayload();
+        var length = TdsTypeCodec.MeasureColumns(buffered);
+        if (length >= 0)
         {
-            return Array.Empty<TdsColumn>();
+            var shape = GetShape(cache, buffered[..length]);
+            _reader.AdvancePayload(length);
+            return new ValueTask<TdsResultShape>(shape);
         }
 
-        TdsColumn[] columns = new TdsColumn[count];
-        for (var i = 0; i < columns.Length; i++)
-        {
-            _ = await ReadUInt32LittleEndianAsync().ConfigureAwait(false);
-            _ = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-            var typeInfo = await ReadTypeInfoAsync().ConfigureAwait(false);
-            var name = await ReadBVarCharAsync().ConfigureAwait(false);
-            columns[i] = new TdsColumn(typeInfo.ToColumn(name), typeInfo);
-        }
-
-        return columns;
+        return ReadColumnMetadataSlowAsync(cache);
     }
+
+    private async ValueTask<TdsResultShape> ReadColumnMetadataSlowAsync(TdsResultShapeCache? cache)
+    {
+        var metadata = await CollectAsync(s_measureColumns, cache).ConfigureAwait(false);
+        var shape = GetShape(cache, metadata.Span);
+        cache?.TrimScratch();
+        return shape;
+    }
+
+    private static TdsResultShape GetShape(TdsResultShapeCache? cache, ReadOnlySpan<byte> metadata) =>
+      cache is null ? TdsResultShapeCache.Parse(metadata) : cache.GetOrAdd(metadata);
 
     internal ValueTask ReadRowAsync(
         IReadOnlyList<TdsColumn> columns,
@@ -53,7 +74,7 @@ internal sealed class TdsStreamingTokenReader
         // cross a buffer or packet boundary take the incremental path.
         if (TdsRowCodec.TryReadRow(
               _reader.GetBufferedPayload(),
-              columns,
+              AsSpan(columns),
               nullCompressed,
               row,
               out var consumed))
@@ -64,6 +85,39 @@ internal sealed class TdsStreamingTokenReader
 
         return ReadRowSlowAsync(columns, nullCompressed, row);
     }
+
+    /// <summary>
+    /// Decodes the next token when it is a ROW or NBCROW that is already fully received, so a
+    /// caller can drain buffered rows without an <see langword="await"/> per row. Returns
+    /// <see langword="false"/>, consuming nothing, for any other token or a row that is not yet
+    /// complete.
+    /// </summary>
+    internal bool TryReadBufferedRow(ReadOnlySpan<TdsColumn> columns, TdsRowBuffer row)
+    {
+        var buffered = _reader.GetBufferedPayload();
+        if (buffered.IsEmpty)
+        {
+            return false;
+        }
+
+        var token = buffered[0];
+        if (token is not (TdsTokenType.Row or TdsTokenType.NbcRow) ||
+            !TdsRowCodec.TryReadRow(
+              buffered[1..],
+              columns,
+              nullCompressed: token == TdsTokenType.NbcRow,
+              row,
+              out var consumed))
+        {
+            return false;
+        }
+
+        _reader.AdvancePayload(1 + consumed);
+        return true;
+    }
+
+    private static ReadOnlySpan<TdsColumn> AsSpan(IReadOnlyList<TdsColumn> columns) =>
+      columns as TdsColumn[] ?? [.. columns];
 
     private async ValueTask ReadRowSlowAsync(
         IReadOnlyList<TdsColumn> columns,
@@ -186,183 +240,134 @@ internal sealed class TdsStreamingTokenReader
 
     internal async ValueTask<TdsReturnValue> ReadReturnValueAsync()
     {
-        var ordinal = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-        var name = await ReadBVarCharAsync().ConfigureAwait(false);
-        var status = await ReadByteAsync().ConfigureAwait(false);
-        var userType = await ReadUInt32LittleEndianAsync().ConfigureAwait(false);
-        var flags = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-        var typeInfo = await ReadTypeInfoAsync().ConfigureAwait(false);
-        _discarded.Clear();
-        await WriteFieldAsync(_discarded, TdsFieldLayout.For(typeInfo)).ConfigureAwait(false);
+        var header = TryReadReturnValueHeader(out var parsed)
+          ? parsed
+          : ParseReturnValueHeader(
+              (await CollectAsync(s_measureReturnValueHeader, cache: null).ConfigureAwait(false)).Span);
+        var value = _discarded ??= new TdsRowBuffer(32);
+        value.Clear();
+        await WriteFieldAsync(value, TdsFieldLayout.For(header.TypeInfo)).ConfigureAwait(false);
         return TdsReturnValue.Create(
-          ordinal,
-          name,
-          status,
-          userType,
-          flags,
-          typeInfo,
-          _discarded);
+          header.Ordinal,
+          header.Name,
+          header.Status,
+          header.UserType,
+          header.Flags,
+          header.TypeInfo,
+          value);
+    }
+
+    private bool TryReadReturnValueHeader(out ReturnValueHeader header)
+    {
+        var buffered = _reader.GetBufferedPayload();
+        var length = TdsTypeCodec.MeasureReturnValueHeader(buffered);
+        if (length < 0)
+        {
+            header = default;
+            return false;
+        }
+
+        header = ParseReturnValueHeader(buffered[..length]);
+        _reader.AdvancePayload(length);
+        return true;
+    }
+
+    private static ReturnValueHeader ParseReturnValueHeader(ReadOnlySpan<byte> source)
+    {
+        TdsPayloadReader reader = new(source);
+        return new ReturnValueHeader(
+          reader.ReadUInt16LittleEndian(),
+          reader.ReadBVarChar(),
+          reader.ReadByte(),
+          reader.ReadUInt32LittleEndian(),
+          reader.ReadUInt16LittleEndian(),
+          TdsTypeCodec.ReadTypeInfo(ref reader));
     }
 
     internal async ValueTask SkipReturnValueAsync() =>
       _ = await ReadReturnValueAsync().ConfigureAwait(false);
 
-    private async ValueTask<TdsTypeInfo> ReadTypeInfoAsync()
+    /// <summary>
+    /// Collects a token body that continues past the received bytes, one receive at a time, into
+    /// a scratch buffer. <paramref name="measure"/> returns the length of a complete body at the
+    /// start of its argument, or -1 when it is incomplete. The result is valid until the scratch
+    /// buffer is used again.
+    /// </summary>
+    private async ValueTask<ReadOnlyMemory<byte>> CollectAsync(
+        TdsTokenMeasure measure,
+        TdsResultShapeCache? cache)
     {
-        var type = await ReadByteAsync().ConfigureAwait(false);
-        switch (type)
+        byte[] scratch = [];
+        var written = 0;
+        while (true)
         {
-            case TdsDataType.Null:
-            case TdsDataType.Int1:
-            case TdsDataType.Bit:
-            case TdsDataType.Int2:
-            case TdsDataType.Int4:
-            case TdsDataType.DateTime4:
-            case TdsDataType.Float4:
-            case TdsDataType.Money:
-            case TdsDataType.DateTime:
-            case TdsDataType.Float8:
-            case TdsDataType.Money4:
-            case TdsDataType.Int8:
-                return new TdsTypeInfo(type, TdsTypeCodec.FixedLength(type));
+            if (TryCollectBuffered(measure, cache, ref scratch, ref written, out var length))
+            {
+                return scratch.AsMemory(0, length);
+            }
 
-            case TdsDataType.Guid:
-            case TdsDataType.IntN:
-            case TdsDataType.BitN:
-            case TdsDataType.FloatN:
-            case TdsDataType.MoneyN:
-            case TdsDataType.DateTimeN:
-                return new TdsTypeInfo(
-                  type,
-                  await ReadByteAsync().ConfigureAwait(false));
-
-            case TdsDataType.Decimal:
-            case TdsDataType.Numeric:
-            case TdsDataType.DecimalN:
-            case TdsDataType.NumericN:
-                return new TdsTypeInfo(
-                  type,
-                  await ReadByteAsync().ConfigureAwait(false),
-                  await ReadByteAsync().ConfigureAwait(false),
-                  await ReadByteAsync().ConfigureAwait(false));
-
-            case TdsDataType.Date:
-                return new TdsTypeInfo(type, 3);
-
-            case TdsDataType.Time:
-                return await ReadScaledAsync(type, 0, 0).ConfigureAwait(false);
-            case TdsDataType.DateTime2:
-                return await ReadScaledAsync(type, 3, 0).ConfigureAwait(false);
-            case TdsDataType.DateTimeOffset:
-                return await ReadScaledAsync(type, 3, 2).ConfigureAwait(false);
-
-            case TdsDataType.Binary:
-            case TdsDataType.VarBinary:
-            case TdsDataType.BigBinary:
-            case TdsDataType.BigVarBinary:
-                return new TdsTypeInfo(
-                  type,
-                  await ReadUInt16LittleEndianAsync().ConfigureAwait(false));
-
-            case TdsDataType.Char:
-            case TdsDataType.VarChar:
-            case TdsDataType.BigChar:
-            case TdsDataType.BigVarChar:
-                return await ReadCharacterTypeAsync(type, unicode: false).ConfigureAwait(false);
-
-            case TdsDataType.NChar:
-            case TdsDataType.NVarChar:
-                return await ReadCharacterTypeAsync(type, unicode: true).ConfigureAwait(false);
-
-            case TdsDataType.Text:
-            case TdsDataType.NText:
-                return await ReadLegacyLobAsync(type, hasCollation: true).ConfigureAwait(false);
-            case TdsDataType.Image:
-                return await ReadLegacyLobAsync(type, hasCollation: false).ConfigureAwait(false);
-
-            case TdsDataType.Xml:
-                if (await ReadByteAsync().ConfigureAwait(false) != 0)
-                {
-                    _ = await ReadBVarCharAsync().ConfigureAwait(false);
-                    _ = await ReadBVarCharAsync().ConfigureAwait(false);
-                    _ = await ReadUsVarCharAsync().ConfigureAwait(false);
-                }
-
-                return new TdsTypeInfo(type, ushort.MaxValue);
-
-            case TdsDataType.Json:
-                return new TdsTypeInfo(type, ushort.MaxValue);
-
-            case TdsDataType.Udt:
-                int maximumLength = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-                _ = await ReadBVarCharAsync().ConfigureAwait(false);
-                _ = await ReadBVarCharAsync().ConfigureAwait(false);
-                _ = await ReadBVarCharAsync().ConfigureAwait(false);
-                _ = await ReadUsVarCharAsync().ConfigureAwait(false);
-                return new TdsTypeInfo(type, maximumLength);
-
-            default:
-                throw new NotSupportedException(
-                  $"SQL Server TDS data type 0x{type:X2} is not supported.");
+            // Nothing more is received yet. The body is incomplete, so its next byte is part of
+            // it; reading that one byte waits for the next receive.
+            scratch = GetScratch(cache, scratch, written + 1, written);
+            await ReadExactlyAsync(scratch.AsMemory(written, 1)).ConfigureAwait(false);
+            written++;
+            length = measure(scratch.AsSpan(0, written));
+            if (length >= 0)
+            {
+                return scratch.AsMemory(0, length);
+            }
         }
     }
 
-    private async ValueTask<TdsTypeInfo> ReadScaledAsync(
-        byte type,
-        int dateBytes,
-        int offsetBytes)
+    private bool TryCollectBuffered(
+        TdsTokenMeasure measure,
+        TdsResultShapeCache? cache,
+        ref byte[] scratch,
+        ref int written,
+        out int length)
     {
-        var scale = await ReadByteAsync().ConfigureAwait(false);
-        if (scale > 7)
+        length = -1;
+        while (true)
         {
-            throw new InvalidDataException($"Invalid SQL Server temporal scale {scale}.");
-        }
+            var buffered = _reader.GetBufferedPayload();
+            if (buffered.IsEmpty)
+            {
+                return false;
+            }
 
-        var timeBytes = scale <= 2 ? 3 : scale <= 4 ? 4 : 5;
-        return new TdsTypeInfo(
-          type,
-          timeBytes + dateBytes + offsetBytes,
-          Scale: scale);
+            scratch = GetScratch(cache, scratch, written + buffered.Length, written);
+            buffered.CopyTo(scratch.AsSpan(written));
+            length = measure(scratch.AsSpan(0, written + buffered.Length));
+            // Consume only this token's bytes: the rest of the packet belongs to later tokens.
+            var consumed = length >= 0 ? length - written : buffered.Length;
+            _reader.AdvancePayload(consumed);
+            written += consumed;
+            if (length >= 0)
+            {
+                return true;
+            }
+        }
     }
 
-    private async ValueTask<TdsTypeInfo> ReadCharacterTypeAsync(
-        byte type,
-        bool unicode)
+    private static byte[] GetScratch(
+        TdsResultShapeCache? cache,
+        byte[] scratch,
+        int length,
+        int preserve)
     {
-        int maximumLength = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-        var info = await ReadUInt32LittleEndianAsync().ConfigureAwait(false);
-        var sortId = await ReadByteAsync().ConfigureAwait(false);
-        TdsCollation collation = new(
-          info,
-          sortId,
-          unicode ? 1200 : TdsCollationCodec.ResolveCodePage(info, sortId));
-        return new TdsTypeInfo(type, maximumLength, Collation: collation);
-    }
-
-    private async ValueTask<TdsTypeInfo> ReadLegacyLobAsync(
-        byte type,
-        bool hasCollation)
-    {
-        var maximumLength = await ReadInt32LittleEndianAsync().ConfigureAwait(false);
-        TdsCollation? collation = null;
-        if (hasCollation)
+        if (cache is not null)
         {
-            var info = await ReadUInt32LittleEndianAsync().ConfigureAwait(false);
-            var sortId = await ReadByteAsync().ConfigureAwait(false);
-            var unicode = type == TdsDataType.NText;
-            collation = new TdsCollation(
-              info,
-              sortId,
-              unicode ? 1200 : TdsCollationCodec.ResolveCodePage(info, sortId));
+            return cache.GetScratch(length, preserve);
         }
 
-        int parts = await ReadByteAsync().ConfigureAwait(false);
-        for (var i = 0; i < parts; i++)
+        if (scratch.Length >= length)
         {
-            _ = await ReadUsVarCharAsync().ConfigureAwait(false);
+            return scratch;
         }
 
-        return new TdsTypeInfo(type, maximumLength, Collation: collation);
+        var grown = new byte[Math.Max(length, Math.Max(256, scratch.Length * 2))];
+        scratch.AsSpan(0, preserve).CopyTo(grown);
+        return grown;
     }
 
     /// <summary>
@@ -473,8 +478,8 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<byte> ReadByteSlowAsync()
     {
-        await ReadExactlyAsync(_primitive.AsMemory(0, 1)).ConfigureAwait(false);
-        return _primitive[0];
+        await ReadExactlyAsync(Primitive.AsMemory(0, 1)).ConfigureAwait(false);
+        return Primitive[0];
     }
 
     private ValueTask<ushort> ReadUInt16LittleEndianAsync() =>
@@ -484,8 +489,8 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<ushort> ReadUInt16LittleEndianSlowAsync()
     {
-        await ReadExactlyAsync(_primitive.AsMemory(0, 2)).ConfigureAwait(false);
-        return BinaryPrimitives.ReadUInt16LittleEndian(_primitive);
+        await ReadExactlyAsync(Primitive.AsMemory(0, 2)).ConfigureAwait(false);
+        return BinaryPrimitives.ReadUInt16LittleEndian(Primitive);
     }
 
     private ValueTask<int> ReadInt32LittleEndianAsync() =>
@@ -495,8 +500,8 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<int> ReadInt32LittleEndianSlowAsync()
     {
-        await ReadExactlyAsync(_primitive.AsMemory(0, 4)).ConfigureAwait(false);
-        return BinaryPrimitives.ReadInt32LittleEndian(_primitive);
+        await ReadExactlyAsync(Primitive.AsMemory(0, 4)).ConfigureAwait(false);
+        return BinaryPrimitives.ReadInt32LittleEndian(Primitive);
     }
 
     private ValueTask<uint> ReadUInt32LittleEndianAsync() =>
@@ -506,8 +511,8 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<uint> ReadUInt32LittleEndianSlowAsync()
     {
-        await ReadExactlyAsync(_primitive.AsMemory(0, 4)).ConfigureAwait(false);
-        return BinaryPrimitives.ReadUInt32LittleEndian(_primitive);
+        await ReadExactlyAsync(Primitive.AsMemory(0, 4)).ConfigureAwait(false);
+        return BinaryPrimitives.ReadUInt32LittleEndian(Primitive);
     }
 
     private ValueTask<long> ReadInt64LittleEndianAsync() =>
@@ -517,8 +522,8 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<long> ReadInt64LittleEndianSlowAsync()
     {
-        await ReadExactlyAsync(_primitive.AsMemory(0, 8)).ConfigureAwait(false);
-        return BinaryPrimitives.ReadInt64LittleEndian(_primitive);
+        await ReadExactlyAsync(Primitive.AsMemory(0, 8)).ConfigureAwait(false);
+        return BinaryPrimitives.ReadInt64LittleEndian(Primitive);
     }
 
     private ValueTask<ulong> ReadUInt64LittleEndianAsync() =>
@@ -528,32 +533,8 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<ulong> ReadUInt64LittleEndianSlowAsync()
     {
-        await ReadExactlyAsync(_primitive.AsMemory(0, 8)).ConfigureAwait(false);
-        return BinaryPrimitives.ReadUInt64LittleEndian(_primitive);
-    }
-
-    private async ValueTask<string> ReadBVarCharAsync()
-    {
-        int characterCount = await ReadByteAsync().ConfigureAwait(false);
-        return await ReadUtf16Async(characterCount).ConfigureAwait(false);
-    }
-
-    private async ValueTask<string> ReadUsVarCharAsync()
-    {
-        int characterCount = await ReadUInt16LittleEndianAsync().ConfigureAwait(false);
-        return await ReadUtf16Async(characterCount).ConfigureAwait(false);
-    }
-
-    private async ValueTask<string> ReadUtf16Async(int characterCount)
-    {
-        if (_reader.TryReadPayload(checked(characterCount * sizeof(char)), out var buffered))
-        {
-            return TdsCollationCodec.Decode(buffered, 1200);
-        }
-
-        var value = await ReadBytesAsync(
-          checked(characterCount * sizeof(char))).ConfigureAwait(false);
-        return TdsCollationCodec.Decode(value, 1200);
+        await ReadExactlyAsync(Primitive.AsMemory(0, 8)).ConfigureAwait(false);
+        return BinaryPrimitives.ReadUInt64LittleEndian(Primitive);
     }
 
     private async ValueTask<byte[]> ReadBytesAsync(int length)
@@ -573,4 +554,12 @@ internal sealed class TdsStreamingTokenReader
 
     private ValueTask SkipAsync(int length) =>
       _reader.SkipPayloadAsync(length, _cancellationToken);
+
+    private readonly record struct ReturnValueHeader(
+        ushort Ordinal,
+        string Name,
+        byte Status,
+        uint UserType,
+        ushort Flags,
+        TdsTypeInfo TypeInfo);
 }
