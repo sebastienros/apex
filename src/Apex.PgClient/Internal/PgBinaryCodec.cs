@@ -85,7 +85,130 @@ internal static class PgBinaryCodec
       BitConverter.Int64BitsToDouble(ReadInt64(value));
 
     internal static decimal DecodeDecimal(ReadOnlySpan<byte> value) =>
-      DecodeNumeric(value).ToDecimal();
+      TryDecodeDecimalExact(value, out var result)
+        ? result
+        : DecodeNumeric(value).ToDecimal();
+
+    // Accumulates the base-10000 digits straight into a 96-bit decimal mantissa with scale dscale.
+    // It returns false (and the caller takes the BigInteger/decimal.Parse path) for every input where
+    // that path could round, overflow, or throw, so both paths always agree on the result and its scale.
+    private static bool TryDecodeDecimalExact(ReadOnlySpan<byte> value, out decimal result)
+    {
+        result = default;
+        if (value.Length < 4 * sizeof(short))
+        {
+            return false;
+        }
+
+        int digitCount = BinaryPrimitives.ReadInt16BigEndian(value);
+        int weight = BinaryPrimitives.ReadInt16BigEndian(value[2..]);
+        var sign = BinaryPrimitives.ReadUInt16BigEndian(value[4..]);
+        int displayScale = BinaryPrimitives.ReadUInt16BigEndian(value[6..]);
+        if ((sign != 0 && sign != 0x4000) ||
+            displayScale > 28 ||
+            digitCount < 0 ||
+            value.Length < (4 + digitCount) * sizeof(short))
+        {
+            return false;
+        }
+
+        // Bounds keep every intermediate below 2^128; the result is checked against 96 bits at the end.
+        var maximumBeforeDigit = s_maximumBeforeDigit;
+        UInt128 coefficient = 0;
+        var digits = value[8..];
+        for (var i = 0; i < digitCount; i++)
+        {
+            int digit = BinaryPrimitives.ReadUInt16BigEndian(digits[(i * 2)..]);
+            if (digit > 9999 || coefficient > maximumBeforeDigit)
+            {
+                return false;
+            }
+
+            coefficient = (coefficient * 10000) + (uint)digit;
+        }
+
+        var fractionalGroups = digitCount - weight - 1;
+        if (fractionalGroups < 0)
+        {
+            // Trailing zero groups are not sent: weight 2 with one digit means digit * 10000^2.
+            if (coefficient != 0)
+            {
+                for (var i = fractionalGroups; i < 0; i++)
+                {
+                    if (coefficient > maximumBeforeDigit)
+                    {
+                        return false;
+                    }
+
+                    coefficient *= 10000;
+                }
+            }
+
+            fractionalGroups = 0;
+        }
+
+        // fractionalGroups <= 32767 + 32768, so the multiplication cannot overflow int.
+        var scale = fractionalGroups * 4;
+        if (scale > displayScale)
+        {
+            // Truncate digits beyond dscale, as the BigInteger path does.
+            var excess = scale - displayScale;
+            if (excess >= s_powersOf10.Length)
+            {
+                return false;
+            }
+
+            coefficient = coefficient <= ulong.MaxValue && excess < 20
+              ? (ulong)coefficient / (ulong)s_powersOf10[excess]
+              : coefficient / s_powersOf10[excess];
+        }
+        else if (scale < displayScale)
+        {
+            var missing = displayScale - scale;
+            if (coefficient > s_maximumBeforePowerOf10[missing])
+            {
+                return false;
+            }
+
+            coefficient *= s_powersOf10[missing];
+        }
+
+        // decimal holds a 96-bit unsigned mantissa; anything wider would round in decimal.Parse.
+        if ((coefficient >> 96) != 0)
+        {
+            return false;
+        }
+
+        var low = (ulong)coefficient;
+        result = new decimal(
+            unchecked((int)low),
+            unchecked((int)(low >> 32)),
+            unchecked((int)(uint)(coefficient >> 64)),
+            isNegative: sign == 0x4000 && coefficient != 0,
+            (byte)displayScale);
+        return true;
+    }
+
+    private static readonly UInt128 s_maximumBeforeDigit = (UInt128.MaxValue - 9999) / 10000;
+
+    // 10^0 through 10^38, the largest power of ten below 2^128.
+    private static readonly UInt128[] s_powersOf10 = CreatePowersOf10();
+
+    // The largest coefficient that can be multiplied by 10^i without overflowing UInt128.
+    private static readonly UInt128[] s_maximumBeforePowerOf10 =
+      Array.ConvertAll(s_powersOf10, static power => UInt128.MaxValue / power);
+
+    private static UInt128[] CreatePowersOf10()
+    {
+        var powers = new UInt128[39];
+        powers[0] = 1;
+        for (var i = 1; i < powers.Length; i++)
+        {
+            powers[i] = powers[i - 1] * 10;
+        }
+
+        return powers;
+    }
 
     internal static BigInteger DecodeBigInteger(ReadOnlySpan<byte> value)
     {
