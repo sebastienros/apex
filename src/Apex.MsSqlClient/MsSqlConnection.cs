@@ -625,28 +625,17 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
                 connection.HandleEnvironmentChange(
                   await reader.ReadEnvironmentChangeAsync().ConfigureAwait(false));
                 break;
-            case TdsTokenType.ReturnStatus:
-                await reader.SkipReturnStatusAsync().ConfigureAwait(false);
-                break;
             case TdsTokenType.ReturnValue:
                 await reader.SkipReturnValueAsync().ConfigureAwait(false);
                 break;
-            case TdsTokenType.Order:
-            case TdsTokenType.TableName:
-            case TdsTokenType.ColumnInfo:
-            case TdsTokenType.Sspi:
-                await reader.SkipUShortLengthTokenAsync().ConfigureAwait(false);
-                break;
-            case TdsTokenType.SessionState:
-            case TdsTokenType.FedAuthInfo:
-                await reader.SkipUIntLengthTokenAsync().ConfigureAwait(false);
-                break;
-            case TdsTokenType.FeatureExtAck:
-                await reader.SkipFeatureExtAckAsync().ConfigureAwait(false);
-                break;
             default:
-                throw new NotSupportedException(
-                  $"SQL Server response token 0x{token:X2} is not supported.");
+                if (!await reader.TrySkipTokenAsync(token).ConfigureAwait(false))
+                {
+                    throw new NotSupportedException(
+                      $"SQL Server response token 0x{token:X2} is not supported.");
+                }
+
+                break;
         }
     }
 

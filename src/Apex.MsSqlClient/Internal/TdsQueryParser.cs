@@ -19,8 +19,11 @@ internal sealed class TdsQueryParser
 {
     private readonly MsSqlRowDecoder _decoder;
     private readonly TdsResultShapeCache? _shapes;
+    // The parser lives as long as its connection, so a row buffer grown for one large value is
+    // dropped rather than kept.
+    private const int RetainedRowBufferLimit = 64 * 1024;
     private readonly List<ResultBuilder> _results = [];
-    private readonly TdsRowBuffer _row = new();
+    private TdsRowBuffer _row = new();
     private List<MsSqlInfo>? _errors;
     private ResultBuilder? _current;
     private TdsColumn[] _columns = [];
@@ -36,6 +39,11 @@ internal sealed class TdsQueryParser
     /// <summary>Forgets the previous response so the parser can be reused for the next one.</summary>
     internal void Reset()
     {
+        if (_row.Capacity > RetainedRowBufferLimit)
+        {
+            _row = new TdsRowBuffer();
+        }
+
         _results.Clear();
         _errors = null;
         _current = null;
@@ -107,30 +115,18 @@ internal sealed class TdsQueryParser
                     var change = await tokens.ReadEnvironmentChangeAsync().ConfigureAwait(false);
                     environmentHandler?.Invoke(change);
                     break;
-                case TdsTokenType.ReturnStatus:
-                    await tokens.SkipReturnStatusAsync().ConfigureAwait(false);
-                    break;
                 case TdsTokenType.ReturnValue:
                     var returnValue = await tokens.ReadReturnValueAsync().ConfigureAwait(false);
                     returnValueHandler?.Invoke(returnValue);
                     break;
-                case TdsTokenType.Order:
-                case TdsTokenType.TableName:
-                case TdsTokenType.ColumnInfo:
-                case TdsTokenType.Sspi:
-                case TdsTokenType.LoginAck:
-                    await tokens.SkipUShortLengthTokenAsync().ConfigureAwait(false);
-                    break;
-                case TdsTokenType.SessionState:
-                case TdsTokenType.FedAuthInfo:
-                    await tokens.SkipUIntLengthTokenAsync().ConfigureAwait(false);
-                    break;
-                case TdsTokenType.FeatureExtAck:
-                    await tokens.SkipFeatureExtAckAsync().ConfigureAwait(false);
-                    break;
                 default:
-                    throw new NotSupportedException(
-                      $"SQL Server response token 0x{token:X2} is not supported.");
+                    if (!await tokens.TrySkipTokenAsync(token).ConfigureAwait(false))
+                    {
+                        throw new NotSupportedException(
+                          $"SQL Server response token 0x{token:X2} is not supported.");
+                    }
+
+                    break;
             }
         }
 

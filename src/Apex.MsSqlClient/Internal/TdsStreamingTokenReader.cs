@@ -56,10 +56,15 @@ internal sealed class TdsStreamingTokenReader
 
     private async ValueTask<TdsResultShape> ReadColumnMetadataSlowAsync(TdsResultShapeCache? cache)
     {
-        var metadata = await CollectAsync(s_measureColumns, cache).ConfigureAwait(false);
-        var shape = GetShape(cache, metadata.Span);
-        cache?.TrimScratch();
-        return shape;
+        try
+        {
+            var metadata = await CollectAsync(s_measureColumns, cache).ConfigureAwait(false);
+            return GetShape(cache, metadata.Span);
+        }
+        finally
+        {
+            cache?.TrimScratch();
+        }
     }
 
     private static TdsResultShape GetShape(TdsResultShapeCache? cache, ReadOnlySpan<byte> metadata) =>
@@ -89,8 +94,9 @@ internal sealed class TdsStreamingTokenReader
     /// <summary>
     /// Decodes the next token when it is a ROW or NBCROW that is already fully received, so a
     /// caller can drain buffered rows without an <see langword="await"/> per row. Returns
-    /// <see langword="false"/>, consuming nothing, for any other token or a row that is not yet
-    /// complete.
+    /// <see langword="false"/> for any other token or a row that is not yet complete (or is
+    /// invalid). It then consumes nothing from the packet reader, but <paramref name="row"/> may
+    /// be partly overwritten.
     /// </summary>
     internal bool TryReadBufferedRow(ReadOnlySpan<TdsColumn> columns, TdsRowBuffer row)
     {
@@ -216,6 +222,37 @@ internal sealed class TdsStreamingTokenReader
     }
 
     internal ValueTask SkipReturnStatusAsync() => SkipAsync(sizeof(int));
+
+    /// <summary>
+    /// Skips a token whose contents the driver does not use. Returns <see langword="false"/>,
+    /// reading nothing, for any other token. Both the streaming pump and the buffered parser use
+    /// this, so they accept the same responses.
+    /// </summary>
+    internal async ValueTask<bool> TrySkipTokenAsync(byte token)
+    {
+        switch (token)
+        {
+            case TdsTokenType.ReturnStatus:
+                await SkipReturnStatusAsync().ConfigureAwait(false);
+                return true;
+            case TdsTokenType.Order:
+            case TdsTokenType.TableName:
+            case TdsTokenType.ColumnInfo:
+            case TdsTokenType.Sspi:
+            case TdsTokenType.LoginAck:
+                await SkipUShortLengthTokenAsync().ConfigureAwait(false);
+                return true;
+            case TdsTokenType.SessionState:
+            case TdsTokenType.FedAuthInfo:
+                await SkipUIntLengthTokenAsync().ConfigureAwait(false);
+                return true;
+            case TdsTokenType.FeatureExtAck:
+                await SkipFeatureExtAckAsync().ConfigureAwait(false);
+                return true;
+            default:
+                return false;
+        }
+    }
 
     internal async ValueTask SkipFeatureExtAckAsync()
     {
