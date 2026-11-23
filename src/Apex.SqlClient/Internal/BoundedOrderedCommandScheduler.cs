@@ -13,12 +13,13 @@ namespace Apex.SqlClient.Internal;
 /// <para>
 /// Shutdown is bounded. A connection closes with <see cref="CloseAsync"/>, which queues the
 /// protocol's goodbye after the work already queued and waits for it at most
-/// <see cref="DefaultCloseTimeout"/>. Past that deadline the scheduler is disposed: commands that
-/// have not run fail with <see cref="ObjectDisposedException"/>, and a goodbye still queued
-/// completes early. <see cref="DisposeAsync"/> then cancels the send in progress, and when the pump
-/// is still busy after <see cref="DefaultAbortGracePeriod"/> (a receive, or a send that ignores its
-/// token, for example because the peer stopped reading), it aborts the transport through the
-/// callback the connection supplied, which makes the pending I/O fail.
+/// <see cref="DefaultCloseTimeout"/>. Past that deadline the scheduler is disposed.
+/// <see cref="DisposeAsync"/> cancels the send in progress, and when the pump is still busy after
+/// <see cref="DefaultAbortGracePeriod"/> (a receive, or a send that ignores its token, for example
+/// because the peer stopped reading), it aborts the transport through the callback the connection
+/// supplied, which makes the pending I/O fail. Once the pump unwinds, the commands that have not
+/// run (the goodbye among them) fail with <see cref="ObjectDisposedException"/>. A connection close
+/// therefore takes at most about the close timeout plus the abort grace period.
 /// </para>
 /// <para>
 /// Disposal still waits for the pump to unwind before it returns, and does not abandon it: the
