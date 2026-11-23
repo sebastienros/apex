@@ -506,14 +506,8 @@ public sealed partial class MySqlConnection
                 canceled = _canceled;
             }
 
-            if (cancelRequest is not null && await cancelRequest.ConfigureAwait(false))
-            {
-                await _connection.AbsorbPendingKillAsync(failure).ConfigureAwait(false);
-            }
-
-            if (canceled &&
-                (failure is null or OperationCanceledException or MySqlException { IsInterrupted: true } ||
-                 IsFatalConnectionError(failure)))
+            await _connection.FinishKillAsync(cancelRequest, failure).ConfigureAwait(false);
+            if (canceled && IsCancellationOutcome(failure))
             {
                 OperationCanceledException cancellation = new(_cancellationToken);
                 Complete(cancellation);

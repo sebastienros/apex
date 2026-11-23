@@ -531,11 +531,13 @@ public sealed class MySqlConnectionWireTests
     public async Task CancelledQueryThatFailsWaitsForItsKillBeforeTheNextCommand()
     {
         await using var harness = await ServerHarness.StartAsync();
+        TaskCompletionSource queryReceived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Task server = Task.Run(async () =>
         {
             await using var main = await harness.AcceptAsync();
             await main.CompleteHandshakeAsync("8.4.2", connectionId: 555);
             await main.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT SLEEP(10)");
+            queryReceived.SetResult();
 
             await using var admin = await harness.AcceptAsync();
             await admin.CompleteHandshakeAsync("8.4.2", connectionId: 556);
@@ -564,7 +566,8 @@ public sealed class MySqlConnectionWireTests
         await using var client = await MySqlClient.ConnectAsync(harness.CreateOptions());
         using CancellationTokenSource cancellation = new();
         var pending = client.QueryAsync("SELECT SLEEP(10)", cancellation.Token);
-        await Task.Delay(100);
+        // Cancel only once the query reached the server, so a KILL is always needed.
+        await queryReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
 
         var error = await Assert.ThrowsExactlyAsync<MySqlException>(
@@ -581,11 +584,13 @@ public sealed class MySqlConnectionWireTests
     public async Task CancelledReaderThatFailsWaitsForItsKillBeforeTheNextCommand()
     {
         await using var harness = await ServerHarness.StartAsync();
+        TaskCompletionSource queryReceived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Task server = Task.Run(async () =>
         {
             await using var main = await harness.AcceptAsync();
             await main.CompleteHandshakeAsync("8.4.2", connectionId: 555);
             await main.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT SLEEP(10)");
+            queryReceived.SetResult();
 
             await using var admin = await harness.AcceptAsync();
             await admin.CompleteHandshakeAsync("8.4.2", connectionId: 556);
@@ -614,7 +619,8 @@ public sealed class MySqlConnectionWireTests
           "SELECT SLEEP(10)",
           cancellationToken: cancellation.Token);
         var read = reader.ReadAsync().AsTask();
-        await Task.Delay(100);
+        // Cancel only once the query reached the server, so a KILL is always needed.
+        await queryReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
         var error = await Assert.ThrowsExactlyAsync<MySqlException>(
           () => read.WaitAsync(TimeSpan.FromSeconds(10)));
@@ -634,11 +640,13 @@ public sealed class MySqlConnectionWireTests
     public async Task KillThatArrivesAfterTheQueryFinishedIsAbsorbedBeforeTheNextCommand()
     {
         await using var harness = await ServerHarness.StartAsync();
+        TaskCompletionSource queryReceived = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Task server = Task.Run(async () =>
         {
             await using var main = await harness.AcceptAsync();
             await main.CompleteHandshakeAsync("8.4.2", connectionId: 555);
             await main.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT SLEEP(10)");
+            queryReceived.SetResult();
 
             await using var admin = await harness.AcceptAsync();
             await admin.CompleteHandshakeAsync("8.4.2", connectionId: 556);
@@ -667,7 +675,8 @@ public sealed class MySqlConnectionWireTests
         await using var client = await MySqlClient.ConnectAsync(harness.CreateOptions());
         using CancellationTokenSource cancellation = new();
         var pending = client.QueryAsync("SELECT SLEEP(10)", cancellation.Token);
-        await Task.Delay(100);
+        // Cancel only once the query reached the server, so a KILL is always needed.
+        await queryReceived.Task.WaitAsync(TimeSpan.FromSeconds(10));
         cancellation.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
@@ -731,6 +740,15 @@ public sealed class MySqlConnectionWireTests
             await PrepareAsync("SELECT ? AS a", 4);
             await ExecuteAsync(4, 4);
 
+            // The result-boundary reader resolves the same way: the earlier command evicts
+            // statement 4, so the reader prepares again.
+            await PrepareAsync("SELECT ? AS b", 5);
+            await CloseAsync(4);
+            await ExecuteAsync(5, 5);
+            await PrepareAsync("SELECT ? AS a", 6);
+            await CloseAsync(5);
+            await ExecuteAsync(6, 6);
+
             await connection.ExpectCommandAsync(MySqlCommand.Quit);
         });
 
@@ -757,6 +775,19 @@ public sealed class MySqlConnectionWireTests
         }
 
         await reset;
+
+        evicting = client.QueryAsync("SELECT ? AS b", SqlParameters.Create(5)).AsTask();
+        await using (var reader = await client.ExecuteResultReaderAsync(
+                       "SELECT ? AS a",
+                       SqlParameters.Create(6),
+                       CancellationToken.None))
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(6L, reader.Get<long>(0));
+            Assert.IsFalse(await reader.ReadAsync());
+        }
+
+        Assert.AreEqual(5L, (await evicting)[0].Get<long>(0));
         await client.DisposeAsync();
         await server.WaitAsync(TimeSpan.FromSeconds(10));
     }

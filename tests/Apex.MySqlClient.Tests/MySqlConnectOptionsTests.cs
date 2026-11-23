@@ -151,7 +151,7 @@ public sealed class MySqlConnectOptionsTests
     public void ConnectionAttributesAreOnlyReadFromTheExplicitKey()
     {
         MySqlConnectOptions options = MySqlConnectOptions.Parse(
-          "Server=db;ConnectionAttributes=team:payments, region : eu-west:1 ,flag;Application Name=billing");
+          "Server=db;ConnectionAttributes=team:payments, region : eu-west:1 ,flag:;Application Name=billing");
 
         Assert.AreEqual("payments", options.ConnectionAttributes["team"]);
         Assert.AreEqual("eu-west:1", options.ConnectionAttributes["region"]);
@@ -162,6 +162,8 @@ public sealed class MySqlConnectOptionsTests
 
         Assert.ThrowsExactly<FormatException>(
           () => MySqlConnectOptions.Parse("Server=db;ConnectionAttributes=:orphan"));
+        Assert.ThrowsExactly<FormatException>(
+          () => MySqlConnectOptions.Parse("Server=db;ConnectionAttributes=team=payments"));
     }
 
     [TestMethod]

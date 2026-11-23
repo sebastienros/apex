@@ -312,20 +312,27 @@ public sealed record MySqlConnectOptions : SqlConnectOptions
 
     /// <summary>
     /// Parses <c>name:value</c> pairs separated by commas, the Connector/J
-    /// <c>connectionAttributes</c> syntax. The first colon splits the name from the value.
+    /// <c>connectionAttributes</c> syntax. The first colon splits the name from the value, and a
+    /// pair without one is rejected so a typo such as <c>team=payments</c> is not sent as a name.
     /// </summary>
     private static void ParseConnectionAttributes(string value, Dictionary<string, string> attributes)
     {
         foreach (var pair in value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
             var separator = pair.IndexOf(':', StringComparison.Ordinal);
-            var name = (separator < 0 ? pair : pair[..separator]).Trim();
+            if (separator < 0)
+            {
+                throw new FormatException(
+                  "MySQL connection attributes must be name:value pairs separated by commas.");
+            }
+
+            var name = pair[..separator].Trim();
             if (name.Length == 0)
             {
                 throw new FormatException("A MySQL connection attribute name is empty.");
             }
 
-            attributes[name] = separator < 0 ? string.Empty : pair[(separator + 1)..].Trim();
+            attributes[name] = pair[(separator + 1)..].Trim();
         }
     }
 
