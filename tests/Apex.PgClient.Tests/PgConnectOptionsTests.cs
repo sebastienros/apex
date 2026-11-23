@@ -127,6 +127,20 @@ public sealed class PgConnectOptionsTests
     }
 
     [TestMethod]
+    [DataRow("host=db sslrootcert=/ca.pem", "sslrootcert")]
+    [DataRow("postgresql://app@db/app?connect_timeout=10", "connect_timeout")]
+    [DataRow("host=db Target_Session_Attrs=read-write", "Target_Session_Attrs")]
+    public void ExplainsUnsupportedLibpqClientOptions(string connectionString, string key)
+    {
+        var exception = Assert.ThrowsExactly<FormatException>(
+          () => PgConnectOptions.Parse(connectionString));
+
+        StringAssert.Contains(exception.Message, $"'{key}'");
+        StringAssert.Contains(exception.Message, "libpq client option");
+        Assert.IsFalse(exception.Message.Contains("-c name=value", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     public void SendsKnownStartupParametersUnderTheirCanonicalNames()
     {
         PgConnectOptions options = PgConnectOptions.Parse(
