@@ -12,6 +12,9 @@ internal delegate bool SqlConnectionReusePredicate<in TConnection>(TConnection c
 internal sealed class SqlConnectionPool<TConnection> : ISqlPool
     where TConnection : class, ISqlConnection
 {
+    // The longest finite duration CancellationTokenSource.CancelAfter and timers accept.
+    private static readonly TimeSpan MaximumTimerDuration =
+        TimeSpan.FromMilliseconds(uint.MaxValue - 1);
     private readonly object _idleGate = new();
     private readonly Stack<PooledConnection> _idle = new();
     private readonly SemaphoreSlim _slots;
@@ -264,7 +267,10 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken,
                 _disposeCancellation.Token);
-            timeout.CancelAfter(_options.AcquisitionTimeout);
+            if (_options.AcquisitionTimeout != Timeout.InfiniteTimeSpan)
+            {
+                timeout.CancelAfter(_options.AcquisitionTimeout);
+            }
             try
             {
                 await _slots.WaitAsync(timeout.Token).ConfigureAwait(false);
@@ -389,6 +395,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
     private static void ValidateOptions(SqlPoolOptions options)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.MaximumSize);
+
         if (options.MaximumWaitQueueSize < -1)
         {
             throw new ArgumentOutOfRangeException(
@@ -397,12 +404,43 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                 "MaximumWaitQueueSize must be -1 or greater.");
         }
 
-        if (options.AcquisitionTimeout <= TimeSpan.Zero)
+        if (options.AcquisitionTimeout != Timeout.InfiniteTimeSpan &&
+            (options.AcquisitionTimeout <= TimeSpan.Zero ||
+             options.AcquisitionTimeout > MaximumTimerDuration))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(options),
                 options.AcquisitionTimeout,
-                "AcquisitionTimeout must be greater than zero.");
+                "AcquisitionTimeout must be greater than zero and at most 4,294,967,294 ms, " +
+                "or Timeout.InfiniteTimeSpan.");
+        }
+
+        ValidateExpiration(options, options.IdleTimeout, nameof(SqlPoolOptions.IdleTimeout));
+        ValidateExpiration(
+            options,
+            options.MaximumLifetime,
+            nameof(SqlPoolOptions.MaximumLifetime));
+
+        if (options.CleanerPeriod != Timeout.InfiniteTimeSpan &&
+            (options.CleanerPeriod < TimeSpan.Zero ||
+             options.CleanerPeriod > MaximumTimerDuration))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                options.CleanerPeriod,
+                "CleanerPeriod must be zero or Timeout.InfiniteTimeSpan to disable cleanup, " +
+                "or greater than zero and at most 4,294,967,294 ms.");
+        }
+    }
+
+    private static void ValidateExpiration(SqlPoolOptions options, TimeSpan value, string name)
+    {
+        if (value != Timeout.InfiniteTimeSpan && value <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                value,
+                $"{name} must be greater than zero, or Timeout.InfiniteTimeSpan.");
         }
     }
 

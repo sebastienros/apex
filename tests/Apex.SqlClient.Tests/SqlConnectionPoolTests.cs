@@ -150,6 +150,80 @@ public sealed class SqlConnectionPoolTests
             () => pool.GetConnectionAsync().AsTask());
     }
 
+    public static IEnumerable<object[]> LongestAcquisitionTimeouts =>
+    [
+        [Timeout.InfiniteTimeSpan],
+        [TimeSpan.FromMilliseconds(uint.MaxValue - 1)],
+    ];
+
+    [TestMethod]
+    [DynamicData(nameof(LongestAcquisitionTimeouts))]
+    public async Task ContendedAcquireWaitsForReleaseWithLongestTimeouts(TimeSpan timeout)
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(
+            created,
+            new SqlPoolOptions
+            {
+                MaximumSize = 1,
+                AcquisitionTimeout = timeout,
+                CleanerPeriod = TimeSpan.Zero,
+            });
+        var lease = await pool.GetConnectionAsync();
+
+        var queued = pool.GetConnectionAsync().AsTask();
+        Assert.IsFalse(queued.IsCompleted);
+        await lease.DisposeAsync();
+
+        await using var next = await queued.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.HasCount(1, created);
+    }
+
+    [TestMethod]
+    public async Task InfiniteExpirationAndDisabledCleanerAreAccepted()
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(
+            created,
+            new SqlPoolOptions
+            {
+                MaximumSize = 1,
+                AcquisitionTimeout = TimeSpan.FromSeconds(5),
+                IdleTimeout = Timeout.InfiniteTimeSpan,
+                MaximumLifetime = Timeout.InfiniteTimeSpan,
+                CleanerPeriod = Timeout.InfiniteTimeSpan,
+            });
+
+        await (await pool.GetConnectionAsync()).DisposeAsync();
+        await (await pool.GetConnectionAsync()).DisposeAsync();
+
+        Assert.HasCount(1, created);
+    }
+
+    public static IEnumerable<object[]> OutOfRangeOptions =>
+    [
+        [new SqlPoolOptions { MaximumSize = 0 }],
+        [new SqlPoolOptions { MaximumWaitQueueSize = -2 }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.Zero }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.FromMilliseconds(-2) }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.FromMilliseconds(uint.MaxValue) }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.MaxValue }],
+        [new SqlPoolOptions { IdleTimeout = TimeSpan.Zero }],
+        [new SqlPoolOptions { IdleTimeout = TimeSpan.FromSeconds(-5) }],
+        [new SqlPoolOptions { MaximumLifetime = TimeSpan.Zero }],
+        [new SqlPoolOptions { MaximumLifetime = TimeSpan.FromSeconds(-5) }],
+        [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromSeconds(-5) }],
+        [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromMilliseconds(uint.MaxValue) }],
+    ];
+
+    [TestMethod]
+    [DynamicData(nameof(OutOfRangeOptions))]
+    public void RejectsOutOfRangeOptions(SqlPoolOptions options)
+    {
+        List<FakeConnection> created = [];
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => CreatePool(created, options));
+    }
+
     [TestMethod]
     public async Task EvictsExpiredAndNonReusableConnections()
     {
