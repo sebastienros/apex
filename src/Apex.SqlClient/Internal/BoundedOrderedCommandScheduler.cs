@@ -121,6 +121,29 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(sendAsync);
         ArgumentNullException.ThrowIfNull(receiveAsync);
+        return ExecuteAsync(
+          new DelegatePair<T>(sendAsync, receiveAsync),
+          DelegatePair<T>.Send,
+          DelegatePair<T>.Receive,
+          barrier,
+          cancellationToken,
+          flushBatch);
+    }
+
+    /// <summary>
+    /// Like the delegate-only overload, but the delegates receive <paramref name="state"/>, which
+    /// the pooled command stores by value. With static lambdas a call site allocates no closure.
+    /// </summary>
+    public ValueTask<T> ExecuteAsync<TState, T>(
+        TState state,
+        Func<TState, CancellationToken, ValueTask> sendAsync,
+        Func<TState, CancellationToken, ValueTask<T>> receiveAsync,
+        bool barrier = false,
+        CancellationToken cancellationToken = default,
+        bool flushBatch = false)
+    {
+        ArgumentNullException.ThrowIfNull(sendAsync);
+        ArgumentNullException.ThrowIfNull(receiveAsync);
 
         if (Volatile.Read(ref _disposed) != 0)
         {
@@ -134,8 +157,9 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             return ValueTask.FromException<T>(terminalError);
         }
 
-        Command<T> command = Command<T>.Rent(
+        var command = Command<TState, T>.Rent(
           this,
+          state,
           sendAsync,
           receiveAsync,
           barrier,
@@ -627,9 +651,25 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         void Fail(int generation, Exception exception);
     }
 
-    private sealed class Command<T> : ICommand, IValueTaskSource<T>
+    // The state of the delegate-only ExecuteAsync overload.
+    private readonly struct DelegatePair<T>(
+        Func<CancellationToken, ValueTask> sendAsync,
+        Func<CancellationToken, ValueTask<T>> receiveAsync)
     {
-        private static readonly ConcurrentQueue<Command<T>> s_pool = new();
+        public static readonly Func<DelegatePair<T>, CancellationToken, ValueTask> Send =
+          static (pair, cancellationToken) => pair._sendAsync(cancellationToken);
+
+        public static readonly Func<DelegatePair<T>, CancellationToken, ValueTask<T>> Receive =
+          static (pair, cancellationToken) => pair._receiveAsync(cancellationToken);
+
+        private readonly Func<CancellationToken, ValueTask> _sendAsync = sendAsync;
+        private readonly Func<CancellationToken, ValueTask<T>> _receiveAsync = receiveAsync;
+    }
+
+    // Pooled per (TState, T): the state is stored by value, so a value-type state never boxes.
+    private sealed class Command<TState, T> : ICommand, IValueTaskSource<T>
+    {
+        private static readonly ConcurrentQueue<Command<TState, T>> s_pool = new();
         private const int MaximumPoolSize = 256;
         private static int s_poolCount;
 
@@ -649,11 +689,12 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         private const int EnqueueOwner = 2;
         private const int PumpOwner = 4;
         private static readonly Action<object?> s_cancelQueued =
-          static state => ((Command<T>)state!).CancelQueued();
+          static state => ((Command<TState, T>)state!).CancelQueued();
         private readonly Action _continueEnqueue;
         private ManualResetValueTaskSourceCore<T> _completion;
-        private Func<CancellationToken, ValueTask>? _sendAsync;
-        private Func<CancellationToken, ValueTask<T>>? _receiveAsync;
+        private TState _state = default!;
+        private Func<TState, CancellationToken, ValueTask>? _sendAsync;
+        private Func<TState, CancellationToken, ValueTask<T>>? _receiveAsync;
         private BoundedOrderedCommandScheduler? _scheduler;
         private CancellationToken _cancellationToken;
         private ValueTask _pendingWrite;
@@ -698,14 +739,14 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         }
 
         public ValueTask SendAsync(CancellationToken delegateCancellationToken) =>
-          _sendAsync!(delegateCancellationToken);
+          _sendAsync!(_state, delegateCancellationToken);
 
         [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
         public async ValueTask ReceiveAsync(
             int generation,
             CancellationToken delegateCancellationToken)
         {
-            var result = await _receiveAsync!(delegateCancellationToken).ConfigureAwait(false);
+            var result = await _receiveAsync!(_state, delegateCancellationToken).ConfigureAwait(false);
             if (TryBeginCompletion(generation))
             {
                 _completion.SetResult(result);
@@ -764,17 +805,18 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             ValueTaskSourceOnCompletedFlags flags) =>
           _completion.OnCompleted(continuation, state, token, flags);
 
-        public static Command<T> Rent(
+        public static Command<TState, T> Rent(
             BoundedOrderedCommandScheduler scheduler,
-            Func<CancellationToken, ValueTask> sendAsync,
-            Func<CancellationToken, ValueTask<T>> receiveAsync,
+            TState state,
+            Func<TState, CancellationToken, ValueTask> sendAsync,
+            Func<TState, CancellationToken, ValueTask<T>> receiveAsync,
             bool isBarrier,
             CancellationToken cancellationToken,
             bool flushBatch)
         {
             if (!s_pool.TryDequeue(out var command))
             {
-                command = new Command<T>();
+                command = new Command<TState, T>();
             }
             else
             {
@@ -783,6 +825,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
             command.Initialize(
                 scheduler,
+                state,
                 sendAsync,
                 receiveAsync,
                 isBarrier,
@@ -829,14 +872,16 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
         private void Initialize(
             BoundedOrderedCommandScheduler scheduler,
-            Func<CancellationToken, ValueTask> sendAsync,
-            Func<CancellationToken, ValueTask<T>> receiveAsync,
+            TState state,
+            Func<TState, CancellationToken, ValueTask> sendAsync,
+            Func<TState, CancellationToken, ValueTask<T>> receiveAsync,
             bool isBarrier,
             CancellationToken cancellationToken,
             bool flushBatch)
         {
             _completion.RunContinuationsAsynchronously = true;
             _scheduler = scheduler;
+            _state = state;
             _sendAsync = sendAsync;
             _receiveAsync = receiveAsync;
             _cancellationToken = cancellationToken;
@@ -872,6 +917,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 return;
             }
 
+            _state = default!;
             _sendAsync = null;
             _receiveAsync = null;
             _scheduler = null;
