@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 
 namespace Apex.PgClient.Internal;
 
@@ -80,6 +81,50 @@ internal sealed class PgWireReader
         }
 
         return new PgWireMessage(type, payload);
+    }
+
+    /// <summary>
+    /// Returns the next message without consuming it when it is already received in full, so a
+    /// caller can inspect it and only then <see cref="Consume"/> it. The payload is valid until the
+    /// next read. Returns false whenever <see cref="ReadAsync"/> would have more to do than slice
+    /// the buffer (a partial or invalid message, or a grown buffer to shrink).
+    /// </summary>
+    internal bool TryPeek(out PgWireMessage message, out int totalLength)
+    {
+        message = default;
+        totalLength = 0;
+        var buffer = _buffer;
+        var available = _end - _start;
+        if (buffer is null ||
+            buffer.Length > MaximumRetainedBufferLength ||
+            available < 5)
+        {
+            return false;
+        }
+
+        var length = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(_start + 1, sizeof(int)));
+        if (length < 4 || length > available - 1)
+        {
+            return false;
+        }
+
+        totalLength = 1 + length;
+        message = new PgWireMessage(
+            buffer[_start],
+            buffer.AsMemory(_start + 5, length - sizeof(int)));
+        return true;
+    }
+
+    /// <summary>Consumes the message returned by <see cref="TryPeek"/>.</summary>
+    internal void Consume(int totalLength)
+    {
+        Debug.Assert(totalLength >= 5 && totalLength <= _end - _start);
+        _start += totalLength;
+        if (_start == _end)
+        {
+            _start = 0;
+            _end = 0;
+        }
     }
 
     public ValueTask CompleteAsync(Exception? exception = null)

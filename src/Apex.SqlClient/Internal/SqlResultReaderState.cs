@@ -13,6 +13,9 @@ internal class SqlResultReaderState
     internal bool Ended { get; private set; }
     internal bool Active { get; private set; }
 
+    // An InitializeAsync or NextResultAsync is waiting for the pump, so rows must not be read past it.
+    internal bool HasPendingTransition => _initialization is not null || _nextResult is not null;
+
     internal int RecordsAffected
     {
         get

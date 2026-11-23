@@ -191,6 +191,7 @@ public sealed partial class MySqlConnection
             ObjectDisposedException.ThrowIf(_disposed != 0, this);
             cancellationToken.ThrowIfCancellationRequested();
             bool advance;
+            short version;
             lock (_gate)
             {
                 ThrowIfError();
@@ -226,9 +227,15 @@ public sealed partial class MySqlConnection
                     throw new InvalidOperationException("Concurrent row reads are not supported.");
                 }
 
+                if (_hasCurrent && TryReadBufferedRow())
+                {
+                    return ValueTask.FromResult(true);
+                }
+
                 advance = _hasCurrent;
                 _readPending = true;
                 _readCompletion.Reset();
+                version = _readCompletion.Version;
                 _readCancellationToken = cancellationToken;
                 _readCancellation = cancellationToken.CanBeCanceled
                   ? cancellationToken.Register(_cancelAction)
@@ -237,10 +244,55 @@ public sealed partial class MySqlConnection
 
             if (advance)
             {
-                _advance.Set();
+                // The pump resumes on this thread and handles what is already received (the end of
+                // the result set, the next result header) before this returns. The read is then
+                // already complete and its await does not yield; the pump only goes asynchronous,
+                // and the read with it, when it must wait for the network.
+                _advance.Set(runContinuationInline: true);
             }
 
-            return new ValueTask<bool>(this, _readCompletion.Version);
+            return new ValueTask<bool>(this, version);
+        }
+
+        /// <summary>
+        /// Replaces the delivered row with the next one when that row packet is already received in
+        /// full, without waking the pump. Runs under <see cref="_gate"/> once the current row is
+        /// delivered: the pump then has nothing left to do with the protocol until it is resumed
+        /// through <see cref="_advance"/>, which only happens after this reader stops taking this
+        /// path (a read that falls through, <see cref="Cancel"/>, <see cref="NextResultAsync"/> or
+        /// dispose). Terminators, errors and split packets are left unread for the pump.
+        /// </summary>
+        private bool TryReadBufferedRow()
+        {
+            if (_stopped ||
+                _canceled ||
+                _decoder is not { } decoder ||
+                _results is { HasPendingTransition: true } ||
+                !_connection._reader.TryPeek(out var packet, out var length))
+            {
+                return false;
+            }
+
+            var span = packet.Span;
+            if (MySqlPackets.IsError(span) || MySqlPackets.IsEof(span, _connection.DeprecateEof))
+            {
+                return false;
+            }
+
+            try
+            {
+                decoder.ValidateRow(span);
+            }
+            catch (Exception)
+            {
+                // Nothing was consumed: the pump reads the same row again and reports the failure.
+                return false;
+            }
+
+            _connection._reader.Consume(length);
+            _current.Dispose();
+            _current = packet;
+            return true;
         }
 
         public bool GetResult(short token)

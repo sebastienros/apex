@@ -1078,6 +1078,35 @@ public sealed class MySqlConnectionIntegrationTests
     }
 
     [TestMethod]
+    public async Task CancellingBetweenReceivedRowsStopsTheReaderAndReusesTheConnection()
+    {
+        await using var connection = await MySqlClient.ConnectAsync(Options);
+        using CancellationTokenSource cancellation = new();
+        await using (var reader = await connection.ExecuteReaderAsync(
+                       "SELECT 1 AS v FROM information_schema.columns a " +
+                       "CROSS JOIN information_schema.columns b LIMIT 200000",
+                       cancellationToken: cancellation.Token))
+        {
+            for (var i = 0; i < 100; i++)
+            {
+                Assert.IsTrue(await reader.ReadAsync());
+                Assert.AreEqual(1, reader.GetInt32(0));
+            }
+
+            cancellation.Cancel();
+            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            {
+                while (await reader.ReadAsync())
+                {
+                }
+            });
+        }
+
+        var rows = await connection.QueryAsync("SELECT 43 AS v");
+        Assert.AreEqual(43, rows[0].GetInt32("v"));
+    }
+
+    [TestMethod]
     public async Task CancellationNeverLeavesAKillQueryForTheNextCommand()
     {
         // The command fails with a non-interrupt error (1242) right after the sleep, while the

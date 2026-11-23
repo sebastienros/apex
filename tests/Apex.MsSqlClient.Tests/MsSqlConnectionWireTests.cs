@@ -12,7 +12,7 @@ using Apex.SqlClient;
 namespace Apex.MsSqlClient.Tests;
 
 [TestClass]
-public sealed class MsSqlConnectionWireTests
+public sealed partial class MsSqlConnectionWireTests
 {
     [TestMethod]
     public async Task ResultReaderPreservesRowsAndMetadataAcrossResults()

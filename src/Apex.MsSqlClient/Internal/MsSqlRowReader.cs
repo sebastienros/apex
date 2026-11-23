@@ -212,6 +212,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         cancellationToken.ThrowIfCancellationRequested();
         bool advance;
+        short version;
         lock (_gate)
         {
             ThrowIfError();
@@ -236,9 +237,15 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                 throw new InvalidOperationException("Concurrent row reads are not supported.");
             }
 
+            if (_hasCurrent && TryReadBufferedRow())
+            {
+                return ValueTask.FromResult(true);
+            }
+
             advance = _hasCurrent;
             _readPending = true;
             _readCompletion.Reset();
+            version = _readCompletion.Version;
             _readCancellationToken = cancellationToken;
             _readCancellation = cancellationToken.CanBeCanceled
               ? cancellationToken.Register(_cancelAction)
@@ -247,10 +254,65 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 
         if (advance)
         {
-            _advance.Set();
+            // The pump resumes on this thread and handles what is already received (a token other
+            // than a row, a row split across packets, the end of the result) before this returns.
+            // The read is then already complete and its await does not yield; the pump only goes
+            // asynchronous, and the read with it, when it must wait for the network.
+            _advance.Set(runContinuationInline: true);
         }
 
-        return new ValueTask<bool>(this, _readCompletion.Version);
+        return new ValueTask<bool>(this, version);
+    }
+
+    /// <summary>
+    /// Replaces the delivered row with the next one when that row is already received in full,
+    /// without waking the pump. Runs under <see cref="_gate"/> once the current row is delivered:
+    /// the pump then has nothing left to do with the protocol until it is resumed through
+    /// <see cref="_advance"/>, which only happens after this reader stops taking this path
+    /// (a read that falls through, <see cref="Cancel"/>, <see cref="NextResultAsync"/> or dispose).
+    /// Anything other than a complete row leaves the reader position untouched for the pump.
+    /// </summary>
+    private bool TryReadBufferedRow()
+    {
+        if (_stopped ||
+            _canceled ||
+            _tdsColumns.Count == 0 ||
+            _results is { HasPendingTransition: true })
+        {
+            return false;
+        }
+
+        var reader = _connection.Reader;
+        try
+        {
+            // This may step over the header of the next packet of the message, exactly as the
+            // pump's next read would; it throws on a bad header before consuming it.
+            var payload = reader.GetBufferedPayload();
+            if (payload.IsEmpty ||
+                payload[0] is not (TdsTokenType.Row or TdsTokenType.NbcRow))
+            {
+                return false;
+            }
+
+            if (!TdsRowCodec.TryReadRow(
+                  payload[1..],
+                  _tdsColumns,
+                  nullCompressed: payload[0] == TdsTokenType.NbcRow,
+                  _current,
+                  out var consumed))
+            {
+                return false;
+            }
+
+            reader.AdvancePayload(1 + consumed);
+            return true;
+        }
+        catch (Exception)
+        {
+            // Nothing was consumed: the pump reads the same bytes again and reports the failure
+            // the usual way, breaking the connection.
+            return false;
+        }
     }
 
     public bool GetResult(short token)

@@ -18,7 +18,7 @@ namespace Apex.MySqlClient.Tests;
 /// verified against real wire bytes rather than mocks.
 /// </summary>
 [TestClass]
-public sealed class MySqlConnectionWireTests
+public sealed partial class MySqlConnectionWireTests
 {
     private static readonly byte[] s_nonce = Enumerable.Range(1, 20).Select(static i => (byte)i).ToArray();
 
@@ -940,6 +940,7 @@ public sealed class MySqlConnectionWireTests
     {
         private readonly TcpClient _client;
         private Stream _stream;
+        private MemoryStream? _batch;
         private byte _sequence;
 
         internal FakeConnection(TcpClient client)
@@ -1289,7 +1290,24 @@ public sealed class MySqlConnectionWireTests
             var frame = new byte[payload.Length + MySqlProtocol.PacketHeaderLength];
             MySqlPacketReader.WriteHeader(frame, payload.Length, _sequence++);
             payload.CopyTo(frame, MySqlProtocol.PacketHeaderLength);
+            if (_batch is not null)
+            {
+                _batch.Write(frame);
+                return;
+            }
+
             await _stream.WriteAsync(frame);
+            await _stream.FlushAsync();
+        }
+
+        /// <summary>Collects the packets written until <see cref="FlushBatchAsync"/> into one write.</summary>
+        internal void BeginBatch() => _batch = new MemoryStream();
+
+        internal async Task FlushBatchAsync()
+        {
+            var batch = _batch ?? throw new InvalidOperationException("No batch was started.");
+            _batch = null;
+            await _stream.WriteAsync(batch.ToArray());
             await _stream.FlushAsync();
         }
 

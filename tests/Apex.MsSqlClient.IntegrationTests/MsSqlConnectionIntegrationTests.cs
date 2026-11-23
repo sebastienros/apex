@@ -827,6 +827,37 @@ public sealed class MsSqlConnectionIntegrationTests
     }
 
     [TestMethod]
+    public async Task CancellingBetweenReceivedRowsSendsAttentionAndReusesConnection()
+    {
+        await using var connection =
+          await MsSqlClient.ConnectAsync(MsSqlTestEnvironment.Options);
+        using CancellationTokenSource cancellation = new();
+        await using (var reader = await connection.ExecuteReaderAsync(
+                       "SELECT TOP (2000000) CAST(1 AS int) AS v " +
+                       "FROM sys.all_columns a CROSS JOIN sys.all_columns b",
+                       cancellationToken: cancellation.Token))
+        {
+            for (var i = 0; i < 100; i++)
+            {
+                Assert.IsTrue(await reader.ReadAsync());
+                Assert.AreEqual(1, reader.GetInt32(0));
+            }
+
+            await cancellation.CancelAsync();
+            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            {
+                while (await reader.ReadAsync())
+                {
+                }
+            });
+        }
+
+        Assert.AreEqual(
+          42,
+          (await connection.QueryAsync("SELECT CAST(42 AS int)"))[0].GetInt32(0));
+    }
+
+    [TestMethod]
     public async Task CancelsWaitForWithAttentionAndReusesConnection()
     {
         await using var connection =

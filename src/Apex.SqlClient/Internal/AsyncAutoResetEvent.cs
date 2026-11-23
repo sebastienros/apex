@@ -36,7 +36,15 @@ internal sealed class AsyncAutoResetEvent : IValueTaskSource
         }
     }
 
-    internal void Set()
+    internal void Set() => Set(runContinuationInline: false);
+
+    /// <summary>
+    /// Releases the waiter. With <paramref name="runContinuationInline"/> a parked waiter resumes on
+    /// the calling thread before this returns, instead of on the thread pool. Readers use it to
+    /// let the consumer drive a parked protocol pump through data that is already received; the
+    /// pump returns to the caller as soon as it parks again or awaits the network.
+    /// </summary>
+    internal void Set(bool runContinuationInline)
     {
         bool complete;
         lock (_gate)
@@ -45,6 +53,9 @@ internal sealed class AsyncAutoResetEvent : IValueTaskSource
             if (complete)
             {
                 _waiting = false;
+                // Only the Set that releases this wait completes it, and SignalCompletion reads the
+                // flag before it can run the continuation that may wait (and be Set) again.
+                _completion.RunContinuationsAsynchronously = !runContinuationInline;
             }
             else
             {
