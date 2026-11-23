@@ -564,7 +564,6 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             _sendAsync = sendAsync;
             _receiveAsync = receiveAsync;
             _cancellationToken = cancellationToken;
-            _pendingWrite = default;
             _isBarrier = isBarrier;
             _flushBatch = flushBatch;
             Volatile.Write(ref _consumed, 0);
@@ -586,7 +585,11 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
         private void Release(int owner)
         {
-            if (Interlocked.And(ref _owners, ~owner) != owner)
+            // An ownership is only taken before the caller holds the ValueTask, so once the other
+            // owner has released it can never come back. Seeing only our own bit means we are the
+            // last owner, which keeps the synchronous fast path free of an extra interlocked write.
+            if (Volatile.Read(ref _owners) != owner &&
+                Interlocked.And(ref _owners, ~owner) != owner)
             {
                 return;
             }

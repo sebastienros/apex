@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Apex.SqlClient.Internal;
 
 namespace Apex.SqlClient.Tests;
@@ -515,14 +516,14 @@ public sealed class BoundedOrderedCommandSchedulerTests
     {
         const int callers = 4;
         const int maximumCallsPerCaller = 50_000;
-        var budget = TimeSpan.FromSeconds(5);
+        var budget = TimeSpan.FromSeconds(2);
         var commandDeadline = TimeSpan.FromSeconds(30);
         await using BoundedOrderedCommandScheduler scheduler = new(1, 1);
         var sends = new int[callers * maximumCallsPerCaller];
         var receives = new int[callers * maximumCallsPerCaller];
         var issued = new int[callers];
         ConcurrentQueue<string> failures = [];
-        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var elapsed = Stopwatch.StartNew();
 
         var threads = Enumerable.Range(0, callers)
           .Select(caller => new Thread(() => RunCaller(caller)) { IsBackground = true })
