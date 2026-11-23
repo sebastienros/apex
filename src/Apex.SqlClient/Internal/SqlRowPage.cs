@@ -96,6 +96,10 @@ internal sealed class SqlRowPageCollectionBuilder
 {
     private const int MaximumPageRows = 256;
     private const int MaximumPageBytes = 64 * 1024;
+
+    // A row this large shares a page with at most smaller rows, so it gets its own exact
+    // array instead of being copied through scratch and then copied again.
+    private const int DedicatedPageBytes = MaximumPageBytes / 2;
     private const int InitialScratchBytes = 1024;
     private const int InitialRowCapacity = 16;
     private readonly ISqlRowDecoder _decoder;
@@ -119,6 +123,15 @@ internal sealed class SqlRowPageCollectionBuilder
         if (_built is not null)
         {
             throw new InvalidOperationException("The row collection has already been built.");
+        }
+
+        if (row.Length >= DedicatedPageBytes)
+        {
+            FlushPage();
+            EnsureRanges()[_count++] = new SqlRowPageBuilder.RowRange(0, row.Length);
+            AddPage(new SqlRowPage(row.ToArray(), _decoder));
+            _pageStart = _count;
+            return;
         }
 
         var pageCount = _count - _pageStart;
@@ -192,7 +205,14 @@ internal sealed class SqlRowPageCollectionBuilder
             return;
         }
 
-        SqlRowPage page = new(_scratch.AsSpan(0, _pageLength).ToArray(), _decoder);
+        AddPage(new SqlRowPage(_scratch.AsSpan(0, _pageLength).ToArray(), _decoder));
+        _pageStart = _count;
+        _pageLength = 0;
+    }
+
+    // Registers a completed page that ends at the current row count.
+    private void AddPage(SqlRowPage page)
+    {
         if (_firstPage is null)
         {
             _firstPage = page;
@@ -202,9 +222,6 @@ internal sealed class SqlRowPageCollectionBuilder
         {
             (_additionalPages ??= []).Add((page, _count));
         }
-
-        _pageStart = _count;
-        _pageLength = 0;
     }
 
     private byte[] EnsureScratch(int additional)

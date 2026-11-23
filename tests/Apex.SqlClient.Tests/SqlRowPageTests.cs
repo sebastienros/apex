@@ -97,11 +97,14 @@ public sealed class SqlRowPageTests
         SqlRowPageCollectionBuilder builder = new(decoder);
         byte[][] payloads =
         [
+            Filled(10, 9),
             Filled(40_000, 1),
             Filled(40_000, 2),
             Filled(100_000, 3),
             Filled(10, 4),
             [],
+            Filled(20_000, 5),
+            Filled(30_000, 6),
         ];
         foreach (var payload in payloads)
         {
