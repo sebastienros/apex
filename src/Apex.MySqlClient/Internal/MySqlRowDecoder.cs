@@ -19,6 +19,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
 {
     private const sbyte BytePrefixedWidth = -1;
     private const sbyte LengthEncodedWidth = -2;
+    private const int PooledJsonLimit = 1024 * 1024;
     private readonly Utf8StringCache _strings;
     private readonly MySqlZeroDateBehavior _zeroDates;
     private MySqlColumnMetadata[] _metadata = [];
@@ -1367,7 +1368,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
             position = width switch
             {
                 >= 0 => position + width,
-                BytePrefixedWidth => position + 1 + row[position],
+                BytePrefixedWidth => position + 1 + ReadPrefix(row, position),
                 _ => SkipLengthEncoded(row, position),
             };
         }
@@ -1381,7 +1382,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int SkipLengthEncoded(ReadOnlySpan<byte> row, int position)
     {
-        var first = row[position];
+        var first = ReadPrefix(row, position);
         if (first < MySqlProtocol.NullHeader)
         {
             return position + 1 + first;
@@ -1400,9 +1401,14 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
     }
 
     private static ReadOnlySpan<byte> SliceFrom(ReadOnlySpan<byte> row, int position) =>
-      (uint)position <= (uint)row.Length
-        ? row[position..]
-        : throw new InvalidDataException("MySQL packet payload is truncated.");
+      (uint)position <= (uint)row.Length ? row[position..] : throw TruncatedRow();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte ReadPrefix(ReadOnlySpan<byte> row, int position) =>
+      (uint)position < (uint)row.Length ? row[position] : throw TruncatedRow();
+
+    private static InvalidDataException TruncatedRow() =>
+      new("MySQL packet payload is truncated.");
 
     private static bool IsNullInBitmap(ReadOnlySpan<byte> bitmap, int ordinal)
     {
@@ -1727,6 +1733,13 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
 
     private static JsonElement DecodeJson(ReadOnlySpan<byte> value)
     {
+        if (value.Length > PooledJsonLimit)
+        {
+            // Do not leave a huge array cached in the shared pool after one large document.
+            using JsonDocument large = JsonDocument.Parse(value.ToArray());
+            return large.RootElement.Clone();
+        }
+
         // Parse from a pooled copy instead of a new array; Clone() detaches the element from it.
         var buffer = ArrayPool<byte>.Shared.Rent(value.Length);
         try

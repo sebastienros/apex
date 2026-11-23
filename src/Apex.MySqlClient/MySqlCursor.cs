@@ -81,6 +81,7 @@ internal sealed class MySqlCursor : ISqlCursor
         }
 
         var decoder = _reader.Decoder;
+        var result = _reader.ResultSequence;
         Columns = _reader.Columns;
         SqlRowPageBuilder page = new(
           decoder,
@@ -101,7 +102,7 @@ internal sealed class MySqlCursor : ISqlCursor
                 break;
             }
 
-            if (!ReferenceEquals(decoder, _reader.Decoder))
+            if (result != _reader.ResultSequence)
             {
                 _pending = true;
                 break;

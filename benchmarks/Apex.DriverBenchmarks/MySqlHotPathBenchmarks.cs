@@ -11,6 +11,10 @@ namespace Apex.DriverBenchmarks;
 /// and DECIMAL decoding. The <c>Decode*</c> cases read already-buffered rows, so they measure
 /// decoding without the network round trip.
 /// </summary>
+/// <remarks>
+/// Setup drops and recreates a table named <c>apex_bench_wide</c> in the database named by
+/// <c>APEX_MYSQL_CONNECTION_STRING</c>; point it at a disposable benchmark database.
+/// </remarks>
 [MemoryDiagnoser]
 public class MySqlHotPathBenchmarks
 {

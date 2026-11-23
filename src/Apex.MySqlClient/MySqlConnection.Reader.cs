@@ -53,6 +53,7 @@ public sealed partial class MySqlConnection
         private CancellationToken _cancellationToken;
         private MySqlPacket _current;
         private MySqlRowDecoder? _decoder;
+        private int _resultSequence;
         private IReadOnlyList<SqlColumn> _columns = Array.Empty<SqlColumn>();
         private Exception? _error;
         private Task<bool>? _cancelRequest;
@@ -177,6 +178,13 @@ public sealed partial class MySqlConnection
 
         internal MySqlRowDecoder Decoder =>
           _decoder ?? throw new InvalidOperationException("ReadAsync must return true first.");
+
+        /// <summary>
+        /// Gets a number that changes whenever a new result set starts. Consecutive result sets with
+        /// identical column definitions share one cached decoder, so decoder identity cannot mark
+        /// result boundaries.
+        /// </summary>
+        internal int ResultSequence => _resultSequence;
 
         public ValueTask<bool> ReadAsync(CancellationToken cancellationToken = default)
         {
@@ -578,6 +586,7 @@ public sealed partial class MySqlConnection
               _binary,
               CancellationToken.None).ConfigureAwait(false);
             _decoder = decoder;
+            _resultSequence++;
             _columns = decoder.Columns;
             ResultStarted();
             while (true)

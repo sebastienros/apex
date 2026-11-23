@@ -451,8 +451,6 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
       chain is not null &&
       (errors & ~SslPolicyErrors.RemoteCertificateNameMismatch) == SslPolicyErrors.None;
 
-    private static string GetOperation(string sql) => MySqlOperationName.Get(sql);
-
     private static void ValidateOptions(MySqlConnectOptions options)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(options.Host);
