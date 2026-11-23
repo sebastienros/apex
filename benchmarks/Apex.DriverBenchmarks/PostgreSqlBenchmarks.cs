@@ -11,6 +11,20 @@ public class PostgreSqlBenchmarks
 {
     private const string RowsSql = "SELECT generate_series(1, 100)::int4";
     private const int PipelineDepth = 16;
+
+    // A wide 10,000-row result read from a temp table, so per-row client cost is a large share
+    // of the time rather than the server's per-query latency.
+    private const string WideRowsSetup =
+        """
+        CREATE TEMP TABLE bench_wide AS
+        SELECT g::int4 AS id,
+               ('name-' || g)::text AS name,
+               g::float8 / 3 AS amount,
+               timestamp '2026-01-01 00:00:00' AS created,
+               NULL::int4 AS missing
+        FROM generate_series(1, 10000) AS g
+        """;
+    private const string WideRowsSql = "SELECT id, name, amount, created, missing FROM bench_wide";
     private readonly Task<SqlRowSet>[] _pipeline = new Task<SqlRowSet>[PipelineDepth];
     private readonly SqlParameters _pipelineParameters = SqlParameters.Create(42);
     private readonly CancellationTokenSource _neverCanceled = new();
@@ -22,6 +36,8 @@ public class PostgreSqlBenchmarks
     private NpgsqlConnection _npgsql = null!;
     private NpgsqlCommand _npgsqlPrepared = null!;
     private NpgsqlCommand _npgsqlRowsPrepared = null!;
+    private NpgsqlCommand _npgsqlWideRows = null!;
+    private System.Data.Common.DbCommand _adoWideRows = null!;
 
     [GlobalSetup]
     public async Task SetupAsync()
@@ -57,6 +73,21 @@ public class PostgreSqlBenchmarks
         await _npgsqlPrepared.PrepareAsync();
         _npgsqlRowsPrepared = new NpgsqlCommand(RowsSql, _npgsql);
         await _npgsqlRowsPrepared.PrepareAsync();
+        await _apex.ExecuteAsync(WideRowsSetup);
+        await using (var adoSetup = _ado.CreateCommand())
+        {
+            adoSetup.CommandText = WideRowsSetup;
+            await adoSetup.ExecuteNonQueryAsync();
+        }
+
+        await using (NpgsqlCommand npgsqlSetup = new(WideRowsSetup, _npgsql))
+        {
+            await npgsqlSetup.ExecuteNonQueryAsync();
+        }
+
+        _npgsqlWideRows = new NpgsqlCommand(WideRowsSql, _npgsql);
+        _adoWideRows = _ado.CreateCommand();
+        _adoWideRows.CommandText = WideRowsSql;
     }
 
     [GlobalCleanup]
@@ -66,6 +97,8 @@ public class PostgreSqlBenchmarks
         await _apexPrepared.DisposeAsync();
         await _npgsqlRowsPrepared.DisposeAsync();
         await _npgsqlPrepared.DisposeAsync();
+        await _npgsqlWideRows.DisposeAsync();
+        await _adoWideRows.DisposeAsync();
         await _apex.DisposeAsync();
         await _adoRowsPrepared.DisposeAsync();
         await _ado.DisposeAsync();
@@ -208,6 +241,45 @@ public class PostgreSqlBenchmarks
         while (await reader.ReadAsync())
         {
             sum += reader.GetInt32(0);
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public async Task<long> NpgsqlReader10kWideRowsAsync()
+    {
+        await using NpgsqlDataReader reader = await _npgsqlWideRows.ExecuteReaderAsync();
+        long sum = 0;
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0) + reader.GetString(1).Length;
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public async Task<long> ApexBorrowedReader10kWideRowsAsync()
+    {
+        await using ISqlRowReader reader = await _apex.ExecuteReaderAsync(WideRowsSql);
+        long sum = 0;
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0) + reader.GetString(1).Length;
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public async Task<long> ApexAdoReader10kWideRowsAsync()
+    {
+        await using var reader = await _adoWideRows.ExecuteReaderAsync();
+        long sum = 0;
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0) + reader.GetString(1).Length;
         }
 
         return sum;

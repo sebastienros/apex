@@ -755,6 +755,45 @@ public sealed class PgConnectionIntegrationTests
     }
 
     [TestMethod]
+    public async Task CancellingBetweenReceivedRowsStopsTheReaderAndReusesTheConnection()
+    {
+        var container = _container ??
+          throw new InvalidOperationException("The PostgreSQL container is not running.");
+        PgConnectOptions options = new()
+        {
+            Host = container.Hostname,
+            Port = container.GetMappedPublicPort(5432),
+            Database = "db",
+            Username = "user",
+            Password = "pass",
+        };
+
+        await using var connection = await PgClient.ConnectAsync(options);
+        using CancellationTokenSource cancellation = new();
+        await using (var reader = await connection.ExecuteReaderAsync(
+                       "SELECT g::int4 FROM generate_series(1, 2000000) AS g",
+                       cancellationToken: cancellation.Token))
+        {
+            for (var value = 1; value <= 100; value++)
+            {
+                Assert.IsTrue(await reader.ReadAsync());
+                Assert.AreEqual(value, reader.GetInt32(0));
+            }
+
+            cancellation.Cancel();
+            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
+            {
+                while (await reader.ReadAsync())
+                {
+                }
+            });
+        }
+
+        var rows = await connection.QueryAsync("SELECT 43::int4");
+        Assert.AreEqual(43, rows[0].GetInt32(0));
+    }
+
+    [TestMethod]
     public async Task SafeRowsRemainValidAfterConnectionDisposal()
     {
         var container = _container ??

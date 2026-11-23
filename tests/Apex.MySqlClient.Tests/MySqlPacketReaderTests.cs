@@ -210,6 +210,43 @@ public sealed class MySqlPacketReaderTests
         CollectionAssert.AreEqual(new byte[] { 0x03, 0x02, 0x01, 0x04 }, destination.ToArray());
     }
 
+    [TestMethod]
+    public async Task PeeksOnlyFullyReceivedSingleFramesWithoutConsumingThem()
+    {
+        Pipe pipe = new();
+        MySqlPacketReader reader = new(pipe.Reader);
+        Assert.IsFalse(reader.TryPeek(out _, out _));
+
+        var lead = CreateFrame(sequence: 1, [9]);
+        var row = CreateFrame(sequence: 2, [1, 2, 3]);
+        var next = CreateFrame(sequence: 3, [4, 5, 6, 7]);
+        byte[] received = [.. lead, .. row, .. next.AsSpan(0, 5)];
+        await pipe.Writer.WriteAsync(received);
+        using (var first = await reader.ReadAsync(CancellationToken.None))
+        {
+            Assert.AreEqual(1, first.Sequence);
+        }
+
+        Assert.IsTrue(reader.TryPeek(out var peeked, out var length));
+        Assert.AreEqual(2, peeked.Sequence);
+        Assert.AreEqual(row.Length, length);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, peeked.Span.ToArray());
+        Assert.IsTrue(reader.TryPeek(out var again, out _), "Peeking consumed the packet.");
+        Assert.AreEqual(2, again.Sequence);
+
+        reader.Consume(length);
+        Assert.IsFalse(reader.TryPeek(out _, out _), "A partial frame was peeked.");
+        await pipe.Writer.WriteAsync(next.AsMemory(5));
+        using (var packet = await reader.ReadAsync(CancellationToken.None))
+        {
+            Assert.AreEqual(3, packet.Sequence);
+            CollectionAssert.AreEqual(new byte[] { 4, 5, 6, 7 }, packet.Span.ToArray());
+        }
+
+        await pipe.Writer.CompleteAsync();
+        await reader.CompleteAsync();
+    }
+
     private static byte[] CreatePattern(int length, byte seed)
     {
         var result = new byte[length];

@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.IO.Pipelines;
 
 namespace Apex.MySqlClient.Internal;
@@ -62,7 +63,21 @@ internal sealed class MySqlPacketReader
     {
     }
 
-    internal async ValueTask<MySqlPacket> ReadAsync(CancellationToken cancellationToken)
+    internal ValueTask<MySqlPacket> ReadAsync(CancellationToken cancellationToken)
+    {
+        // A single frame that is already received is sliced out without the asynchronous path,
+        // which TryPeek leaves every other case to (a partial frame, a split packet, a frame larger
+        // than the buffer).
+        if (TryPeek(out var packet, out var totalLength))
+        {
+            Consume(totalLength);
+            return new ValueTask<MySqlPacket>(packet);
+        }
+
+        return ReadSlowAsync(cancellationToken);
+    }
+
+    private async ValueTask<MySqlPacket> ReadSlowAsync(CancellationToken cancellationToken)
     {
         var first = await ReadFrameAsync(cancellationToken).ConfigureAwait(false);
         if (first.Length < MySqlProtocol.MaximumFramePayloadLength)
@@ -127,6 +142,53 @@ internal sealed class MySqlPacketReader
             }
 
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Returns the next packet without consuming it when it is a single frame already received in
+    /// full, so a caller can inspect it and only then <see cref="Consume"/> it. The payload is valid
+    /// until the next read. Returns false whenever <see cref="ReadSlowAsync"/> would have more to do
+    /// than slice the buffer (a partial frame, or one that starts a split packet).
+    /// </summary>
+    internal bool TryPeek(out MySqlPacket packet, out int totalLength)
+    {
+        packet = default;
+        totalLength = 0;
+        var buffer = _buffer;
+        var available = _end - _start;
+        if (buffer is null || available < MySqlProtocol.PacketHeaderLength)
+        {
+            return false;
+        }
+
+        var header = BinaryPrimitives.ReadUInt32LittleEndian(
+            buffer.AsSpan(_start, MySqlProtocol.PacketHeaderLength));
+        var length = (int)(header & 0x00FF_FFFF);
+        if (length >= MySqlProtocol.MaximumFramePayloadLength ||
+            length > available - MySqlProtocol.PacketHeaderLength)
+        {
+            return false;
+        }
+
+        totalLength = MySqlProtocol.PacketHeaderLength + length;
+        packet = new MySqlPacket(
+            buffer.AsMemory(_start + MySqlProtocol.PacketHeaderLength, length),
+            owner: null,
+            sequence: (byte)(header >> 24));
+        return true;
+    }
+
+    /// <summary>Consumes the packet returned by <see cref="TryPeek"/>.</summary>
+    internal void Consume(int totalLength)
+    {
+        Debug.Assert(
+            totalLength >= MySqlProtocol.PacketHeaderLength && totalLength <= _end - _start);
+        _start += totalLength;
+        if (_start == _end)
+        {
+            _start = 0;
+            _end = 0;
         }
     }
 

@@ -2890,6 +2890,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             ObjectDisposedException.ThrowIf(_disposed != 0, this);
             cancellationToken.ThrowIfCancellationRequested();
             bool advance;
+            short version;
             lock (_gate)
             {
                 ThrowIfError();
@@ -2925,9 +2926,15 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                     throw new InvalidOperationException("Concurrent row reads are not supported.");
                 }
 
+                if (_hasCurrent && TryReadBufferedRow())
+                {
+                    return ValueTask.FromResult(true);
+                }
+
                 advance = _hasCurrent;
                 _readPending = true;
                 _readCompletion.Reset();
+                version = _readCompletion.Version;
                 _readCancellationToken = cancellationToken;
                 _readCancellation = cancellationToken.CanBeCanceled
                   ? cancellationToken.Register(_cancelAction)
@@ -2936,10 +2943,49 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
             if (advance)
             {
-                _advance.Set();
+                // The pump resumes on this thread and handles what is already received (a message
+                // other than a row, the end of the result) before this returns. The read is then
+                // already complete and its await does not yield; the pump only goes asynchronous,
+                // and the read with it, when it must wait for the network.
+                _advance.Set(runContinuationInline: true);
             }
 
-            return new ValueTask<bool>(this, _readCompletion.Version);
+            return new ValueTask<bool>(this, version);
+        }
+
+        /// <summary>
+        /// Replaces the delivered row with the next one when that DataRow is already received in
+        /// full, without waking the pump. Runs under <see cref="_gate"/> once the current row is
+        /// delivered: the pump then has nothing left to do with the protocol until it is resumed
+        /// through <see cref="_advance"/>, which only happens after this reader stops taking this
+        /// path (a read that falls through, <see cref="Cancel"/>, <see cref="NextResultAsync"/> or
+        /// dispose). Any other message is left unread for the pump.
+        /// </summary>
+        private bool TryReadBufferedRow()
+        {
+            if (_stopped ||
+                _canceled ||
+                _results is { HasPendingTransition: true } ||
+                !_connection._reader.TryPeek(out var message, out var length) ||
+                message.Type != (byte)'D')
+            {
+                return false;
+            }
+
+            try
+            {
+                ValidateRow(message.Payload.Span, _columns);
+            }
+            catch (Exception)
+            {
+                // Nothing was consumed: the pump reads the same row again and reports the failure.
+                return false;
+            }
+
+            _connection._reader.Consume(length);
+            _current.Dispose();
+            _current = message;
+            return true;
         }
 
         public bool GetResult(short token)
@@ -3209,7 +3255,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                                   _columns);
                                 lock (_gate)
                                 {
-                                    if (!_stopped)
+                                    // A pending NextResultAsync skips the rest of this result.
+                                    if (!_stopped && _results is not { SkipsRows: true })
                                     {
                                         _current = message;
                                         _hasCurrent = true;

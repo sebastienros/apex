@@ -190,6 +190,47 @@ public sealed class PgWireReaderTests
         await reader.CompleteAsync();
     }
 
+    [TestMethod]
+    public async Task PeeksOnlyFullyReceivedMessagesWithoutConsumingThem()
+    {
+        Pipe pipe = new();
+        PgWireReader reader = new(pipe.Reader.AsStream(leaveOpen: true));
+        Assert.IsFalse(reader.TryPeek(out _, out _));
+
+        var ready = CreateFrame((byte)'Z', [(byte)'I']);
+        var row = CreateFrame((byte)'D', [1, 2, 3]);
+        var complete = CreateFrame((byte)'C', [(byte)'O', (byte)'K', 0]);
+        pipe.Writer.Write(ready);
+        pipe.Writer.Write(row);
+        pipe.Writer.Write(complete.AsSpan(0, 3));
+        await pipe.Writer.FlushAsync();
+        using (var first = await reader.ReadAsync(CancellationToken.None))
+        {
+            Assert.AreEqual((byte)'Z', first.Type);
+        }
+
+        Assert.IsTrue(reader.TryPeek(out var peeked, out var length));
+        Assert.AreEqual((byte)'D', peeked.Type);
+        Assert.AreEqual(row.Length, length);
+        CollectionAssert.AreEqual(new byte[] { 1, 2, 3 }, peeked.Payload.ToArray());
+        Assert.IsTrue(reader.TryPeek(out var again, out _), "Peeking consumed the message.");
+        Assert.AreEqual((byte)'D', again.Type);
+
+        reader.Consume(length);
+        Assert.IsFalse(reader.TryPeek(out _, out _), "A partial message was peeked.");
+        pipe.Writer.Write(complete.AsSpan(3));
+        await pipe.Writer.FlushAsync();
+        using (var next = await reader.ReadAsync(CancellationToken.None))
+        {
+            Assert.AreEqual((byte)'C', next.Type);
+            CollectionAssert.AreEqual(complete[5..], next.Payload.ToArray());
+        }
+
+        await pipe.Writer.CompleteAsync();
+        await reader.CompleteAsync();
+        Assert.IsFalse(reader.TryPeek(out _, out _));
+    }
+
     private static byte[] CreateFrame(byte type, ReadOnlySpan<byte> payload)
     {
         var frame = GC.AllocateUninitializedArray<byte>(payload.Length + 5);

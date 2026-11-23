@@ -48,7 +48,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     private CancellationToken _readCancellationToken;
     private CancellationToken _cancellationToken;
     private MsSqlConnection.AttentionState? _attention;
-    private IReadOnlyList<TdsColumn> _tdsColumns = Array.Empty<TdsColumn>();
+    private TdsColumn[] _tdsColumns = Array.Empty<TdsColumn>();
     private IReadOnlyList<SqlColumn> _columns = Array.Empty<SqlColumn>();
     private SqlColumnOrdinalMap? _ordinals;
     private int _resultSetGeneration;
@@ -212,6 +212,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         ObjectDisposedException.ThrowIf(_disposed != 0, this);
         cancellationToken.ThrowIfCancellationRequested();
         bool advance;
+        short version;
         lock (_gate)
         {
             ThrowIfError();
@@ -236,9 +237,15 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                 throw new InvalidOperationException("Concurrent row reads are not supported.");
             }
 
+            if (_hasCurrent && TryReadBufferedRow())
+            {
+                return ValueTask.FromResult(true);
+            }
+
             advance = _hasCurrent;
             _readPending = true;
             _readCompletion.Reset();
+            version = _readCompletion.Version;
             _readCancellationToken = cancellationToken;
             _readCancellation = cancellationToken.CanBeCanceled
               ? cancellationToken.Register(_cancelAction)
@@ -247,10 +254,47 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
 
         if (advance)
         {
-            _advance.Set();
+            // The pump resumes on this thread and handles what is already received (a token other
+            // than a row, a row split across packets, the end of the result) before this returns.
+            // The read is then already complete and its await does not yield; the pump only goes
+            // asynchronous, and the read with it, when it must wait for the network.
+            _advance.Set(runContinuationInline: true);
         }
 
-        return new ValueTask<bool>(this, _readCompletion.Version);
+        return new ValueTask<bool>(this, version);
+    }
+
+    /// <summary>
+    /// Replaces the delivered row with the next one when that row is already received in full,
+    /// without waking the pump. Runs under <see cref="_gate"/> once the current row is delivered:
+    /// the pump then has nothing left to do with the protocol until it is resumed through
+    /// <see cref="_advance"/>, which only happens after this reader stops taking this path
+    /// (a read that falls through, <see cref="Cancel"/>, <see cref="NextResultAsync"/> or dispose).
+    /// Anything other than a complete row leaves the reader position untouched for the pump.
+    /// The row may be decoded straight into <see cref="_current"/>, even partly on failure: once the
+    /// consumer asks for the next row the delivered one is no longer valid, and a read that falls
+    /// through stays pending until the pump has decoded the row again.
+    /// </summary>
+    private bool TryReadBufferedRow()
+    {
+        if (_stopped ||
+            _canceled ||
+            _tdsColumns.Length == 0 ||
+            _results is { HasPendingTransition: true })
+        {
+            return false;
+        }
+
+        try
+        {
+            return TdsStreamingTokenReader.TryReadBufferedRow(_connection.Reader, _tdsColumns, _current);
+        }
+        catch (Exception)
+        {
+            // An invalid packet header throws before anything is consumed: the pump reads the
+            // same bytes again and reports the failure the usual way, breaking the connection.
+            return false;
+        }
     }
 
     public bool GetResult(short token)
@@ -543,7 +587,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             break;
                         case TdsTokenType.Row:
                         case TdsTokenType.NbcRow:
-                            if (_tdsColumns.Count == 0)
+                            if (_tdsColumns.Length == 0)
                             {
                                 throw new InvalidDataException(
                                   "SQL Server sent a ROW token before COLMETADATA.");
@@ -556,7 +600,8 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             var retained = false;
                             lock (_gate)
                             {
-                                if (!_stopped)
+                                // A pending NextResultAsync skips the rest of this result.
+                                if (!_stopped && _results is not { SkipsRows: true })
                                 {
                                     _hasCurrent = true;
                                     _currentDelivered = _results?.PublishRow() ?? false;
