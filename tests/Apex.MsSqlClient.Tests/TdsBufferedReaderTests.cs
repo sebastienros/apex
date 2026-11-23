@@ -127,6 +127,25 @@ public sealed class TdsBufferedReaderTests
     }
 
     [TestMethod]
+    public async Task ReleaseDuringPendingReceiveFailsThatReceive()
+    {
+        var framed = await FrameAsync(512, BuildDoneOnly());
+        using GatedStream stream = new(framed);
+        var reader = TdsPacketReader.CreateBuffered(stream);
+
+        var pending = reader.BeginMessageAsync(default).AsTask();
+        await stream.ReadStarted;
+        reader.Release();
+        stream.Open();
+
+        // The receive completed into a buffer that went back to the pool, so the caller must not
+        // see its bytes.
+        await Assert.ThrowsExactlyAsync<ObjectDisposedException>(() => pending);
+        await Assert.ThrowsExactlyAsync<ObjectDisposedException>(
+          () => reader.BeginMessageAsync(default).AsTask());
+    }
+
+    [TestMethod]
     public async Task TruncatedRowInFinalPacketIsRejected()
     {
         ArrayBufferWriter<byte> response = new();
@@ -232,7 +251,11 @@ public sealed class TdsBufferedReaderTests
     private static byte[] BuildResponse()
     {
         ArrayBufferWriter<byte> response = new();
-        WriteEnvironmentChange(response, TdsEnvironmentChange.Database, "apex", "master");
+        TdsTokenParserTests.WriteEnvironmentChange(
+          response,
+          TdsEnvironmentChange.Database,
+          "apex",
+          "master");
         WriteColumnMetadata(response);
         var large = string.Concat(Enumerable.Repeat("0123456789abcdef", 200));
         for (var i = 0; i < 40; i++)
@@ -377,21 +400,6 @@ public sealed class TdsBufferedReaderTests
         response.Write(body.WrittenSpan);
     }
 
-    private static void WriteEnvironmentChange(
-        ArrayBufferWriter<byte> response,
-        byte type,
-        string newValue,
-        string oldValue)
-    {
-        ArrayBufferWriter<byte> body = new();
-        body.WriteByte(type);
-        body.WriteBVarChar(newValue);
-        body.WriteBVarChar(oldValue);
-        response.WriteByte(TdsTokenType.EnvironmentChange);
-        response.WriteUInt16LittleEndian(checked((ushort)body.WrittenCount));
-        response.Write(body.WrittenSpan);
-    }
-
     private static void WriteDone(ArrayBufferWriter<byte> response, long rowCount)
     {
         response.WriteByte(TdsTokenType.Done);
@@ -410,6 +418,61 @@ public sealed class TdsBufferedReaderTests
           packetSize,
           default);
         return framed.ToArray();
+    }
+
+    /// <summary>Holds the first read until <see cref="Open"/> is called.</summary>
+    private sealed class GatedStream(byte[] data) : Stream
+    {
+        private readonly TaskCompletionSource _readStarted =
+          new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _open =
+          new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _position;
+
+        internal Task ReadStarted => _readStarted.Task;
+
+        public override bool CanRead => true;
+
+        public override bool CanSeek => false;
+
+        public override bool CanWrite => false;
+
+        public override long Length => data.Length;
+
+        public override long Position
+        {
+            get => _position;
+            set => throw new NotSupportedException();
+        }
+
+        internal void Open() => _open.TrySetResult();
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            _readStarted.TrySetResult();
+            await _open.Task.ConfigureAwait(false);
+            var count = Math.Min(buffer.Length, data.Length - _position);
+            data.AsSpan(_position, count).CopyTo(buffer.Span);
+            _position += count;
+            return count;
+        }
+
+        public override int Read(byte[] buffer, int offset, int count) =>
+          throw new NotSupportedException();
+
+        public override void Flush()
+        {
+        }
+
+        public override long Seek(long offset, SeekOrigin origin) =>
+          throw new NotSupportedException();
+
+        public override void SetLength(long value) => throw new NotSupportedException();
+
+        public override void Write(byte[] buffer, int offset, int count) =>
+          throw new NotSupportedException();
     }
 
     /// <summary>Returns at most <c>chunk</c> bytes per read, like a socket delivering segments.</summary>
