@@ -1135,6 +1135,36 @@ public sealed class MySqlConnectionIntegrationTests
     }
 
     [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task CancellationInterruptsAParameterizedReader(bool cachePreparedStatements)
+    {
+        await using var connection = await MySqlClient.ConnectAsync(
+          Options with
+          {
+              QueryCancellation = MySqlQueryCancellation.KillQuery,
+              CachePreparedStatements = cachePreparedStatements,
+          });
+        using CancellationTokenSource cancellation = new(TimeSpan.FromMilliseconds(300));
+        var started = System.Diagnostics.Stopwatch.StartNew();
+
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(async () =>
+        {
+            await using var reader = await connection.ExecuteReaderAsync(
+              "SELECT SLEEP(?) AS s, 1 AS v",
+              SqlParameters.Create(10),
+              cancellation.Token);
+            while (await reader.ReadAsync())
+            {
+            }
+        });
+
+        Assert.IsLessThan(TimeSpan.FromSeconds(5), started.Elapsed);
+        var rows = await connection.QueryAsync("SELECT 1 AS v");
+        Assert.AreEqual(1, rows[0].Get<int>("v"));
+    }
+
+    [TestMethod]
     public async Task ReaderSurvivesEvictionOfItsCachedStatementByAnEarlierPipelinedCommand()
     {
         await using var connection = await MySqlClient.ConnectAsync(

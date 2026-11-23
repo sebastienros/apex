@@ -680,6 +680,88 @@ public sealed class MySqlConnectionWireTests
     }
 
     [TestMethod]
+    public async Task ReaderResolvesItsCachedStatementAfterEarlierCommandsEvictOrResetIt()
+    {
+        await using var harness = await ServerHarness.StartAsync();
+        Task server = Task.Run(async () =>
+        {
+            await using var connection = await harness.AcceptAsync();
+            await connection.CompleteHandshakeAsync("8.4.2");
+
+            async Task PrepareAsync(string sql, uint id)
+            {
+                await connection.ExpectTextCommandAsync(MySqlCommand.StatementPrepare, sql);
+                await connection.WritePrepareOkAsync(statementId: id, columnCount: 1, parameterCount: 1);
+                await connection.WriteColumnAsync("p", MySqlType.Long);
+                await connection.WriteColumnAsync("v", MySqlType.Long);
+            }
+
+            async Task ExecuteAsync(uint id, long value)
+            {
+                var execute = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementExecute);
+                Assert.AreEqual(id, BinaryPrimitives.ReadUInt32LittleEndian(execute.AsSpan(1)));
+                await connection.WriteColumnCountAsync(1);
+                await connection.WriteColumnAsync("v", MySqlType.Long);
+                await connection.WriteBinaryRowAsync([MySqlType.Long], [value]);
+                await connection.WriteFinalOkAsync();
+            }
+
+            async Task CloseAsync(uint id)
+            {
+                var close = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementClose);
+                Assert.AreEqual(id, BinaryPrimitives.ReadUInt32LittleEndian(close.AsSpan(1)));
+            }
+
+            await PrepareAsync("SELECT ? AS a", 1);
+            await ExecuteAsync(1, 1);
+
+            // The earlier command evicts and closes statement 1, so the reader queued behind it
+            // must prepare its SQL again instead of executing the closed statement.
+            await PrepareAsync("SELECT ? AS b", 2);
+            await CloseAsync(1);
+            await ExecuteAsync(2, 2);
+            await PrepareAsync("SELECT ? AS a", 3);
+            await CloseAsync(2);
+            await ExecuteAsync(3, 3);
+
+            // A reset destroys statement 3 on the server, so the reader queued behind it prepares
+            // again too.
+            await connection.ExpectCommandAsync(MySqlCommand.ResetConnection);
+            await connection.WriteCommandOkAsync();
+            await PrepareAsync("SELECT ? AS a", 4);
+            await ExecuteAsync(4, 4);
+
+            await connection.ExpectCommandAsync(MySqlCommand.Quit);
+        });
+
+        await using var client = await MySqlClient.ConnectAsync(
+          harness.CreateOptions() with { CachePreparedStatements = true, PreparedStatementCacheSize = 1 });
+        Assert.AreEqual(1L, (await client.QueryAsync("SELECT ? AS a", SqlParameters.Create(1)))[0].Get<long>(0));
+
+        var evicting = client.QueryAsync("SELECT ? AS b", SqlParameters.Create(2)).AsTask();
+        await using (var reader = await client.ExecuteReaderAsync("SELECT ? AS a", SqlParameters.Create(3)))
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(3L, reader.Get<long>(0));
+            Assert.IsFalse(await reader.ReadAsync());
+        }
+
+        Assert.AreEqual(2L, (await evicting)[0].Get<long>(0));
+
+        var reset = client.ResetAsync().AsTask();
+        await using (var reader = await client.ExecuteReaderAsync("SELECT ? AS a", SqlParameters.Create(4)))
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(4L, reader.Get<long>(0));
+            Assert.IsFalse(await reader.ReadAsync());
+        }
+
+        await reset;
+        await client.DisposeAsync();
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [TestMethod]
     public async Task PipelinedQueriesReceiveResponsesInSubmissionOrder()
     {
         await using var harness = await ServerHarness.StartAsync();
