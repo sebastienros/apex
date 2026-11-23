@@ -29,8 +29,8 @@ jobs:
           global-json-file: global.json
       - name: Version
         run: dotnet --version
-      # Restore and build outside the Test step: on a cold Windows runner the build alone
-      # takes about a minute, while the tests finish in seconds.
+      # Restore and build outside the Test step: on a cold Windows runner restore and build
+      # together take close to a minute, while the tests finish in seconds.
       - name: Restore
         timeout-minutes: 5
         run: dotnet restore "${{ github.workspace }}/${{ matrix.project }}"
