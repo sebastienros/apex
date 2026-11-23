@@ -18,6 +18,10 @@ public sealed class PgTypeRegistry
         new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<uint, IPgTypeCodec> _codecs = new();
 
+    // Set after the first codec is stored, so row decoding can skip the codec lookup (and the
+    // field scan that feeds it) on the common path where no custom codec is registered.
+    private volatile bool _hasCodecs;
+
     public PgTypeRegistry()
     {
         RegisterBuiltIns();
@@ -32,7 +36,10 @@ public sealed class PgTypeRegistry
         ArgumentNullException.ThrowIfNull(decodeBinary);
         RegisterType(type);
         _codecs[type.Oid] = new DelegateCodec<T>(encodeBinary, decodeBinary);
+        _hasCodecs = true;
     }
+
+    internal bool HasCodecs => _hasCodecs;
 
     public bool TryGetType(string name, out PgType type)
     {
@@ -63,7 +70,7 @@ public sealed class PgTypeRegistry
 
     internal bool TryDecode(uint oid, ReadOnlyMemory<byte> value, out object decoded)
     {
-        if (_codecs.TryGetValue(oid, out var codec))
+        if (_hasCodecs && _codecs.TryGetValue(oid, out var codec))
         {
             decoded = codec.DecodeBinary(value);
             return true;

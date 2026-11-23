@@ -1,5 +1,7 @@
 using System.Buffers;
 using System.Buffers.Binary;
+using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Apex.SqlClient;
@@ -72,7 +74,8 @@ internal sealed class PgWireWriter
 
     public async ValueTask WriteQueryAsync(
         string sql,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool flush = true)
     {
         var byteCount = s_utf8.GetByteCount(sql);
         var totalLength = 1 + sizeof(int) + byteCount + 1;
@@ -84,13 +87,17 @@ internal sealed class PgWireWriter
         var written = s_utf8.GetBytes(sql, message[5..]);
         message[5 + written] = 0;
         _writer.Advance(totalLength);
-        await FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (flush)
+        {
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask WriteExtendedQueryAsync(
         string sql,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool flush = true)
     {
         if (parameters.Count == 0)
         {
@@ -99,19 +106,18 @@ internal sealed class PgWireWriter
               portalName: string.Empty,
               statementName: string.Empty,
               fetchSize: 0);
-            await FlushAsync(cancellationToken).ConfigureAwait(false);
+            if (flush)
+            {
+                await FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             return;
         }
 
         var mark = _writer.WrittenCount;
         try
         {
-            ArrayBufferWriter<byte> parse = new();
-            parse.WriteByte(0);
-            parse.WriteCString(sql);
-            parse.WriteInt16(0);
-            WriteTyped((byte)'P', parse.WrittenSpan);
-
+            WriteParseUnnamed(sql);
             WriteBindDescribeExecute(string.Empty, string.Empty, parameters, 0);
         }
         catch
@@ -120,7 +126,10 @@ internal sealed class PgWireWriter
             throw;
         }
 
-        await FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (flush)
+        {
+            await FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask WriteExtendedQueryAsync(
@@ -372,39 +381,110 @@ internal sealed class PgWireWriter
         int fetchSize,
         bool describePortal = true)
     {
-        ArrayBufferWriter<byte> bind = new();
-        bind.WriteCString(portalName);
-        bind.WriteCString(statementName);
-        bind.WriteInt16(0);
-        bind.WriteInt16(checked((short)parameters.Count));
-        for (var i = 0; i < parameters.Count; i++)
+        // Bind is written straight into the connection buffer; a parameter that fails to format
+        // must not leave half a message behind for the next flush.
+        var mark = _writer.WrittenCount;
+        try
         {
-            var value = parameters[i];
-            if (value.IsNull)
+            var bind = BeginMessage((byte)'B');
+            _writer.WriteCString(portalName);
+            _writer.WriteCString(statementName);
+            _writer.WriteInt16(0);
+            _writer.WriteInt16(checked((short)parameters.Count));
+            for (var i = 0; i < parameters.Count; i++)
             {
-                bind.WriteInt32(-1);
-                continue;
+                var value = parameters[i];
+                if (value.IsNull)
+                {
+                    _writer.WriteInt32(-1);
+                    continue;
+                }
+
+                WriteTextParameter(value);
             }
 
-            var text = PgTextCodec.FormatParameter(value);
-            var byteCount = s_utf8.GetByteCount(text);
-            bind.WriteInt32(byteCount);
-            bind.WriteUtf8(text);
+            _writer.WriteInt16(1);
+            _writer.WriteInt16(1);
+            EndMessage(bind);
+
+            if (describePortal)
+            {
+                WriteDescribePortal(portalName);
+            }
+
+            WriteExecute(portalName, fetchSize);
+            WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
         }
-
-        bind.WriteInt16(1);
-        bind.WriteInt16(1);
-        WriteTyped((byte)'B', bind.WrittenSpan);
-
-        if (describePortal)
+        catch
         {
-            ArrayBufferWriter<byte> describe = new();
-            describe.WriteByte((byte)'P');
-            describe.WriteCString(portalName);
-            WriteTyped((byte)'D', describe.WrittenSpan);
+            RollbackTo(mark);
+            throw;
         }
-        WriteExecute(portalName, fetchSize);
-        WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
+    }
+
+    // Writes a length-prefixed text parameter. Scalars format straight into the buffer with the
+    // same invariant formatting PgTextCodec.FormatParameter uses; other kinds go through it.
+    private void WriteTextParameter(SqlValue value)
+    {
+        switch (value.Kind)
+        {
+            case SqlValueKind.Boolean:
+                WriteParameterBytes(value.Get<bool>() ? "true"u8 : "false"u8);
+                return;
+            case SqlValueKind.Int16 when WriteFormatted(value.Get<short>(), 6):
+                return;
+            case SqlValueKind.Int32 when WriteFormatted(value.Get<int>(), 11):
+                return;
+            case SqlValueKind.Int64 when WriteFormatted(value.Get<long>(), 20):
+                return;
+            case SqlValueKind.Single when WriteFormatted(value.Get<float>(), 32):
+                return;
+            case SqlValueKind.Double when WriteFormatted(value.Get<double>(), 32):
+                return;
+            case SqlValueKind.Decimal when WriteFormatted(value.Get<decimal>(), 64):
+                return;
+            case SqlValueKind.Guid when WriteFormatted(value.Get<Guid>(), 36, "D"):
+                return;
+            case SqlValueKind.String:
+                WriteParameterText(value.GetRequired<string>());
+                return;
+            default:
+                WriteParameterText(PgTextCodec.FormatParameter(value));
+                return;
+        }
+    }
+
+    private bool WriteFormatted<T>(T value, int maximumLength, ReadOnlySpan<char> format = default)
+        where T : IUtf8SpanFormattable
+    {
+        var destination = _writer.GetSpan(sizeof(int) + maximumLength);
+        if (!value.TryFormat(destination[sizeof(int)..], out var written, format, CultureInfo.InvariantCulture))
+        {
+            return false;
+        }
+
+        BinaryPrimitives.WriteInt32BigEndian(destination, written);
+        _writer.Advance(sizeof(int) + written);
+        return true;
+    }
+
+    private void WriteParameterBytes(ReadOnlySpan<byte> value)
+    {
+        _writer.WriteInt32(value.Length);
+        _writer.Write(value);
+    }
+
+    private void WriteParameterText(string text)
+    {
+        // Short strings encode in one pass into a worst-case reservation; long ones are measured
+        // first so the reservation does not triple their size.
+        var byteCount = text.Length <= 1024
+          ? s_utf8.GetMaxByteCount(text.Length)
+          : s_utf8.GetByteCount(text);
+        var destination = _writer.GetSpan(sizeof(int) + byteCount);
+        var written = s_utf8.GetBytes(text, destination[sizeof(int)..]);
+        BinaryPrimitives.WriteInt32BigEndian(destination, written);
+        _writer.Advance(sizeof(int) + written);
     }
 
     private void WriteBindDescribeExecute(
@@ -415,77 +495,106 @@ internal sealed class PgWireWriter
         bool describePortal = true,
         bool sync = true)
     {
-        ArrayBufferWriter<byte> bind = new();
-        bind.WriteCString(portalName);
-        bind.WriteCString(statementName);
-        bind.WriteInt16(checked((short)parameters.Count));
-        var payloads = new byte[]?[parameters.Count];
-        for (var i = 0; i < parameters.Count; i++)
+        var mark = _writer.WrittenCount;
+        try
         {
-            var parameter = parameters[i];
-            var format = PgParameterEncoder.ResolveFormat(parameter, _typeRegistry);
-            bind.WriteInt16(format == PgParameterFormat.Binary ? (short)1 : (short)0);
-            if (!parameter.Value.IsNull)
+            var count = parameters.Count;
+            Span<PgParameterFormat> formats = count <= 64
+              ? stackalloc PgParameterFormat[count]
+              : new PgParameterFormat[count];
+            var bind = BeginMessage((byte)'B');
+            _writer.WriteCString(portalName);
+            _writer.WriteCString(statementName);
+            _writer.WriteInt16(checked((short)count));
+            for (var i = 0; i < count; i++)
             {
-                payloads[i] = PgParameterEncoder.Encode(parameter, format, _typeRegistry);
-            }
-        }
-
-        bind.WriteInt16(checked((short)parameters.Count));
-        for (var i = 0; i < payloads.Length; i++)
-        {
-            var payload = payloads[i];
-            if (payload is null)
-            {
-                bind.WriteInt32(-1);
-                continue;
+                var format = PgParameterEncoder.ResolveFormat(parameters[i], _typeRegistry);
+                formats[i] = format;
+                _writer.WriteInt16(format == PgParameterFormat.Binary ? (short)1 : (short)0);
             }
 
-            bind.WriteInt32(payload.Length);
-            bind.Write(payload);
+            _writer.WriteInt16(checked((short)count));
+            for (var i = 0; i < count; i++)
+            {
+                var parameter = parameters[i];
+                if (parameter.Value.IsNull)
+                {
+                    _writer.WriteInt32(-1);
+                    continue;
+                }
+
+                WriteParameterBytes(PgParameterEncoder.Encode(parameter, formats[i], _typeRegistry));
+            }
+
+            _writer.WriteInt16(1);
+            _writer.WriteInt16(1);
+            EndMessage(bind);
+
+            if (describePortal)
+            {
+                WriteDescribePortal(portalName);
+            }
+
+            WriteExecute(portalName, fetchSize);
+            if (sync)
+            {
+                WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
+            }
         }
-
-        bind.WriteInt16(1);
-        bind.WriteInt16(1);
-        WriteTyped((byte)'B', bind.WrittenSpan);
-
-        if (describePortal)
+        catch
         {
-            ArrayBufferWriter<byte> describe = new();
-            describe.WriteByte((byte)'P');
-            describe.WriteCString(portalName);
-            WriteTyped((byte)'D', describe.WrittenSpan);
-        }
-
-        WriteExecute(portalName, fetchSize);
-        if (sync)
-        {
-            WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
+            RollbackTo(mark);
+            throw;
         }
     }
 
     private void WriteTypedParse(string sql, PgParameters parameters)
     {
-        ArrayBufferWriter<byte> parse = new();
-        parse.WriteByte(0);
-        parse.WriteCString(sql);
-        parse.WriteInt16(checked((short)parameters.Count));
+        var parse = BeginMessage((byte)'P');
+        _writer.WriteByte(0);
+        _writer.WriteCString(sql);
+        _writer.WriteInt16(checked((short)parameters.Count));
         for (var i = 0; i < parameters.Count; i++)
         {
-            parse.WriteInt32(unchecked((int)parameters[i].Type.Oid));
+            _writer.WriteInt32(unchecked((int)parameters[i].Type.Oid));
         }
 
-        WriteTyped((byte)'P', parse.WrittenSpan);
+        EndMessage(parse);
+    }
+
+    // Reserves the type byte and length of a message written directly into the buffer and
+    // returns its offset; EndMessage backfills the length once the body is complete.
+    private int BeginMessage(byte type)
+    {
+        var start = _writer.WrittenCount;
+        var header = _writer.GetSpan(5);
+        header[0] = type;
+        _writer.Advance(5);
+        return start;
+    }
+
+    private void EndMessage(int start)
+    {
+        var length = checked(_writer.WrittenCount - start - 1);
+        // GetSpan may have moved the buffer since BeginMessage, so look it up again.
+        var written = MemoryMarshal.AsMemory(_writer.WrittenMemory).Span;
+        BinaryPrimitives.WriteInt32BigEndian(written.Slice(start + 1, sizeof(int)), length);
+    }
+
+    private void WriteDescribePortal(string portalName)
+    {
+        var describe = BeginMessage((byte)'D');
+        _writer.WriteByte((byte)'P');
+        _writer.WriteCString(portalName);
+        EndMessage(describe);
     }
 
     private void WriteDescribeStatement(string statementName)
     {
-        var byteCount = s_utf8.GetByteCount(statementName);
-        Span<byte> describe = stackalloc byte[1 + byteCount + 1];
-        describe[0] = (byte)'S';
-        int written = s_utf8.GetBytes(statementName, describe[1..]);
-        describe[1 + written] = 0;
-        WriteTyped((byte)'D', describe);
+        var describe = BeginMessage((byte)'D');
+        _writer.WriteByte((byte)'S');
+        _writer.WriteCString(statementName);
+        EndMessage(describe);
     }
 
     private void WriteParseUnnamed(string sql)
@@ -511,54 +620,30 @@ internal sealed class PgWireWriter
         int fetchSize,
         bool describePortal = true)
     {
-        var portalLength = s_utf8.GetByteCount(portalName);
-        var statementLength = s_utf8.GetByteCount(statementName);
-        var bindLength =
-          portalLength + 1 +
-          statementLength + 1 +
-          sizeof(short) +
-          sizeof(short) +
-          sizeof(short) +
-          sizeof(short);
-        Span<byte> bind = stackalloc byte[bindLength];
-        var position = 0;
-        position += s_utf8.GetBytes(portalName, bind[position..]);
-        bind[position++] = 0;
-        position += s_utf8.GetBytes(statementName, bind[position..]);
-        bind[position++] = 0;
-        BinaryPrimitives.WriteInt16BigEndian(bind[position..], 0);
-        position += sizeof(short);
-        BinaryPrimitives.WriteInt16BigEndian(bind[position..], 0);
-        position += sizeof(short);
-        BinaryPrimitives.WriteInt16BigEndian(bind[position..], 1);
-        position += sizeof(short);
-        BinaryPrimitives.WriteInt16BigEndian(bind[position..], 1);
-        WriteTyped((byte)'B', bind);
+        var bind = BeginMessage((byte)'B');
+        _writer.WriteCString(portalName);
+        _writer.WriteCString(statementName);
+        _writer.WriteInt16(0);
+        _writer.WriteInt16(0);
+        _writer.WriteInt16(1);
+        _writer.WriteInt16(1);
+        EndMessage(bind);
 
         if (describePortal)
         {
-            Span<byte> describe = stackalloc byte[1 + portalLength + 1];
-            describe[0] = (byte)'P';
-            position = 1;
-            position += s_utf8.GetBytes(portalName, describe[position..]);
-            describe[position] = 0;
-            WriteTyped((byte)'D', describe);
+            WriteDescribePortal(portalName);
         }
 
-        Span<byte> execute = stackalloc byte[portalLength + 1 + sizeof(int)];
-        position = s_utf8.GetBytes(portalName, execute);
-        execute[position++] = 0;
-        BinaryPrimitives.WriteInt32BigEndian(execute[position..], fetchSize);
-        WriteTyped((byte)'E', execute);
+        WriteExecute(portalName, fetchSize);
         WriteTyped((byte)'S', ReadOnlySpan<byte>.Empty);
     }
 
     private void WriteExecute(string portalName, int fetchSize)
     {
-        ArrayBufferWriter<byte> execute = new();
-        execute.WriteCString(portalName);
-        execute.WriteInt32(fetchSize);
-        WriteTyped((byte)'E', execute.WrittenSpan);
+        var execute = BeginMessage((byte)'E');
+        _writer.WriteCString(portalName);
+        _writer.WriteInt32(fetchSize);
+        EndMessage(execute);
     }
 }
 

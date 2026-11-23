@@ -499,18 +499,11 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         SqlColumn column,
         bool copyReadOnlyMemory)
     {
-        var registeredField = GetField(row, ordinal);
-        if (!registeredField.IsNull &&
+        if (_typeRegistry.HasCodecs &&
             column.Format == SqlDataFormat.Binary &&
-            _typeRegistry.TryDecode(
-                column.TypeId,
-                registeredField.Value,
-                out var registeredValue))
+            TryDecodeRegistered(row, ordinal, column, out T registered))
         {
-            return registeredValue is T typed
-              ? typed
-              : throw new InvalidCastException(
-                  $"PostgreSQL type OID {column.TypeId} decodes as {registeredValue.GetType().FullName}, not {typeof(T).FullName}.");
+            return registered;
         }
 
         if (typeof(T) == typeof(string))
@@ -1687,6 +1680,28 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         return field.IsNull
           ? null
           : DecodePgInetValue(column.Format, field.Value.Span);
+    }
+
+    // A registered codec wins over the built-in decoders for binary columns.
+    private bool TryDecodeRegistered<T>(
+        ReadOnlyMemory<byte> row,
+        int ordinal,
+        SqlColumn column,
+        out T value)
+    {
+        var field = GetField(row, ordinal);
+        if (field.IsNull ||
+            !_typeRegistry.TryDecode(column.TypeId, field.Value, out var registeredValue))
+        {
+            value = default!;
+            return false;
+        }
+
+        value = registeredValue is T typed
+          ? typed
+          : throw new InvalidCastException(
+              $"PostgreSQL type OID {column.TypeId} decodes as {registeredValue.GetType().FullName}, not {typeof(T).FullName}.");
+        return true;
     }
 
     private static Field GetRequiredField(

@@ -811,11 +811,12 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                   {
                       token.ThrowIfCancellationRequested();
                       ThrowIfCopyActive();
-                      await _writer.WriteQueryAsync(sql, CancellationToken.None).ConfigureAwait(false);
+                      await _writer.WriteQueryAsync(sql, CancellationToken.None, flush: false).ConfigureAwait(false);
                   },
                   _ => ReceiveQueryAsync(cancellationToken),
                   barrier: cancellationToken.CanBeCanceled,
-                  cancellationToken: cancellationToken);
+                  cancellationToken: cancellationToken,
+                  flushBatch: true);
             }
 
             else if (_statementCache is not null &&
@@ -842,11 +843,13 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                       await _writer.WriteExtendedQueryAsync(
                 sql,
                 parameters,
-                CancellationToken.None).ConfigureAwait(false);
+                CancellationToken.None,
+                flush: false).ConfigureAwait(false);
                   },
                   _ => ReceiveQueryAsync(cancellationToken),
                   barrier: cancellationToken.CanBeCanceled,
-                  cancellationToken: cancellationToken);
+                  cancellationToken: cancellationToken,
+                  flushBatch: true);
             }
 
             try
