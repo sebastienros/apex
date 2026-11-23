@@ -328,6 +328,61 @@ public sealed class MySqlConnectionWireTests
         }
 
     [TestMethod]
+    public async Task CursorAndStreamKeepBoundariesBetweenIdenticallyShapedResults()
+    {
+        await using var harness = await ServerHarness.StartAsync();
+        Task server = Task.Run(async () =>
+        {
+            await using var connection = await harness.AcceptAsync();
+            await connection.CompleteHandshakeAsync("8.4.2");
+
+            await connection.ExpectTextCommandAsync(MySqlCommand.StatementPrepare, "CALL twice()");
+            await connection.WritePrepareOkAsync(statementId: 7, columnCount: 1, parameterCount: 0);
+            await connection.WriteColumnAsync("id", MySqlType.Long);
+            for (var execution = 0; execution < 2; execution++)
+            {
+                _ = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementExecute);
+                // Two result sets whose column definitions are byte-for-byte identical.
+                await connection.WriteColumnCountAsync(1);
+                await connection.WriteColumnAsync("id", MySqlType.Long);
+                await connection.WriteBinaryRowAsync([MySqlType.Long], [1]);
+                await connection.WriteBinaryRowAsync([MySqlType.Long], [2]);
+                await connection.WriteOkWithMoreResultsAsync();
+                await connection.WriteColumnCountAsync(1);
+                await connection.WriteColumnAsync("id", MySqlType.Long);
+                await connection.WriteBinaryRowAsync([MySqlType.Long], [3]);
+                await connection.WriteFinalOkAsync();
+            }
+
+            _ = await connection.ExpectCommandPayloadAsync(MySqlCommand.StatementClose);
+            await connection.ExpectCommandAsync(MySqlCommand.Quit);
+        });
+
+        await using var client = await MySqlClient.ConnectAsync(harness.CreateOptions());
+        await using var statement = await client.PrepareAsync("CALL twice()");
+
+        await using (var cursor = await statement.OpenCursorAsync(fetchSize: 10))
+        {
+            var first = await cursor.ReadAsync(10);
+            CollectionAssert.AreEqual(new[] { 1, 2 }, first.Select(static row => row.GetInt32(0)).ToArray());
+            var second = await cursor.ReadAsync(10);
+            CollectionAssert.AreEqual(new[] { 3 }, second.Select(static row => row.GetInt32(0)).ToArray());
+            Assert.AreEqual(0, (await cursor.ReadAsync(10)).Count);
+        }
+
+        List<int> streamed = [];
+        await foreach (var row in statement.StreamAsync(fetchSize: 10))
+        {
+            streamed.Add(row.GetInt32(0));
+        }
+
+        CollectionAssert.AreEqual(new[] { 1, 2, 3 }, streamed);
+        await statement.DisposeAsync();
+        await client.DisposeAsync();
+        await server;
+    }
+
+    [TestMethod]
     public async Task PreparesExecutesAndClosesStatement()
     {
         await using var harness = await ServerHarness.StartAsync();

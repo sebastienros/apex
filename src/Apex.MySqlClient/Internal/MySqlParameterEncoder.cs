@@ -136,9 +136,17 @@ internal static class MySqlParameterEncoder
                 writer.WriteDouble(value.GetRequired<double>());
                 return;
             case SqlValueKind.Decimal:
-                writer.WriteLengthEncodedString(
-                  value.GetRequired<decimal>().ToString(CultureInfo.InvariantCulture));
-                return;
+                {
+                    // Same text as ToString(InvariantCulture), formatted without a string.
+                    Span<byte> text = stackalloc byte[64];
+                    _ = value.GetRequired<decimal>().TryFormat(
+                      text,
+                      out var written,
+                      default,
+                      CultureInfo.InvariantCulture);
+                    writer.WriteLengthEncodedBytes(text[..written]);
+                    return;
+                }
             case SqlValueKind.String:
                 writer.WriteLengthEncodedString(value.GetRequired<string>());
                 return;
@@ -149,8 +157,12 @@ internal static class MySqlParameterEncoder
                 writer.WriteLengthEncodedBytes(value.GetRequired<ReadOnlyMemory<byte>>().Span);
                 return;
             case SqlValueKind.Guid:
-                writer.WriteLengthEncodedString(value.GetRequired<Guid>().ToString("D", CultureInfo.InvariantCulture));
-                return;
+                {
+                    Span<byte> text = stackalloc byte[36];
+                    _ = value.GetRequired<Guid>().TryFormat(text, out var written, "D");
+                    writer.WriteLengthEncodedBytes(text[..written]);
+                    return;
+                }
             case SqlValueKind.DateOnly:
                 WriteDate(writer, value.GetRequired<DateOnly>());
                 return;

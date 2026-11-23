@@ -25,6 +25,26 @@ public sealed class MySqlPacketWriterTests
     }
 
     [TestMethod]
+    public async Task ReleasesOversizedBufferAfterFlush()
+    {
+        Pipe pipe = new(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));
+        MySqlPacketWriter writer = new(pipe.Writer);
+        var payload = new byte[4 * 1024 * 1024];
+
+        writer.WritePacket(sequence: 0, payload);
+        Assert.IsTrue(writer.RetainedCapacity > payload.Length);
+        await writer.FlushAsync(CancellationToken.None);
+
+        Assert.IsTrue(writer.RetainedCapacity <= 16 * 1024);
+        _ = await ReadAllAsync(pipe.Reader, payload.Length + 4);
+        writer.WritePacket(sequence: 1, [1, 2, 3]);
+        await writer.FlushAsync(CancellationToken.None);
+        var frame = await ReadAllAsync(pipe.Reader, 7);
+        Assert.AreEqual(3, ReadLength(frame));
+        await pipe.Writer.CompleteAsync();
+    }
+
+    [TestMethod]
     public async Task SplitsPayloadAtMaximumFrameLength()
     {
         Pipe pipe = new(new PipeOptions(pauseWriterThreshold: 0, resumeWriterThreshold: 0));

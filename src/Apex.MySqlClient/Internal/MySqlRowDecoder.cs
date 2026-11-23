@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections;
 using System.Net;
@@ -16,12 +17,16 @@ namespace Apex.MySqlClient.Internal;
 /// </summary>
 internal sealed class MySqlRowDecoder : ISqlRowDecoder
 {
+    private const sbyte BytePrefixedWidth = -1;
+    private const sbyte LengthEncodedWidth = -2;
+    private const int PooledJsonLimit = 1024 * 1024;
     private readonly Utf8StringCache _strings;
     private readonly MySqlZeroDateBehavior _zeroDates;
     private MySqlColumnMetadata[] _metadata = [];
     private SqlColumn[] _columns = [];
     private bool _binary;
     private int _nullBitmapLength;
+    private sbyte[] _binaryWidths = [];
 
     internal MySqlRowDecoder(Utf8StringCache strings, MySqlZeroDateBehavior zeroDates)
     {
@@ -30,6 +35,8 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
     }
 
     internal SqlColumn[] Columns => _columns;
+
+    internal MySqlColumnMetadata[] Metadata => _metadata;
 
     internal bool IsBinary => _binary;
 
@@ -41,13 +48,38 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
         _binary = binary;
         _nullBitmapLength = (metadata.Length + 9) / 8;
         SqlColumn[] columns = new SqlColumn[metadata.Length];
+        var widths = binary ? new sbyte[metadata.Length] : [];
         for (var i = 0; i < columns.Length; i++)
         {
             columns[i] = MySqlColumnCodec.ToColumn(metadata[i], binary);
+            if (binary)
+            {
+                widths[i] = GetBinaryWidth(metadata[i].Type);
+            }
         }
 
         _columns = columns;
+        _binaryWidths = widths;
     }
+
+    /// <summary>
+    /// Classifies how a non-NULL binary protocol value is framed: a fixed byte count, a one byte
+    /// length prefix (temporal types), or a length encoded integer prefix.
+    /// </summary>
+    private static sbyte GetBinaryWidth(MySqlType type) =>
+      type switch
+      {
+          MySqlType.Tiny => 1,
+          MySqlType.Short or MySqlType.Year => 2,
+          MySqlType.Int24 or MySqlType.Long or MySqlType.Float => 4,
+          MySqlType.LongLong or MySqlType.Double => 8,
+          MySqlType.Null => 0,
+          MySqlType.Date or MySqlType.NewDate or
+          MySqlType.DateTime or MySqlType.DateTime2 or
+          MySqlType.Timestamp or MySqlType.Timestamp2 or
+          MySqlType.Time or MySqlType.Time2 => BytePrefixedWidth,
+          _ => LengthEncodedWidth,
+      };
 
     internal void ValidateRow(ReadOnlySpan<byte> row)
     {
@@ -144,7 +176,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
                   : MySqlValueCodec.ParseDouble(value);
             case MySqlType.Decimal:
             case MySqlType.NewDecimal:
-                return MySqlDecimal.Parse(_strings.GetString(value));
+                return MySqlDecimal.Parse(value);
             case MySqlType.Date:
             case MySqlType.NewDate:
                 return DecodeDateObject(value);
@@ -762,12 +794,12 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
         return Unsafe.As<TValue?, T>(ref nullable);
     }
 
-    private BigInteger DecodeIntegralNumeric(
+    private static BigInteger DecodeIntegralNumeric(
         ReadOnlySpan<byte> value,
         SqlColumn column,
         Type requestedType)
     {
-        var numeric = MySqlDecimal.Parse(_strings.GetString(value));
+        var numeric = MySqlDecimal.Parse(value);
         return numeric.Scale == 0
           ? numeric.UnscaledValue
           : throw CannotRead(column, requestedType);
@@ -789,7 +821,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
         SqlColumn column)
     {
         _ = EnsureType(ordinal, column, typeof(MySqlDecimal), MySqlType.Decimal, MySqlType.NewDecimal);
-        return MySqlDecimal.Parse(_strings.GetString(GetRequiredField(row, ordinal)));
+        return MySqlDecimal.Parse(GetRequiredField(row, ordinal));
     }
 
     private MySqlDecimal? DecodeNullableMySqlDecimal(
@@ -799,7 +831,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
     {
         _ = EnsureType(ordinal, column, typeof(MySqlDecimal?), MySqlType.Decimal, MySqlType.NewDecimal);
         var value = GetField(row.Span, ordinal, out var isNull);
-        return isNull ? null : MySqlDecimal.Parse(_strings.GetString(value));
+        return isNull ? null : MySqlDecimal.Parse(value);
     }
 
     private sbyte DecodeSByte(
@@ -955,55 +987,8 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
         int ordinal,
         out bool isNull)
     {
-        if ((uint)ordinal >= (uint)_metadata.Length)
-        {
-            throw new ArgumentOutOfRangeException(nameof(ordinal));
-        }
-
-        var payload = row.Span;
-        MySqlPayloadReader reader;
-        if (_binary)
-        {
-            var baseOffset = 1 + _nullBitmapLength;
-            if (payload.Length < baseOffset || payload[0] != MySqlProtocol.OkHeader)
-            {
-                throw new InvalidDataException("MySQL binary row header is invalid.");
-            }
-
-            var bitmap = payload.Slice(1, _nullBitmapLength);
-            if (IsNullInBitmap(bitmap, ordinal))
-            {
-                isNull = true;
-                return default;
-            }
-
-            isNull = false;
-            reader = new MySqlPayloadReader(payload[baseOffset..]);
-            for (var i = 0; i < ordinal; i++)
-            {
-                if (!IsNullInBitmap(bitmap, i))
-                {
-                    SkipBinaryValue(ref reader, _metadata[i].Type);
-                }
-            }
-
-            var value = ReadBinaryValue(ref reader, _metadata[ordinal].Type);
-            return row.Slice(baseOffset + reader.Position - value.Length, value.Length);
-        }
-
-        reader = new MySqlPayloadReader(payload);
-        for (var i = 0; i < ordinal; i++)
-        {
-            _ = reader.ReadLengthEncodedSpan(out _);
-        }
-
-        var textValue = reader.ReadLengthEncodedSpan(out isNull);
-        if (isNull)
-        {
-            return default;
-        }
-
-        return row.Slice(reader.Position - textValue.Length, textValue.Length);
+        var (offset, length) = LocateField(row.Span, ordinal, out isNull);
+        return isNull ? default : row.Slice(offset, length);
     }
 
     private bool IsNullZeroDate(ReadOnlySpan<byte> value, int ordinal) =>
@@ -1314,30 +1299,50 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
     /// <summary>Locates one field inside a row payload of the bound protocol.</summary>
     internal ReadOnlySpan<byte> GetField(ReadOnlySpan<byte> row, int ordinal, out bool isNull)
     {
+        var (offset, length) = LocateField(row, ordinal, out isNull);
+        return isNull ? default : row.Slice(offset, length);
+    }
+
+    /// <summary>
+    /// Finds the offset and length of one field. Rows are validated when they are received, so the
+    /// fields before <paramref name="ordinal"/> are skipped with a tight loop that only reads their
+    /// length prefixes; the requested value itself is read with full validation.
+    /// </summary>
+    private (int Offset, int Length) LocateField(ReadOnlySpan<byte> row, int ordinal, out bool isNull)
+    {
         if ((uint)ordinal >= (uint)_metadata.Length)
         {
             throw new ArgumentOutOfRangeException(nameof(ordinal));
         }
 
         return _binary
-          ? GetBinaryField(row, ordinal, out isNull)
-          : GetTextField(row, ordinal, out isNull);
+          ? LocateBinaryField(row, ordinal, out isNull)
+          : LocateTextField(row, ordinal, out isNull);
     }
 
-    private static ReadOnlySpan<byte> GetTextField(ReadOnlySpan<byte> row, int ordinal, out bool isNull)
+    private static (int Offset, int Length) LocateTextField(
+        ReadOnlySpan<byte> row,
+        int ordinal,
+        out bool isNull)
     {
-        MySqlPayloadReader reader = new(row);
+        var position = 0;
         for (var i = 0; i < ordinal; i++)
         {
-            _ = reader.ReadLengthEncodedSpan(out _);
+            position = SkipLengthEncoded(row, position);
         }
 
-        return reader.ReadLengthEncodedSpan(out isNull);
+        MySqlPayloadReader reader = new(SliceFrom(row, position));
+        var value = reader.ReadLengthEncodedSpan(out isNull);
+        return (position + reader.Position - value.Length, value.Length);
     }
 
-    private ReadOnlySpan<byte> GetBinaryField(ReadOnlySpan<byte> row, int ordinal, out bool isNull)
+    private (int Offset, int Length) LocateBinaryField(
+        ReadOnlySpan<byte> row,
+        int ordinal,
+        out bool isNull)
     {
-        if (row.Length < 1 + _nullBitmapLength || row[0] != MySqlProtocol.OkHeader)
+        var baseOffset = 1 + _nullBitmapLength;
+        if (row.Length < baseOffset || row[0] != MySqlProtocol.OkHeader)
         {
             throw new InvalidDataException("MySQL binary row header is invalid.");
         }
@@ -1350,7 +1355,8 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
         }
 
         isNull = false;
-        MySqlPayloadReader reader = new(row[(1 + _nullBitmapLength)..]);
+        var widths = _binaryWidths;
+        var position = baseOffset;
         for (var i = 0; i < ordinal; i++)
         {
             if (IsNullInBitmap(bitmap, i))
@@ -1358,11 +1364,51 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
                 continue;
             }
 
-            SkipBinaryValue(ref reader, _metadata[i].Type);
+            var width = widths[i];
+            position = width switch
+            {
+                >= 0 => position + width,
+                BytePrefixedWidth => position + 1 + ReadPrefix(row, position),
+                _ => SkipLengthEncoded(row, position),
+            };
         }
 
-        return ReadBinaryValue(ref reader, _metadata[ordinal].Type);
+        MySqlPayloadReader reader = new(SliceFrom(row, position));
+        var value = ReadBinaryValue(ref reader, _metadata[ordinal].Type);
+        return (position + reader.Position - value.Length, value.Length);
     }
+
+    /// <summary>Returns the position after the length encoded string starting at <paramref name="position"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int SkipLengthEncoded(ReadOnlySpan<byte> row, int position)
+    {
+        var first = ReadPrefix(row, position);
+        if (first < MySqlProtocol.NullHeader)
+        {
+            return position + 1 + first;
+        }
+
+        return first == MySqlProtocol.NullHeader
+          ? position + 1
+          : SkipLongLengthEncoded(row, position);
+    }
+
+    private static int SkipLongLengthEncoded(ReadOnlySpan<byte> row, int position)
+    {
+        MySqlPayloadReader reader = new(SliceFrom(row, position));
+        _ = reader.ReadLengthEncodedSpan(out _);
+        return position + reader.Position;
+    }
+
+    private static ReadOnlySpan<byte> SliceFrom(ReadOnlySpan<byte> row, int position) =>
+      (uint)position <= (uint)row.Length ? row[position..] : throw TruncatedRow();
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static byte ReadPrefix(ReadOnlySpan<byte> row, int position) =>
+      (uint)position < (uint)row.Length ? row[position] : throw TruncatedRow();
+
+    private static InvalidDataException TruncatedRow() =>
+      new("MySQL packet payload is truncated.");
 
     private static bool IsNullInBitmap(ReadOnlySpan<byte> bitmap, int ordinal)
     {
@@ -1687,8 +1733,25 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
 
     private static JsonElement DecodeJson(ReadOnlySpan<byte> value)
     {
-        using JsonDocument document = JsonDocument.Parse(value.ToArray());
-        return document.RootElement.Clone();
+        if (value.Length > PooledJsonLimit)
+        {
+            // Do not leave a huge array cached in the shared pool after one large document.
+            using JsonDocument large = JsonDocument.Parse(value.ToArray());
+            return large.RootElement.Clone();
+        }
+
+        // Parse from a pooled copy instead of a new array; Clone() detaches the element from it.
+        var buffer = ArrayPool<byte>.Shared.Rent(value.Length);
+        try
+        {
+            value.CopyTo(buffer);
+            using var document = JsonDocument.Parse(buffer.AsMemory(0, value.Length));
+            return document.RootElement.Clone();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     private static T DecodeJsonValue<T>(ReadOnlySpan<byte> value, int ordinal)

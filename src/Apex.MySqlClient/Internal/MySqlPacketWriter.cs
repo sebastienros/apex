@@ -12,7 +12,9 @@ internal sealed class MySqlPacketWriter
 {
     private static readonly Encoding s_utf8 = new UTF8Encoding(false, true);
     private readonly Stream _stream;
-    private readonly ArrayBufferWriter<byte> _writer = new(16 * 1024);
+    private const int InitialCapacity = 16 * 1024;
+    private const int RetainedBufferLimit = 1024 * 1024;
+    private ArrayBufferWriter<byte> _writer = new(InitialCapacity);
 
     internal MySqlPacketWriter(Stream stream)
     {
@@ -101,9 +103,19 @@ internal sealed class MySqlPacketWriter
         await _stream.WriteAsync(
             _writer.WrittenMemory,
             cancellationToken).ConfigureAwait(false);
+        if (_writer.Capacity > RetainedBufferLimit)
+        {
+            // Do not keep a huge payload's buffer alive for the life of the connection.
+            _writer = new ArrayBufferWriter<byte>(InitialCapacity);
+            return;
+        }
+
         // Clear() would zero every written byte on each flush; the bytes are overwritten anyway.
         _writer.ResetWrittenCount();
     }
+
+    /// <summary>Gets the capacity the writer currently retains, for tests.</summary>
+    internal int RetainedCapacity => _writer.Capacity;
 
     private void WriteFrame(byte sequence, ReadOnlySpan<byte> payload)
     {

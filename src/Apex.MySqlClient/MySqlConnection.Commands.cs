@@ -17,7 +17,7 @@ public sealed partial class MySqlConnection
         CancellationToken cancellationToken)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        var operation = GetOperation(sql);
+        var operation = MySqlOperationName.Get(sql);
         using var activity = SqlClientDiagnostics.StartQuery(
           "mysql",
           _options.Database,
@@ -453,6 +453,7 @@ public sealed partial class MySqlConnection
         while (hasCurrent)
         {
             var decoder = reader.Decoder;
+            var result = reader.ResultSequence;
             var columns = reader.Columns;
             SqlRowPageBuilder page = new(
               decoder,
@@ -460,7 +461,7 @@ public sealed partial class MySqlConnection
               byteCapacity: Math.Max(256, pageCapacity * 16));
             while (hasCurrent &&
                    page.Count < pageCapacity &&
-                   ReferenceEquals(decoder, reader.Decoder))
+                   result == reader.ResultSequence)
             {
                 reader.CopyCurrentTo(page);
                 hasCurrent = await reader.ReadAsync(cancellationToken).ConfigureAwait(false);
