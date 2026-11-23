@@ -79,6 +79,36 @@ public sealed class PgConnectionIntegrationTests
     }
 
     [TestMethod]
+    public async Task SendsStartupParametersFromKeywordAndUriConnectionStrings()
+    {
+        var container = _container ??
+            throw new InvalidOperationException("The PostgreSQL container is not running.");
+        var host = container.Hostname;
+        var port = container.GetMappedPublicPort(5432);
+        string[] connectionStrings =
+        [
+            $"host={host} port={port} user=user password=pass dbname=db " +
+            "application_name=apex-it search_path=apex_path " +
+            "options='-c statement_timeout=4321 -c lock_timeout=1234'",
+            $"postgresql://user:pass@{host}:{port}/db?application_name=apex-it" +
+            "&search_path=apex_path&options=-c%20statement_timeout%3D4321%20-c%20lock_timeout%3D1234",
+        ];
+
+        foreach (var connectionString in connectionStrings)
+        {
+            await using var connection = await PgClient.ConnectAsync(connectionString);
+            var rows = await connection.QueryAsync(
+                "SELECT current_setting('application_name'), current_setting('search_path'), " +
+                "current_setting('statement_timeout'), current_setting('lock_timeout')");
+
+            Assert.AreEqual("apex-it", rows[0].Get<string>(0));
+            Assert.AreEqual("apex_path", rows[0].Get<string>(1));
+            Assert.AreEqual("4321ms", rows[0].Get<string>(2));
+            Assert.AreEqual("1234ms", rows[0].Get<string>(3));
+        }
+    }
+
+    [TestMethod]
     public async Task SupportsTypedParametersBatchesTransactionsCopyAndTypeReload()
     {
         var container = _container ??

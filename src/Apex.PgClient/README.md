@@ -23,6 +23,22 @@ await using PgConnection connection = await PgClient.ConnectAsync(options);
 SqlRowSet rows = await connection.QueryAsync("SELECT current_database()");
 ```
 
+Connection strings accept the driver keys (`host`, `port`, `user`/`username`,
+`password`, `dbname`/`database`, `sslmode`, `sslnegotiation`, `channel_binding`,
+`pipelininglimit`, `useexperimentallowleveltls`, `cachepreparedstatements`) and
+these server parameters, which are sent in the startup message: `application_name`,
+`client_encoding`, `options`, `search_path`, `TimeZone`, `DateStyle`,
+`IntervalStyle` and `extra_float_digits`. Keys are case-insensitive.
+
+Any other key throws `FormatException`, which names the key (and the closest
+known key, for a likely typo) but not its value. Earlier versions sent every
+unknown key to the server as a startup parameter, so a misspelled driver key such
+as `sslmod=require` failed at the server with an unrelated error, and a secret
+under a misspelled key such as `pasword=` was sent to the server. To set another
+server parameter, use the libpq `options` key, for example
+`options='-c statement_timeout=5s -c lock_timeout=1s'`, or add it to the
+`Properties` option.
+
 Use a pool for concurrent application work:
 
 ```csharp
