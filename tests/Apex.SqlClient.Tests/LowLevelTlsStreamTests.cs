@@ -61,6 +61,52 @@ public sealed class LowLevelTlsStreamTests
     }
 
     [TestMethod]
+    public async Task LastOperationToUnwindAfterDisposeReleasesResources()
+    {
+        using var certificate = CreateCertificate();
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using CancellationTokenSource serverStop = new(TimeSpan.FromSeconds(30));
+        var server = RunServerAsync(listener, certificate, serverStop.Token);
+
+        using TcpClient client = new();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        GatedStream gated = new(client.GetStream());
+        var tls = await LowLevelTlsStream.AuthenticateAsClientAsync(
+            gated,
+            new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                RemoteCertificateValidationCallback = static (_, _, _, _) => true,
+            },
+            CancellationToken.None);
+
+        gated.HoldNextRead();
+        var read = tls.ReadAsync(new byte[64]).AsTask();
+        await gated.ReadStarted.WaitAsync(TimeSpan.FromSeconds(10));
+        gated.HoldNextWrite();
+        var write = tls.WriteAsync("ping"u8.ToArray()).AsTask();
+        await gated.WriteStarted.WaitAsync(TimeSpan.FromSeconds(10));
+
+        // Shutdown needs the write lock, so disposal waits for the held write.
+        var dispose = tls.DisposeAsync().AsTask();
+        Assert.IsFalse(dispose.IsCompleted);
+        gated.CompleteHeldWrite();
+        await write;
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.IsFalse(tls.ResourcesReleased);
+
+        gated.CompleteHeldRead(new IOException("The transport was closed."));
+        await Assert.ThrowsExactlyAsync<IOException>(() => read);
+        Assert.IsTrue(tls.ResourcesReleased);
+
+        serverStop.Cancel();
+        await server;
+    }
+
+    [TestMethod]
     public async Task DisposeWithoutPendingOperationsReleasesResources()
     {
         using var certificate = CreateCertificate();
@@ -147,10 +193,16 @@ public sealed class LowLevelTlsStreamTests
     {
         private readonly TaskCompletionSource _readStarted =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _writeStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource<int>? _heldRead;
+        private TaskCompletionSource? _heldWrite;
         private bool _holdNextRead;
+        private bool _holdNextWrite;
 
         public Task ReadStarted => _readStarted.Task;
+
+        public Task WriteStarted => _writeStarted.Task;
 
         public bool IsDisposed { get; private set; }
 
@@ -173,6 +225,10 @@ public sealed class LowLevelTlsStreamTests
         public void CompleteHeldRead(Exception exception) =>
             _heldRead!.SetException(exception);
 
+        public void HoldNextWrite() => _holdNextWrite = true;
+
+        public void CompleteHeldWrite() => _heldWrite!.SetResult();
+
         public override ValueTask<int> ReadAsync(
             Memory<byte> buffer,
             CancellationToken cancellationToken = default)
@@ -189,10 +245,21 @@ public sealed class LowLevelTlsStreamTests
             return new ValueTask<int>(_heldRead.Task);
         }
 
-        public override ValueTask WriteAsync(
+        public override async ValueTask WriteAsync(
             ReadOnlyMemory<byte> buffer,
-            CancellationToken cancellationToken = default) =>
-            inner.WriteAsync(buffer, cancellationToken);
+            CancellationToken cancellationToken = default)
+        {
+            if (_holdNextWrite)
+            {
+                _holdNextWrite = false;
+                _heldWrite = new TaskCompletionSource(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                _writeStarted.SetResult();
+                await _heldWrite.Task;
+            }
+
+            await inner.WriteAsync(buffer, cancellationToken);
+        }
 
         public override int Read(byte[] buffer, int offset, int count) =>
             inner.Read(buffer, offset, count);
