@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections;
 using System.Net;
@@ -1726,17 +1727,18 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
 
     private static JsonElement DecodeJson(ReadOnlySpan<byte> value)
     {
-        // ParseValue copies the value once into a standalone document, instead of copying the
-        // span to an array, parsing it into a pooled document and cloning the root element.
-        Utf8JsonReader reader = new(value);
-        var element = JsonElement.ParseValue(ref reader);
-        if (reader.Read())
+        // Parse from a pooled copy instead of a new array; Clone() detaches the element from it.
+        var buffer = ArrayPool<byte>.Shared.Rent(value.Length);
+        try
         {
-            // Unreachable with the default options, which reject a second top-level value.
-            throw new JsonException("MySQL JSON value has trailing content.");
+            value.CopyTo(buffer);
+            using var document = JsonDocument.Parse(buffer.AsMemory(0, value.Length));
+            return document.RootElement.Clone();
         }
-
-        return element;
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
     }
 
     private static T DecodeJsonValue<T>(ReadOnlySpan<byte> value, int ordinal)
