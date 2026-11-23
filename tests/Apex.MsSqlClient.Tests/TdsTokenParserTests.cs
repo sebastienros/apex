@@ -120,7 +120,7 @@ public sealed class TdsTokenParserTests
         response.Write(body.WrittenSpan);
     }
 
-    private static void WriteEnvironmentChange(
+    internal static void WriteEnvironmentChange(
         ArrayBufferWriter<byte> response,
         byte type,
         string newValue,

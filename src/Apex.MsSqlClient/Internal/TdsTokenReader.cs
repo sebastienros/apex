@@ -160,7 +160,11 @@ internal sealed class TdsTokenReader
         int length = outer.ReadUInt16LittleEndian();
         var body = outer.ReadSpan(length);
         Commit(outer);
+        return ParseMessage(body);
+    }
 
+    internal static MsSqlInfo ParseMessage(ReadOnlySpan<byte> body)
+    {
         TdsPayloadReader reader = new(body);
         var number = reader.ReadInt32LittleEndian();
         var state = reader.ReadByte();
@@ -211,7 +215,11 @@ internal sealed class TdsTokenReader
         int length = outer.ReadUInt16LittleEndian();
         var body = outer.ReadSpan(length);
         Commit(outer);
+        return ParseEnvironmentChange(body);
+    }
 
+    internal static TdsEnvironmentChangeInfo ParseEnvironmentChange(ReadOnlySpan<byte> body)
+    {
         TdsPayloadReader reader = new(body);
         var type = reader.ReadByte();
         return type switch
