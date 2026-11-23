@@ -141,6 +141,10 @@ internal ref struct TdsPayloadReader
 
     internal readonly int Remaining => _payload.Length - _position;
 
+    internal readonly ReadOnlySpan<byte> RemainingSpan => _payload[_position..];
+
+    internal static InvalidDataException Truncated() => new("TDS payload is truncated.");
+
     internal byte ReadByte()
     {
         Ensure(1);
@@ -239,7 +243,7 @@ internal ref struct TdsPayloadReader
     {
         if (length < 0 || _position > _payload.Length - length)
         {
-            throw new InvalidDataException("TDS payload is truncated.");
+            throw Truncated();
         }
     }
 }

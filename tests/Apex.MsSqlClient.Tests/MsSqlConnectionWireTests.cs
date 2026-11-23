@@ -643,6 +643,164 @@ public sealed class MsSqlConnectionWireTests
         }
     }
 
+    [TestMethod]
+    public async Task IdenticallyShapedResultsShareMetadataButKeepTheirBoundaries()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var response = BuildSameShapeResults([1, 2], [3]);
+        var server = RunScriptedServerAsync(listener, response, response, response, response);
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+
+        var first = await connection.QueryAsync("SELECT a, b; SELECT a, b");
+        Assert.HasCount(2, first);
+        StringAssert.StartsWith(first[1].GetString(1), "two");
+        Assert.IsNotNull(first.Next);
+        Assert.HasCount(1, first.Next);
+        Assert.AreEqual(3, first.Next[0].GetInt32(0));
+        Assert.IsNull(first.Next.Next);
+        // Same-shaped results, even across commands, share one parsed column list.
+        Assert.AreSame(first.Columns, first.Next.Columns);
+
+        List<int> streamed = [];
+        await foreach (var row in connection.StreamAsync("SELECT a, b; SELECT a, b", fetchSize: 1))
+        {
+            streamed.Add(row.GetInt32(0));
+        }
+
+        CollectionAssert.AreEqual(new[] { 1, 2, 3 }, streamed);
+
+        await using (var reader = await connection.ExecuteResultReaderAsync(
+                       "SELECT a, b; SELECT a, b", default, default))
+        {
+            var results = (ISqlResultBoundaryReader)reader;
+            Assert.IsTrue(await results.InitializeAsync());
+            // The streaming reader takes its columns from the same connection cache.
+            Assert.AreSame(first.Columns, reader.Columns);
+            Assert.AreEqual(1, reader.GetInt32(0));
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(2, reader.GetInt32(0));
+            Assert.IsFalse(await reader.ReadAsync());
+            Assert.IsTrue(await results.NextResultAsync());
+            Assert.IsTrue(await results.InitializeAsync());
+            Assert.AreEqual(3, reader.GetInt32(0));
+            Assert.IsFalse(await reader.ReadAsync());
+            Assert.IsFalse(await results.NextResultAsync());
+        }
+
+        var again = await connection.QueryAsync("SELECT a, b; SELECT a, b");
+        Assert.AreSame(first.Columns, again.Columns);
+        Assert.HasCount(2, again);
+        Assert.HasCount(1, again.Next!);
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task BufferedQueryBreaksConnectionWhenParsingFailsMidMessage()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        ArrayBufferWriter<byte> response = new();
+        response.Write(BuildSameShapeResults([1]).AsSpan(..^13));
+        response.WriteByte(0x01);
+        response.Write(new byte[600]);
+        WriteDone(response, 0);
+        var server = RunScriptedServerAsync(listener, response.WrittenSpan.ToArray());
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+
+        await Assert.ThrowsExactlyAsync<NotSupportedException>(
+          () => connection.QueryAsync("SELECT a, b").AsTask());
+
+        // The rest of the response is still unread, so the connection cannot be reused.
+        Assert.IsFalse(connection.IsUsable);
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [TestMethod]
+    public async Task BufferedQueryServerErrorKeepsConnectionUsable()
+    {
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        ArrayBufferWriter<byte> error = new();
+        WriteError(error, "Invalid object name 'missing'.");
+        WriteDone(error, (ushort)TdsDoneStatus.Error, 0, 0);
+        var server = RunScriptedServerAsync(
+          listener,
+          error.WrittenSpan.ToArray(),
+          BuildSameShapeResults([7]));
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+
+        await Assert.ThrowsExactlyAsync<MsSqlException>(
+          () => connection.QueryAsync("SELECT * FROM missing").AsTask());
+        Assert.IsTrue(connection.IsUsable);
+        var rows = await connection.QueryAsync("SELECT a, b");
+        Assert.AreEqual(7, rows[0].GetInt32(0));
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>Answers each query with the next response, in 512-byte packets.</summary>
+    private static async Task RunScriptedServerAsync(TcpListener listener, params byte[][] responses)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        await LoginAsync(stream);
+        using TdsPacketWriter writer = new(stream, 512);
+        foreach (var response in responses)
+        {
+            var query = await new TdsPacketReader(stream).ReadMessageAsync(default);
+            Assert.AreEqual(TdsMessageType.SqlBatch, query.Type);
+            await writer.WriteMessageAsync(TdsMessageType.TabularResult, response, default);
+        }
+    }
+
+    /// <summary>
+    /// Builds consecutive results with identical (int a, nvarchar b) metadata, one per argument,
+    /// each row padded so the response spans several 512-byte packets.
+    /// </summary>
+    private static byte[] BuildSameShapeResults(params int[][] results)
+    {
+        string[] names = ["zero", "one", "two", "three"];
+        ArrayBufferWriter<byte> response = new();
+        for (var index = 0; index < results.Length; index++)
+        {
+            response.WriteByte(TdsTokenType.ColumnMetadata);
+            response.WriteUInt16LittleEndian(2);
+            response.WriteUInt32LittleEndian(0);
+            response.WriteUInt16LittleEndian(0);
+            response.WriteByte(TdsDataType.IntN);
+            response.WriteByte(4);
+            response.WriteBVarChar("a");
+            response.WriteUInt32LittleEndian(0);
+            response.WriteUInt16LittleEndian(0);
+            response.WriteByte(TdsDataType.NVarChar);
+            response.WriteUInt16LittleEndian(400);
+            response.WriteUInt32LittleEndian(0x00D00409);
+            response.WriteByte(0);
+            response.WriteBVarChar("b");
+            foreach (var value in results[index])
+            {
+                response.WriteByte(TdsTokenType.Row);
+                response.WriteByte(4);
+                response.WriteInt32LittleEndian(value);
+                var text = names[value % names.Length] + new string(' ', 150);
+                response.WriteUInt16LittleEndian(checked((ushort)(text.Length * 2)));
+                response.WriteUtf16(text);
+            }
+
+            var more = index + 1 < results.Length;
+            WriteDone(
+              response,
+              (ushort)((more ? TdsDoneStatus.More : 0) | TdsDoneStatus.Count),
+              0xC1,
+              results[index].Length);
+        }
+
+        return response.WrittenSpan.ToArray();
+    }
+
     private static MsSqlConnectOptions TestOptions(int port) =>
       new()
       {

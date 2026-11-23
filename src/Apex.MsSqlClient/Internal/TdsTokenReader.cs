@@ -140,7 +140,11 @@ internal sealed class TdsTokenReader
         TdsRowBuffer row)
     {
         var reader = CreatePayloadReader();
-        TdsRowCodec.ReadRow(ref reader, columns, nullCompressed, row);
+        TdsRowCodec.ReadRow(
+          ref reader,
+          columns as TdsColumn[] ?? [.. columns],
+          nullCompressed,
+          row);
         Commit(reader);
     }
 

@@ -28,6 +28,11 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     private readonly TdsPacketWriter _writer;
     private ArrayBufferWriter<byte> _request = new(InitialRequestBytes);
     private readonly MsSqlRowDecoder _rowDecoder;
+    private readonly TdsResultShapeCache _resultShapes = new();
+    private readonly TdsQueryParser _queryParser;
+    private readonly TdsStreamingTokenReader _queryTokens;
+    private readonly Action<MsSqlInfo> _infoHandler;
+    private readonly Action<TdsEnvironmentChangeInfo> _environmentHandler;
     private readonly BoundedOrderedCommandScheduler _scheduler;
     private readonly object _attentionGate = new();
     private AttentionState? _activeAttention;
@@ -57,6 +62,10 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         _rowDecoder = new MsSqlRowDecoder(
           options.StringCacheCapacity,
           options.StringCacheMaximumByteLength);
+        _queryParser = new TdsQueryParser(_rowDecoder, _resultShapes);
+        _queryTokens = new TdsStreamingTokenReader(_reader, CancellationToken.None);
+        _infoHandler = InvokeInfo;
+        _environmentHandler = HandleEnvironmentChange;
         _scheduler = new BoundedOrderedCommandScheduler(
           inFlightLimit: 1,
           queueCapacity: 64,
@@ -93,6 +102,9 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     internal TdsPacketReader Reader => _reader;
 
     internal MsSqlRowDecoder RowDecoder => _rowDecoder;
+
+    // Used only by the receive path, which handles one command at a time.
+    internal TdsResultShapeCache ResultShapes => _resultShapes;
 
     internal static async ValueTask<MsSqlConnection> ConnectAsync(
         MsSqlConnectOptions options,
@@ -615,28 +627,17 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
                 connection.HandleEnvironmentChange(
                   await reader.ReadEnvironmentChangeAsync().ConfigureAwait(false));
                 break;
-            case TdsTokenType.ReturnStatus:
-                await reader.SkipReturnStatusAsync().ConfigureAwait(false);
-                break;
             case TdsTokenType.ReturnValue:
                 await reader.SkipReturnValueAsync().ConfigureAwait(false);
                 break;
-            case TdsTokenType.Order:
-            case TdsTokenType.TableName:
-            case TdsTokenType.ColumnInfo:
-            case TdsTokenType.Sspi:
-                await reader.SkipUShortLengthTokenAsync().ConfigureAwait(false);
-                break;
-            case TdsTokenType.SessionState:
-            case TdsTokenType.FedAuthInfo:
-                await reader.SkipUIntLengthTokenAsync().ConfigureAwait(false);
-                break;
-            case TdsTokenType.FeatureExtAck:
-                await reader.SkipFeatureExtAckAsync().ConfigureAwait(false);
-                break;
             default:
-                throw new NotSupportedException(
-                  $"SQL Server response token 0x{token:X2} is not supported.");
+                if (!await reader.TrySkipTokenAsync(token).ConfigureAwait(false))
+                {
+                    throw new NotSupportedException(
+                      $"SQL Server response token 0x{token:X2} is not supported.");
+                }
+
+                break;
         }
     }
 
@@ -1110,7 +1111,10 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         MsSqlPreparedStatement? preparingStatement = null)
     {
         using var attention = BeginAttention(cancellationToken);
-        TdsQueryParser parser = new(_rowDecoder);
+        var parser = _queryParser;
+        parser.Reset();
+        var tokens = _queryTokens;
+        tokens.Reset(attention.ReadCancellationToken);
         Action<TdsReturnValue>? returnValueHandler = preparingStatement is null
           ? null
           : preparingStatement.CaptureReturnValue;
@@ -1118,20 +1122,20 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         {
             while (true)
             {
-                var message = await _reader.ReadMessageAsync(
+                var messageType = await _reader.BeginMessageAsync(
                   attention.ReadCancellationToken)
                   .ConfigureAwait(false);
-                if (message.Type != TdsMessageType.TabularResult)
+                if (messageType != TdsMessageType.TabularResult)
                 {
                     throw new InvalidDataException(
-                      $"Expected SQL Server result, received TDS type 0x{message.Type:X2}.");
+                      $"Expected SQL Server result, received TDS type 0x{messageType:X2}.");
                 }
 
-                var response = parser.Parse(
-                  message.Payload,
-                  InvokeInfo,
-                  HandleEnvironmentChange,
-                  returnValueHandler);
+                var response = await parser.ParseMessageAsync(
+                  tokens,
+                  _infoHandler,
+                  _environmentHandler,
+                  returnValueHandler).ConfigureAwait(false);
                 if (response.AttentionAcknowledged &&
                     attention.IsCancellationRequested)
                 {
@@ -1160,7 +1164,10 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         }
         catch
         {
-            if (attention.IsCancellationRequested &&
+            // Responses are parsed as they are received, so a failure can leave the rest of the
+            // message unread, and the next command would read it as its own response.
+            if (!_reader.EndOfMessage ||
+                attention.IsCancellationRequested &&
                 !attention.IsAcknowledged)
             {
                 MarkBroken();

@@ -42,6 +42,47 @@ public sealed class TdsBufferedReaderTests
 
     [TestMethod]
     [DynamicData(nameof(FramingMatrix))]
+    public async Task BufferedParserMatchesWholeMessageParserAtEveryBoundary(
+        int packetSize,
+        int readChunk,
+        int receiveBuffer)
+    {
+        var payload = BuildResponse();
+        MsSqlRowDecoder decoder = new();
+        var expected = DescribeWholeMessageRows(payload, decoder);
+        using ChunkedStream stream = new(await FrameAsync(packetSize, payload), readChunk);
+        var reader = TdsPacketReader.CreateBuffered(stream, receiveBuffer);
+        Assert.AreEqual(TdsMessageType.TabularResult, await reader.BeginMessageAsync(default));
+        TdsQueryParser parser = new(decoder, new TdsResultShapeCache());
+        List<MsSqlInfo> infos = [];
+        List<TdsEnvironmentChangeInfo> changes = [];
+
+        var response = await parser.ParseMessageAsync(
+          new TdsStreamingTokenReader(reader, default),
+          infos.Add,
+          changes.Add);
+
+        Assert.IsTrue(response.IsFinal);
+        Assert.IsNull(response.Error);
+        Assert.AreEqual(40, response.Rows.AffectedRows);
+        Assert.IsNull(response.Rows.Next);
+        Assert.HasCount(1, infos);
+        Assert.AreEqual("apex", changes[0].Database);
+        List<string> actual = [];
+        foreach (var row in response.Rows)
+        {
+            actual.Add(string.Join(
+              "|",
+              Enumerable.Range(0, row.Count).Select(i => row.IsNull(i) ? "null" : Describe(row.Get<object>(i)))));
+        }
+
+        CollectionAssert.AreEqual(expected, actual);
+        Assert.IsTrue(reader.EndOfMessage);
+        reader.Release();
+    }
+
+    [TestMethod]
+    [DynamicData(nameof(FramingMatrix))]
     public async Task BufferedMessageReadsReturnTheFullPayload(
         int packetSize,
         int readChunk,
@@ -242,6 +283,50 @@ public sealed class TdsBufferedReaderTests
 
         return events;
     }
+
+    private static List<string> DescribeWholeMessageRows(byte[] payload, MsSqlRowDecoder decoder)
+    {
+        List<string> rows = [];
+        TdsTokenReader reader = new(payload);
+        IReadOnlyList<TdsColumn> columns = [];
+        TdsRowBuffer row = new(8);
+        while (reader.HasRemaining)
+        {
+            var token = reader.ReadTokenType();
+            switch (token)
+            {
+                case TdsTokenType.ColumnMetadata:
+                    columns = reader.ReadColumns();
+                    break;
+                case TdsTokenType.Row:
+                case TdsTokenType.NbcRow:
+                    reader.ReadRow(columns, token == TdsTokenType.NbcRow, row);
+                    var memory = row.WrittenSpan.ToArray().AsMemory();
+                    rows.Add(string.Join(
+                      "|",
+                      columns.Select((column, i) => decoder.IsNull(memory, i)
+                        ? "null"
+                        : Describe(decoder.DecodeObject(memory, i, column.Column)))));
+                    break;
+                case TdsTokenType.Info:
+                    _ = reader.ReadMessage();
+                    break;
+                case TdsTokenType.EnvironmentChange:
+                    _ = reader.ReadEnvironmentChange();
+                    break;
+                case TdsTokenType.Done:
+                    _ = reader.ReadDone();
+                    break;
+                default:
+                    throw new InvalidOperationException($"Unexpected token 0x{token:X2}.");
+            }
+        }
+
+        return rows;
+    }
+
+    private static string Describe(object? value) =>
+      value is byte[] bytes ? Convert.ToHexString(bytes) : value?.ToString() ?? "null";
 
     private static string DescribeColumns(IReadOnlyList<TdsColumn> columns) =>
       "columns:" + string.Join(
