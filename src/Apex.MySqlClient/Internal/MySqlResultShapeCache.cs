@@ -59,8 +59,10 @@ internal sealed class MySqlResultShapeCache
         var shape = _shapes[slot];
         if (shape is null || shape.Hash != hash || !key.SequenceEqual(shape.Key))
         {
-            shape = new Shape(hash, key.ToArray(), Parse(key, columnCount));
-            if (key.Length <= MaximumCachedKeyLength)
+            // Only a shape that will be cached needs its own copy of the key.
+            var cacheable = key.Length <= MaximumCachedKeyLength;
+            shape = new Shape(hash, cacheable ? key.ToArray() : [], Parse(key, columnCount));
+            if (cacheable)
             {
                 _shapes[slot] = shape;
             }
