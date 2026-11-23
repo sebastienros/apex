@@ -36,7 +36,7 @@ jobs:
         timeout-minutes: 5
         run: for project in $TEST_PROJECTS; do dotnet build "$project" --configuration Release --no-restore; done
       - name: Test
-        timeout-minutes: 3
+        timeout-minutes: 2
         run: |
           status=0
           for project in $TEST_PROJECTS; do
