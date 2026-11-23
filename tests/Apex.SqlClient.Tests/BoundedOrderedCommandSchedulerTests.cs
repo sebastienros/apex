@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Apex.SqlClient.Internal;
 
 namespace Apex.SqlClient.Tests;
@@ -464,6 +465,141 @@ public sealed class BoundedOrderedCommandSchedulerTests
         Assert.AreEqual(1, first.GetAwaiter().GetResult());
     }
 
+    [TestMethod]
+    public async Task CancellationWhileWaitingForChannelCapacityCompletesEarly()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 1);
+        using CancellationTokenSource cancellation = new();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+
+        var queued = Execute(scheduler, 1);
+        var waiting = Execute(scheduler, 2, cancellationToken: cancellation.Token);
+        Assert.IsFalse(waiting.IsCompleted);
+
+        cancellation.Cancel();
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+          async () =>
+          {
+              _ = await waiting.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+          });
+
+        releasePump.SetResult();
+        await blocker;
+        Assert.AreEqual(1, await queued);
+        Assert.AreEqual(3, await Execute(scheduler, 3));
+    }
+
+    [TestMethod]
+    public async Task DisposalFailsCommandsWaitingForChannelCapacity()
+    {
+        BoundedOrderedCommandScheduler scheduler = new(1, 1);
+        (var blocker, _) = await HoldPumpAsync(scheduler);
+
+        var queued = Execute(scheduler, 1);
+        var waiting = Execute(scheduler, 2);
+        Assert.IsFalse(waiting.IsCompleted);
+
+        await scheduler.DisposeAsync();
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocker);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(queued);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(waiting);
+    }
+
+    // When the channel is full, the write completes (and the command becomes visible to the pump)
+    // before the writer continuation runs on the thread pool. Callers here run on dedicated threads
+    // and consume results inline, so they can complete, return and re-rent the pooled command while
+    // that continuation is still queued. The continuation must never observe a later rental.
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task PooledCommandsSurviveWriterContinuationsThatRunAfterCompletion()
+    {
+        const int callers = 4;
+        const int maximumCallsPerCaller = 50_000;
+        var budget = TimeSpan.FromSeconds(2);
+        var commandDeadline = TimeSpan.FromSeconds(30);
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 1);
+        var sends = new int[callers * maximumCallsPerCaller];
+        var receives = new int[callers * maximumCallsPerCaller];
+        var issued = new int[callers];
+        ConcurrentQueue<string> failures = [];
+        var elapsed = Stopwatch.StartNew();
+
+        var threads = Enumerable.Range(0, callers)
+          .Select(caller => new Thread(() => RunCaller(caller)) { IsBackground = true })
+          .ToArray();
+        foreach (var thread in threads)
+        {
+            thread.Start();
+        }
+
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        Assert.IsEmpty(failures, string.Join(Environment.NewLine, failures.Take(10)));
+        for (var caller = 0; caller < callers; caller++)
+        {
+            for (var call = 0; call < issued[caller]; call++)
+            {
+                var id = caller * maximumCallsPerCaller + call;
+                if (sends[id] != 1 || receives[id] != 1)
+                {
+                    Assert.Fail($"Command {id} was sent {sends[id]} and received {receives[id]} times.");
+                }
+            }
+        }
+
+        void RunCaller(int caller)
+        {
+            for (var call = 0;
+                 call < maximumCallsPerCaller && failures.IsEmpty && elapsed.Elapsed < budget;
+                 call++)
+            {
+                var id = caller * maximumCallsPerCaller + call;
+                issued[caller] = call + 1;
+                try
+                {
+                    var command = scheduler.ExecuteAsync(
+                      _ =>
+                      {
+                          Interlocked.Increment(ref sends[id]);
+                          return ValueTask.CompletedTask;
+                      },
+                      _ =>
+                      {
+                          Interlocked.Increment(ref receives[id]);
+                          return ValueTask.FromResult(new StressResult(id));
+                      });
+
+                    var submitted = elapsed.Elapsed;
+                    SpinWait spin = default;
+                    while (!command.IsCompleted)
+                    {
+                        if (elapsed.Elapsed - submitted > commandDeadline)
+                        {
+                            failures.Enqueue($"Command {id} did not complete.");
+                            return;
+                        }
+
+                        spin.SpinOnce(sleep1Threshold: -1);
+                    }
+
+                    var result = command.GetAwaiter().GetResult();
+                    if (result.Id != id)
+                    {
+                        failures.Enqueue($"Command {id} completed with the result of command {result.Id}.");
+                    }
+                }
+                catch (Exception exception)
+                {
+                    failures.Enqueue($"Command {id} failed: {exception.GetType().Name}: {exception.Message}");
+                }
+            }
+        }
+    }
+
     private static ValueTask<int> Execute(
         BoundedOrderedCommandScheduler scheduler,
         int value,
@@ -529,4 +665,8 @@ public sealed class BoundedOrderedCommandSchedulerTests
         });
 
     private sealed class FatalTestException : Exception;
+
+    // A dedicated result type gives the stress test its own static command pool, isolated from the
+    // Command<int> pool that the other tests share.
+    private readonly record struct StressResult(int Id);
 }
