@@ -32,6 +32,7 @@ public class MySqlHotPathBenchmarks
     private ISqlPreparedStatement _decimalGuid = null!;
     private SqlRow[] _textRows = [];
     private SqlRow[] _binaryRows = [];
+    private readonly CancellationTokenSource _cancellation = new();
 
     [GlobalSetup]
     public async Task SetupAsync()
@@ -109,6 +110,7 @@ public class MySqlHotPathBenchmarks
         await _fromId.DisposeAsync();
         await _decimalGuid.DisposeAsync();
         await _apex.DisposeAsync();
+        _cancellation.Dispose();
     }
 
     [Benchmark]
@@ -122,6 +124,26 @@ public class MySqlHotPathBenchmarks
     public async Task<long> QueryWideSingleRowPrepared()
     {
         var rows = await _byId.QueryAsync(SqlParameters.Create(7));
+        return ReadAll(rows);
+    }
+
+    /// <summary>
+    /// The same query with a cancellable token, which takes the barrier and registers a
+    /// <c>KILL QUERY</c> callback for the receive phase.
+    /// </summary>
+    [Benchmark]
+    public async Task<long> QueryWideSingleRowPreparedCancellable()
+    {
+        var rows = await _byId.QueryAsync(SqlParameters.Create(7), _cancellation.Token);
+        return ReadAll(rows);
+    }
+
+    [Benchmark]
+    public async Task<long> QueryWideSingleRowTextCancellable()
+    {
+        var rows = await _apex.QueryAsync(
+          "SELECT " + Projection + " FROM apex_bench_wide WHERE id = 7",
+          _cancellation.Token);
         return ReadAll(rows);
     }
 

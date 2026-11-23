@@ -692,6 +692,63 @@ public sealed class MySqlConnectionWireTests
     }
 
     [TestMethod]
+    public async Task EachCancelledCommandOnAConnectionSendsItsOwnKill()
+    {
+        // The KILL state lives on the connection, so it must be reset after every command: a
+        // second cancellation still sends its own KILL, and a cancellable command that is not
+        // cancelled sends none and needs no DO SLEEP(0).
+        await using var harness = await ServerHarness.StartAsync();
+        TaskCompletionSource[] queryReceived =
+        [
+            new(TaskCreationOptions.RunContinuationsAsynchronously),
+            new(TaskCreationOptions.RunContinuationsAsynchronously),
+        ];
+        Task server = Task.Run(async () =>
+        {
+            await using var main = await harness.AcceptAsync();
+            await main.CompleteHandshakeAsync("8.4.2", connectionId: 555);
+            for (var i = 0; i < queryReceived.Length; i++)
+            {
+                await main.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT SLEEP(10)");
+                queryReceived[i].SetResult();
+
+                await using var admin = await harness.AcceptAsync();
+                await admin.CompleteHandshakeAsync("8.4.2", connectionId: (uint)(556 + i));
+                await admin.ExpectTextCommandStartingWithAsync(MySqlCommand.Query, "KILL QUERY 555");
+                await admin.WriteCommandOkAsync();
+                await admin.ExpectCommandAsync(MySqlCommand.Quit);
+                await main.WriteErrorAsync(1317, "70100", "Query execution was interrupted");
+            }
+
+            await main.ExpectTextCommandAsync(MySqlCommand.Query, "SELECT 1");
+            await main.WriteColumnCountAsync(1);
+            await main.WriteColumnAsync("v", MySqlType.Long);
+            await main.WriteTextRowAsync("1");
+            await main.WriteFinalOkAsync();
+            await main.ExpectCommandAsync(MySqlCommand.Quit);
+        });
+
+        await using var client = await MySqlClient.ConnectAsync(harness.CreateOptions());
+        foreach (var received in queryReceived)
+        {
+            using CancellationTokenSource cancellation = new();
+            var pending = client.QueryAsync("SELECT SLEEP(10)", cancellation.Token);
+            await received.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            cancellation.Cancel();
+            await Assert.ThrowsAsync<OperationCanceledException>(
+              () => pending.AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+
+        using CancellationTokenSource unused = new();
+        var rows = await client.QueryAsync("SELECT 1", unused.Token)
+          .AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.AreEqual(1, rows[0].Get<int>("v"));
+
+        await client.DisposeAsync();
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [TestMethod]
     public async Task KillThatArrivesAfterTheQueryFinishedIsAbsorbedBeforeTheNextCommand()
     {
         await using var harness = await ServerHarness.StartAsync();
