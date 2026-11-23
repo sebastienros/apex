@@ -201,7 +201,7 @@ public sealed class TdsRowCodecTests
     }
 
     [TestMethod]
-    public void RejectsUnknownNonUnicodeCollation()
+    public void RejectsUnknownNonUnicodeCollationOnlyWhenDecodingAValue()
     {
         ArrayBufferWriter<byte> response = new();
         response.WriteByte(TdsTokenType.ColumnMetadata);
@@ -211,9 +211,17 @@ public sealed class TdsRowCodecTests
           "value",
           TdsDataType.BigVarChar,
           CharacterInfo(32, collationInfo: 0x0001, sortId: 0));
+        response.WriteByte(TdsTokenType.Row);
+        response.WriteUInt16LittleEndian(ushort.MaxValue);
+        response.WriteByte(TdsTokenType.Row);
+        response.WriteUInt16LittleEndian(1);
+        response.WriteByte((byte)'x');
+        WriteDone(response);
 
-        Assert.ThrowsExactly<InvalidDataException>(
-          () => new TdsQueryParser(new MsSqlRowDecoder()).Parse(response.WrittenMemory));
+        // Metadata and NULL values parse; only decoding text in the unknown code page fails.
+        var rows = new TdsQueryParser(new MsSqlRowDecoder()).Parse(response.WrittenMemory).Rows;
+        Assert.IsTrue(rows[0].IsNull(0));
+        Assert.ThrowsExactly<InvalidDataException>(() => rows[1].GetString(0));
     }
 
     [TestMethod]
@@ -234,11 +242,31 @@ public sealed class TdsRowCodecTests
     [DataRow(0x041E, 0, 874)]
     [DataRow(0, 30, 437)]
     [DataRow(0, 40, 850)]
+    [DataRow(0x10407, 0, 1252)] // German_PhoneBook
+    [DataRow(0x20804, 0, 936)] // Chinese_PRC_Stroke
+    [DataRow(0x30404, 0, 950)] // Chinese_Taiwan_Bopomofo
+    [DataRow(0x1040E, 0, 1250)] // Hungarian_Technical
+    [DataRow(0x10411, 0, 932)] // Japanese_Unicode
+    [DataRow(0x0FFF, 0, 0)] // unknown LCID: fails on decode, not on metadata
     public void ResolvesInRepoCollationCodePages(int info, int sortId, int expected)
     {
         Assert.AreEqual(
           expected,
           TdsCollationCodec.ResolveCodePage(checked((uint)info), checked((byte)sortId)));
+    }
+
+    [TestMethod]
+    public void DecodesUtf16WithLoneSurrogatesUnchanged()
+    {
+        // LEFT(N'😀', 1) under a non-_SC collation yields only the high surrogate.
+        var value = "a\uD83D";
+        // Encoding.Unicode would replace the lone surrogate, so take the raw UTF-16LE code units.
+        var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(value.AsSpan()).ToArray();
+
+        Assert.AreEqual(value, TdsCollationCodec.Decode(bytes, 1200));
+        Assert.AreEqual(value, new MsSqlStringCache(16, 64).GetString(bytes, 1200));
+        Assert.ThrowsExactly<InvalidDataException>(() => TdsCollationCodec.Decode(bytes.AsSpan(0, 3), 1200));
+        Assert.ThrowsExactly<InvalidDataException>(() => TdsCollationCodec.Decode("x"u8, 0));
     }
 
     [TestMethod]

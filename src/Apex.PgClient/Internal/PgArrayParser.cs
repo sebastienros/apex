@@ -5,10 +5,15 @@ internal static class PgArrayParser
     public static string?[] Parse(string value, char delimiter = ',')
     {
         var input = value.AsSpan();
-        var dimensions = input.IndexOf('=');
-        if (dimensions >= 0)
+        // Only a leading dimension decoration such as "[1:3]=" is skipped; '=' inside elements
+        // (for example {a=b}) is ordinary data.
+        if (!input.IsEmpty && input[0] == '[')
         {
-            input = input[(dimensions + 1)..];
+            var dimensions = input.IndexOf('=');
+            if (dimensions >= 0)
+            {
+                input = input[(dimensions + 1)..];
+            }
         }
 
         if (input.Length < 2 || input[0] != '{' || input[^1] != '}')

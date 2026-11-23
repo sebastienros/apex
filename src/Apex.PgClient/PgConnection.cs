@@ -940,7 +940,9 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         if (existing is null)
         {
             await _writer.WritePrepareAsync(name, sql, CancellationToken.None).ConfigureAwait(false);
-            await ReadReadyAsync((byte)'1', CancellationToken.None).ConfigureAwait(false);
+            // WritePrepareAsync sends Parse, Describe (statement), and Sync, so the reply carries
+            // ParameterDescription and RowDescription/NoData besides ParseComplete.
+            _ = await ReadPreparedAsync(CancellationToken.None).ConfigureAwait(false);
             string? evicted;
             lock (_statementCacheGate)
             {
@@ -2251,6 +2253,10 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         InvalidDataException or
         AuthenticationException or
         ObjectDisposedException or
+        // The server ends the session only for FATAL/PANIC severity. SQLSTATE class alone is not
+        // enough: 08P01 (protocol violation, e.g. a Bind with the wrong parameter count) arrives as
+        // ERROR and leaves the session usable.
+        PgException { Severity: "FATAL" or "PANIC" } or
         PgException { SqlState: "57P01" or "57P02" or "57P03" or "08006" };
 
     private static long ParseAffectedRows(string commandTag)

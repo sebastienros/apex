@@ -30,9 +30,28 @@ internal static class TdsCollationCodec
             return 65001;
         }
 
+        // Bits 16-19 of the collation LCID select a sort-order variant (for example
+        // German_PhoneBook or Chinese_PRC_Stroke); the code page depends only on the low 16 bits.
         return sortId == 0
-          ? ResolveLcid(checked((int)(info & 0x000F_FFFF)))
+          ? ResolveLcid(checked((int)(info & 0x0000_FFFF)))
           : ResolveSortId(sortId);
+    }
+
+    // UTF-16 values are copied code unit by code unit, like SqlClient: SQL Server stores UCS-2
+    // under non-_SC collations, so a truncated value can legitimately end with a lone surrogate.
+    internal static string Decode(ReadOnlySpan<byte> value, int codePage)
+    {
+        if (codePage == 1200 && BitConverter.IsLittleEndian)
+        {
+            if ((value.Length & 1) != 0)
+            {
+                throw new InvalidDataException("SQL Server sent a UTF-16 value with an odd byte length.");
+            }
+
+            return new string(System.Runtime.InteropServices.MemoryMarshal.Cast<byte, char>(value));
+        }
+
+        return GetEncoding(codePage).GetString(value);
     }
 
     internal static Encoding GetEncoding(int codePage) =>
@@ -120,8 +139,9 @@ internal static class TdsCollationCodec
         0x0454 or 0x0457 or 0x045A or 0x045B or 0x0461 or
         0x0463 or 0x0465 or 0x0481 or 0x0845 => 1200,
           0x0804 or 0x1004 => 936,
-          _ => throw new InvalidDataException(
-          $"SQL Server collation has unknown LCID 0x{lcid:X5}."),
+          // Unknown LCIDs fail only if a value is decoded (GetEncoding(0) throws), not while
+          // column metadata is parsed, so NULLs and unread columns don't break the connection.
+          _ => 0,
       };
 
     private static int ResolveSortId(byte sortId) =>

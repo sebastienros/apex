@@ -277,9 +277,15 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
           },
           async _ =>
           {
-              using var packet = await _reader.ReadAsync(CancellationToken.None)
-            .ConfigureAwait(false);
-              HandleCompletionPacket(packet.Span);
+              using (var packet = await _reader.ReadAsync(CancellationToken.None)
+                .ConfigureAwait(false))
+              {
+                  HandleCompletionPacket(packet.Span);
+              }
+
+              // COM_RESET_CONNECTION also resets session variables, so re-apply the configured
+              // ones inside the same barrier before any other command runs.
+              await ApplySessionVariablesAsync(CancellationToken.None).ConfigureAwait(false);
               return true;
           },
           barrier: true,

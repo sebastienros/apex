@@ -101,7 +101,8 @@ internal sealed class MySqlPacketWriter
         await _stream.WriteAsync(
             _writer.WrittenMemory,
             cancellationToken).ConfigureAwait(false);
-        _writer.Clear();
+        // Clear() would zero every written byte on each flush; the bytes are overwritten anyway.
+        _writer.ResetWrittenCount();
     }
 
     private void WriteFrame(byte sequence, ReadOnlySpan<byte> payload)

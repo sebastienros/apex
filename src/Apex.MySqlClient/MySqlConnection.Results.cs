@@ -234,35 +234,52 @@ public sealed partial class MySqlConnection
             var buffer = ArrayPool<byte>.Shared.Rent(64 * 1024);
             try
             {
-                FileStream file = new(
-                  fileName,
-                  new FileStreamOptions
-                  {
-                      Mode = FileMode.Open,
-                      Access = FileAccess.Read,
-                      Share = FileShare.Read,
-                      BufferSize = buffer.Length,
-                      Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
-                  });
-                await using var _ = file.ConfigureAwait(false);
-                while (true)
+                FileStream? file = null;
+                try
                 {
-                    var read = await file.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-                    if (read == 0)
-                    {
-                        break;
-                    }
-
-                    _writer.WritePacket(++sequence, buffer.AsSpan(0, read));
+                    file = new(
+                      fileName,
+                      new FileStreamOptions
+                      {
+                          Mode = FileMode.Open,
+                          Access = FileAccess.Read,
+                          Share = FileShare.Read,
+                          BufferSize = buffer.Length,
+                          Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                      });
                 }
-            }
-            catch (Exception exception) when (
-              exception is IOException or
-                UnauthorizedAccessException or
-                NotSupportedException or
-                ArgumentException)
-            {
-                fileError = exception;
+                catch (Exception exception) when (IsLocalInfileFileError(exception))
+                {
+                    fileError = exception;
+                }
+
+                if (file is not null)
+                {
+                    await using var _ = file.ConfigureAwait(false);
+                    while (true)
+                    {
+                        int read;
+                        try
+                        {
+                            read = await file.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception exception) when (IsLocalInfileFileError(exception))
+                        {
+                            fileError = exception;
+                            break;
+                        }
+
+                        if (read == 0)
+                        {
+                            break;
+                        }
+
+                        // Stream each chunk instead of buffering the whole file in the connection's
+                        // writer. Socket failures here are connection errors, not file errors.
+                        _writer.WritePacket(++sequence, buffer.AsSpan(0, read));
+                        await _writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+                    }
+                }
             }
             finally
             {
@@ -288,6 +305,12 @@ public sealed partial class MySqlConnection
             ExceptionDispatchInfo.Capture(fileError).Throw();
         }
     }
+
+    private static bool IsLocalInfileFileError(Exception exception) =>
+      exception is IOException or
+        UnauthorizedAccessException or
+        NotSupportedException or
+        ArgumentException;
 
     private ResultHeader ReadResultHeader(ReadOnlySpan<byte> payload)
     {

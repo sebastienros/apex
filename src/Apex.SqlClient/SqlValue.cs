@@ -145,11 +145,11 @@ public readonly struct SqlValue
     public static implicit operator SqlValue(decimal value) =>
       new(SqlValueKind.Decimal, new SqlValuePayload(value));
 
-    public static implicit operator SqlValue(string value) =>
-      new(SqlValueKind.String, reference: value);
+    public static implicit operator SqlValue(string? value) =>
+      value is null ? Null : new(SqlValueKind.String, reference: value);
 
-    public static implicit operator SqlValue(byte[] value) =>
-      new(SqlValueKind.Bytes, reference: value);
+    public static implicit operator SqlValue(byte[]? value) =>
+      value is null ? Null : new(SqlValueKind.Bytes, reference: value);
 
     public static implicit operator SqlValue(ReadOnlyMemory<byte> value) =>
       new(SqlValueKind.ReadOnlyMemory, reference: value);
@@ -169,8 +169,8 @@ public readonly struct SqlValue
     public static implicit operator SqlValue(DateTimeOffset value) =>
       new(SqlValueKind.DateTimeOffset, new SqlValuePayload(value));
 
-    public static implicit operator SqlValue(JsonDocument value) =>
-      new(SqlValueKind.JsonDocument, reference: value);
+    public static implicit operator SqlValue(JsonDocument? value) =>
+      value is null ? Null : new(SqlValueKind.JsonDocument, reference: value);
 
     public static implicit operator SqlValue(JsonElement value) =>
       new(SqlValueKind.JsonElement, reference: value);
