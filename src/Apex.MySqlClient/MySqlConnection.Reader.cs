@@ -29,8 +29,9 @@ public sealed partial class MySqlConnection
 
     /// <summary>
     /// Streams rows without buffering them. The current row points straight at the pooled wire
-    /// buffer, so its values are only valid until the next read. The pump and the consumer meet
-    /// through an auto reset event instead of a channel, which keeps the hand off allocation free.
+    /// buffer, so its values are only valid until the next read. A row that is already received is
+    /// read by <see cref="ReadAsync"/> itself; otherwise the pump and the consumer meet through an
+    /// auto reset event instead of a channel, which keeps the hand off allocation free.
     /// </summary>
     internal class MySqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     {

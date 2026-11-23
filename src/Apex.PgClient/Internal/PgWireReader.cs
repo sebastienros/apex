@@ -95,9 +95,12 @@ internal sealed class PgWireReader
         totalLength = 0;
         var buffer = _buffer;
         var available = _end - _start;
+        // ReadAsync would first give a grown buffer back to the pool (see ShrinkBuffer), so leave
+        // that to it; when too much is buffered to shrink, it reads in place as this does.
         if (buffer is null ||
-            buffer.Length > MaximumRetainedBufferLength ||
-            available < 5)
+            available < 5 ||
+            (buffer.Length > MaximumRetainedBufferLength &&
+             available <= MaximumRetainedBufferLength / 2))
         {
             return false;
         }

@@ -191,6 +191,56 @@ public sealed partial class MsSqlConnectionWireTests
         await server.WaitAsync(TimeSpan.FromSeconds(5));
     }
 
+    [TestMethod]
+    public async Task CommandQueuedBehindReaderRunsAfterTheReaderFinishesInline()
+    {
+        // The reader is a barrier, so the queued query is only sent once the reader's pump ends.
+        // Here the pump ends inside the last ReadAsync, on the consumer's thread, and the scheduler
+        // must still go on to send and complete the queued query.
+        const int rowCount = 50;
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunTwoQueryServerAsync(listener, BuildIntResult(Sequence(1, rowCount)), BuildIntResult(7));
+        await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
+        await using var reader = await connection.ExecuteReaderAsync("SELECT value");
+        var queued = connection.QueryAsync("SELECT 7 AS value").AsTask();
+
+        Assert.IsTrue(await reader.ReadAsync());
+        for (var value = 2; value <= rowCount; value++)
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(value, reader.GetInt32(0));
+        }
+
+        var end = reader.ReadAsync();
+        Assert.IsTrue(end.IsCompleted, "Reading the received end of the result yielded.");
+        Assert.IsFalse(await end);
+        Assert.IsFalse(queued.IsFaulted);
+
+        var rows = await queued.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.AreEqual(7, rows[0].GetInt32(0));
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private static async Task RunTwoQueryServerAsync(
+        TcpListener listener,
+        byte[] first,
+        byte[] second)
+    {
+        using var client = await listener.AcceptTcpClientAsync();
+        await using var stream = client.GetStream();
+        await LoginAsync(stream);
+        TdsPacketReader reader = new(stream);
+        using TdsPacketWriter writer = new(stream, 4096);
+        foreach (var response in new[] { first, second })
+        {
+            var query = await reader.ReadMessageAsync(default);
+            Assert.AreEqual(TdsMessageType.SqlBatch, query.Type);
+            await writer.WriteMessageAsync(TdsMessageType.TabularResult, response, default);
+        }
+    }
+
     private static int[] Sequence(int start, int count) =>
         Enumerable.Range(start, count).ToArray();
 
