@@ -56,12 +56,11 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
     private readonly AsyncAutoResetEvent _ready = new();
     private int _readyCount;
 
-    // The token a cancellable command's send runs with: cancelled by the command's own token or by
-    // shutdown. Sends run one at a time on the pump, so a single source is reused (TryReset) and
-    // only replaced after it was actually cancelled, instead of linking a new one per command.
-    private static readonly Action<object?> s_cancelSource =
-      static state => ((CancellationTokenSource)state!).Cancel();
-    private CancellationTokenSource _sendCancellation = new();
+    // The tokens a cancellable command's send and receive run with, each cancelled by the
+    // command's own token or by shutdown. Sends run one at a time on the pump, and so do receives,
+    // so each side reuses one source instead of linking a new one per command.
+    private readonly ReusableLinkedSource _sendCancellation;
+    private readonly ReusableLinkedSource _receiveCancellation;
     private readonly Action? _abortTransport;
     private readonly TimeSpan _closeTimeout;
     private readonly TimeSpan _abortGracePeriod;
@@ -96,8 +95,15 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
               SingleReader = true,
               SingleWriter = false,
           });
+        _sendCancellation = new ReusableLinkedSource(_shutdown);
+        _receiveCancellation = new ReusableLinkedSource(_shutdown);
         _shutdown.Token.UnsafeRegister(
-          static state => ((BoundedOrderedCommandScheduler)state!).CancelSend(),
+          static state =>
+          {
+              var scheduler = (BoundedOrderedCommandScheduler)state!;
+              scheduler._sendCancellation.Cancel();
+              scheduler._receiveCancellation.Cancel();
+          },
           this);
         _pump = PumpAsync();
     }
@@ -500,11 +506,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
 
             try
             {
-                // Only the shutdown token: once a command is sent its response must be read to
-                // keep the connection in sync, so the caller's token cannot stop the receive. The
-                // drivers observe their own cancellation inside the receive delegate where it is
-                // safe (for example, PostgreSQL's cancel request).
-                await entry.Command.ReceiveAsync(entry.Generation, _shutdown.Token).ConfigureAwait(false);
+                await ReceiveAsync(entry).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
@@ -556,32 +558,40 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask SendCancellableAsync(ICommand command, CancellationToken cancellationToken)
     {
-        var source = Volatile.Read(ref _sendCancellation);
-        var registration = cancellationToken.UnsafeRegister(s_cancelSource, source);
+        var source = _sendCancellation.Link(cancellationToken, out var registration);
         try
         {
             await command.SendAsync(source.Token).ConfigureAwait(false);
         }
         finally
         {
-            // Waits for a cancellation callback that is already running, so the source is quiet
-            // before it is reset or replaced.
-            registration.Dispose();
-            if (!source.TryReset())
-            {
-                CancellationTokenSource next = new();
-                Volatile.Write(ref _sendCancellation, next);
-
-                // Pairs with CancelSend: either shutdown sees the new source, or this sees shutdown.
-                if (_shutdown.IsCancellationRequested)
-                {
-                    next.Cancel();
-                }
-            }
+            _sendCancellation.Unlink(source, registration);
         }
     }
 
-    private void CancelSend() => Volatile.Read(ref _sendCancellation).Cancel();
+    // Receives get the caller's token too: some receives are meant to be cancelled, for example
+    // PostgreSQL's wait for a notification, which its subscriber cancels to send LISTEN.
+    private ValueTask ReceiveAsync(BatchEntry entry)
+    {
+        var cancellationToken = entry.Command.CancellationToken;
+        return cancellationToken.CanBeCanceled
+          ? ReceiveCancellableAsync(entry, cancellationToken)
+          : entry.Command.ReceiveAsync(entry.Generation, _shutdown.Token);
+    }
+
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ReceiveCancellableAsync(BatchEntry entry, CancellationToken cancellationToken)
+    {
+        var source = _receiveCancellation.Link(cancellationToken, out var registration);
+        try
+        {
+            await entry.Command.ReceiveAsync(entry.Generation, source.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            _receiveCancellation.Unlink(source, registration);
+        }
+    }
 
     private bool IsFatal(Exception exception) => _isFatal(exception);
 
@@ -988,6 +998,46 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         }
 
         private static long GetIncompleteState(int generation) => (long)(uint)generation << 1;
+    }
+
+    // A CancellationTokenSource linked to one command's token at a time and to shutdown. Only one
+    // operation uses it at a time (the pump's sends, or its receives), so it is reset and reused,
+    // and replaced only after it was actually cancelled. The token is valid for the duration of
+    // that one operation: a delegate must not keep a registration on it after it returns.
+    private sealed class ReusableLinkedSource(CancellationTokenSource shutdown)
+    {
+        private static readonly Action<object?> s_cancel =
+          static state => ((CancellationTokenSource)state!).Cancel();
+        private CancellationTokenSource _source = new();
+
+        public CancellationTokenSource Link(
+            CancellationToken cancellationToken,
+            out CancellationTokenRegistration registration)
+        {
+            var source = Volatile.Read(ref _source);
+            registration = cancellationToken.UnsafeRegister(s_cancel, source);
+            return source;
+        }
+
+        public void Unlink(CancellationTokenSource source, CancellationTokenRegistration registration)
+        {
+            // Waits for a cancellation callback that is already running, so the source is quiet
+            // before it is reset or replaced.
+            registration.Dispose();
+            if (!source.TryReset())
+            {
+                CancellationTokenSource next = new();
+                Volatile.Write(ref _source, next);
+
+                // Pairs with Cancel: either shutdown sees the new source, or this sees shutdown.
+                if (shutdown.IsCancellationRequested)
+                {
+                    next.Cancel();
+                }
+            }
+        }
+
+        public void Cancel() => Volatile.Read(ref _source).Cancel();
     }
 
     private sealed class BatchEntry

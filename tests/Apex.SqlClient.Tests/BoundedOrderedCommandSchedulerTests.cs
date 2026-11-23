@@ -648,6 +648,54 @@ public sealed class BoundedOrderedCommandSchedulerTests
         await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocked);
     }
 
+    // PostgreSQL's notification wait is a receive that its subscriber cancels through the caller's
+    // token to interleave LISTEN commands, so the receive token must follow the caller's token.
+    [TestMethod]
+    public async Task CancellingTheCallerTokenCancelsAReceiveInProgress()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 4);
+        for (var i = 0; i < 3; i++)
+        {
+            using CancellationTokenSource cancellation = new();
+            var receiveStarted = NewGate();
+            var waiting = scheduler.ExecuteAsync(
+              _ => ValueTask.CompletedTask,
+              async cancellationToken =>
+              {
+                  receiveStarted.SetResult();
+                  await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                  return 0;
+              },
+              barrier: true,
+              cancellationToken: cancellation.Token);
+            await receiveStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var queued = Execute(scheduler, i);
+
+            cancellation.Cancel();
+            await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+              async () =>
+              {
+                  _ = await waiting.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+              });
+            Assert.AreEqual(i, await queued.AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+
+        // A receive after the cancelled ones does not see their cancellation.
+        using CancellationTokenSource later = new();
+        var canceledOnEntry = true;
+        Assert.AreEqual(
+          7,
+          await scheduler.ExecuteAsync(
+            _ => ValueTask.CompletedTask,
+            cancellationToken =>
+            {
+                canceledOnEntry = cancellationToken.IsCancellationRequested;
+                return ValueTask.FromResult(7);
+            },
+            cancellationToken: later.Token));
+        Assert.IsFalse(canceledOnEntry);
+    }
+
     [TestMethod]
     public async Task ACancelledSendDoesNotCancelLaterSends()
     {
