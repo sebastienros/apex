@@ -11,6 +11,12 @@ public sealed partial class MySqlConnection
 {
     private static readonly Task<bool> s_notKilled = Task.FromResult(false);
 
+    // The KILL QUERY started for the command in ReceiveWithCancellationAsync. That method runs
+    // only under the scheduler barrier, so one connection has at most one such command at a
+    // time and the state can live on the connection instead of in a per-command object.
+    private readonly Lock _commandKillGate = new();
+    private Task<bool>? _commandKill;
+
     private async ValueTask<MySqlExecutionResult> ExecuteQueryCoreAsync(
         string sql,
         SqlParameters parameters,
@@ -106,13 +112,15 @@ public sealed partial class MySqlConnection
         SqlParameters parameters,
         CancellationToken cancellationToken) =>
       ReceiveWithCancellationAsync(
-        async () =>
+        (Connection: this, Statement: statement, Parameters: parameters),
+        static async state =>
         {
-            WriteExecute(statement, parameters, MySqlCursorType.NoCursor);
-            await _writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
-            var rows = await ReadResultsAsync(binary: true, CancellationToken.None)
+            var connection = state.Connection;
+            connection.WriteExecute(state.Statement, state.Parameters, MySqlCursorType.NoCursor);
+            await connection._writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+            var rows = await connection.ReadResultsAsync(binary: true, CancellationToken.None)
             .ConfigureAwait(false);
-            return new MySqlExecutionResult(rows, _lastCommandInfo);
+            return new MySqlExecutionResult(rows, connection._lastCommandInfo);
         },
         cancellationToken);
 
@@ -202,9 +210,10 @@ public sealed partial class MySqlConnection
                     return ValueTask.CompletedTask;
                 },
                 _ => ReceiveWithCancellationAsync(
-                    () => ReadCollectedResultsAsync(
-                        state,
-                        collector,
+                    (Connection: this, State: state, Collector: collector),
+                    static receive => receive.Connection.ReadCollectedResultsAsync(
+                        receive.State,
+                        receive.Collector,
                         CancellationToken.None),
                     cancellationToken),
                 barrier: cancellationToken.CanBeCanceled || _options.AllowLoadLocalInfile,
@@ -231,11 +240,12 @@ public sealed partial class MySqlConnection
         bool binary,
         CancellationToken cancellationToken) =>
       ReceiveWithCancellationAsync(
-        async () =>
+        (Connection: this, Binary: binary),
+        static async state =>
         {
-            var rows = await ReadResultsAsync(binary, CancellationToken.None)
+            var rows = await state.Connection.ReadResultsAsync(state.Binary, CancellationToken.None)
             .ConfigureAwait(false);
-            return new MySqlExecutionResult(rows, _lastCommandInfo);
+            return new MySqlExecutionResult(rows, state.Connection._lastCommandInfo);
         },
         cancellationToken);
 
@@ -588,22 +598,32 @@ public sealed partial class MySqlConnection
     /// <c>KILL QUERY</c> issued for this command is always awaited before the barrier is
     /// released, on every exit path, so it can never land on the next command instead.
     /// </summary>
-    private async ValueTask<T> ReceiveWithCancellationAsync<T>(
-        Func<ValueTask<T>> receiveAsync,
+    /// <remarks>
+    /// The receive callback takes its state explicitly, and the cancellation callback is a
+    /// static delegate over the connection, so a cancellable command allocates no closures here.
+    /// </remarks>
+    private ValueTask<T> ReceiveWithCancellationAsync<TState, T>(
+        TState state,
+        Func<TState, ValueTask<T>> receiveAsync,
+        CancellationToken cancellationToken) =>
+      cancellationToken.CanBeCanceled
+        ? ReceiveCancellableAsync(state, receiveAsync, cancellationToken)
+        : receiveAsync(state);
+
+    private async ValueTask<T> ReceiveCancellableAsync<TState, T>(
+        TState state,
+        Func<TState, ValueTask<T>> receiveAsync,
         CancellationToken cancellationToken)
     {
-        if (!cancellationToken.CanBeCanceled)
-        {
-            return await receiveAsync().ConfigureAwait(false);
-        }
-
-        CancellationState state = new(this);
-        var registration = cancellationToken.Register(state.Cancel);
+        Debug.Assert(_commandKill is null, "A previous command's KILL QUERY was not collected.");
+        var registration = cancellationToken.Register(
+          static connection => ((MySqlConnection)connection!).RequestCommandKill(),
+          this);
         T result = default!;
         Exception? failure = null;
         try
         {
-            result = await receiveAsync().ConfigureAwait(false);
+            result = await receiveAsync(state).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -611,9 +631,16 @@ public sealed partial class MySqlConnection
         }
 
         // Disposing the registration waits for a running callback, so no KILL can start after
-        // this point; the one that may have started is awaited next.
+        // this point; the one that may have started is collected and awaited next.
         await registration.DisposeAsync().ConfigureAwait(false);
-        await FinishKillAsync(state.Cancellation, failure).ConfigureAwait(false);
+        Task<bool>? kill;
+        lock (_commandKillGate)
+        {
+            kill = _commandKill;
+            _commandKill = null;
+        }
+
+        await FinishKillAsync(kill, failure).ConfigureAwait(false);
         if (cancellationToken.IsCancellationRequested && IsCancellationOutcome(failure))
         {
             throw new OperationCanceledException(cancellationToken);
@@ -749,38 +776,11 @@ public sealed partial class MySqlConnection
         }
     }
 
-    private sealed class CancellationState
+    private void RequestCommandKill()
     {
-        private readonly MySqlConnection _connection;
-        private readonly object _gate = new();
-        private Task<bool>? _cancellation;
-
-        internal CancellationState(MySqlConnection connection)
+        lock (_commandKillGate)
         {
-            _connection = connection;
-            Cancel = RequestCancellation;
-        }
-
-        internal Action Cancel { get; }
-
-        /// <summary>Gets the started cancellation, which reports whether it killed a query.</summary>
-        internal Task<bool>? Cancellation
-        {
-            get
-            {
-                lock (_gate)
-                {
-                    return _cancellation;
-                }
-            }
-        }
-
-        private void RequestCancellation()
-        {
-            lock (_gate)
-            {
-                _cancellation ??= _connection.CancelRunningCommandAsync();
-            }
+            _commandKill ??= CancelRunningCommandAsync();
         }
     }
 }

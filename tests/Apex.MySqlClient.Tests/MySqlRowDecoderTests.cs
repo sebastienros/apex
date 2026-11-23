@@ -708,6 +708,107 @@ public sealed class MySqlRowDecoderTests
         Assert.AreEqual(8, decoder.GetField(row, 8, out _).Length);
     }
 
+    private static readonly MySqlColumnMetadata[] s_validationShape =
+    [
+        Column("id", MySqlType.Long),
+        Column("date", MySqlType.Date),
+        Column("name", MySqlType.VarString),
+        Column("time", MySqlType.Time),
+        Column("stamp", MySqlType.DateTime),
+        Column("long", MySqlType.VarString),
+    ];
+
+    private static byte[] ValidBinaryValidationRow(bool withNulls = false)
+    {
+        List<byte> row = [0x00, withNulls ? (byte)((1 << (2 + 1)) | (1 << (2 + 3))) : (byte)0];
+        row.AddRange([1, 0, 0, 0]);
+        if (!withNulls)
+        {
+            row.AddRange([4, 0xE8, 0x07, 2, 29]);
+        }
+
+        row.AddRange([3, (byte)'a', (byte)'b', (byte)'c']);
+        if (!withNulls)
+        {
+            row.AddRange([8, 0, 1, 0, 0, 0, 2, 3, 4]);
+        }
+
+        row.AddRange([7, 0xE8, 0x07, 1, 2, 3, 4, 5]);
+        row.AddRange([0xFC, 0x2C, 0x01]);
+        row.AddRange(Enumerable.Repeat((byte)'L', 300));
+        return [.. row];
+    }
+
+    [TestMethod]
+    public void ValidatesWellFormedBinaryAndTextRows()
+    {
+        var binary = CreateDecoder(s_validationShape, binary: true);
+        binary.ValidateRow(ValidBinaryValidationRow());
+        binary.ValidateRow(ValidBinaryValidationRow(withNulls: true));
+        Assert.AreEqual(300, binary.GetField(ValidBinaryValidationRow(), 5, out _).Length);
+
+        var text = CreateDecoder(
+          [Column("a", MySqlType.VarString), Column("b", MySqlType.VarString)],
+          binary: false);
+        text.ValidateRow([1, (byte)'a', 0xFB]);
+        text.ValidateRow([0xFB, 0xFB]);
+    }
+
+    [TestMethod]
+    [DataRow("header")]
+    [DataRow("no-bitmap")]
+    [DataRow("truncated-fixed")]
+    [DataRow("truncated-string")]
+    [DataRow("truncated-long-string")]
+    [DataRow("missing-last")]
+    [DataRow("date-length")]
+    [DataRow("time-length")]
+    [DataRow("datetime-length")]
+    [DataRow("trailing")]
+    public void RejectsMalformedBinaryRows(string defect)
+    {
+        var valid = ValidBinaryValidationRow();
+        byte[] row = defect switch
+        {
+            "header" => [0x01, .. valid[1..]],
+            "no-bitmap" => [0x00],
+            "truncated-fixed" => valid[..4],
+            "truncated-string" => valid[..12],
+            "truncated-long-string" => valid[..^1],
+            "missing-last" => valid[..^303],
+            "date-length" => Replace(valid, 6, 5),
+            "time-length" => Replace(valid, 15, 9),
+            "datetime-length" => Replace(valid, 24, 5),
+            "trailing" => [.. valid, 0],
+            _ => throw new ArgumentOutOfRangeException(nameof(defect)),
+        };
+        var decoder = CreateDecoder(s_validationShape, binary: true);
+
+        Assert.ThrowsExactly<InvalidDataException>(() => decoder.ValidateRow(row));
+
+        static byte[] Replace(byte[] source, int index, byte value)
+        {
+            var copy = source.ToArray();
+            copy[index] = value;
+            return copy;
+        }
+    }
+
+    [TestMethod]
+    [DataRow(new byte[] { 5, (byte)'a' })]
+    [DataRow(new byte[] { 1, (byte)'a' })]
+    [DataRow(new byte[] { 1, (byte)'a', 0xFB, 0 })]
+    [DataRow(new byte[] { 1, (byte)'a', 0xFC, 0x2C })]
+    [DataRow(new byte[0])]
+    public void RejectsMalformedTextRows(byte[] row)
+    {
+        var decoder = CreateDecoder(
+          [Column("a", MySqlType.VarString), Column("b", MySqlType.VarString)],
+          binary: false);
+
+        Assert.ThrowsExactly<InvalidDataException>(() => decoder.ValidateRow(row));
+    }
+
     private static MySqlRowDecoder CreateDecoder(
         MySqlColumnMetadata[] columns,
         bool binary,
