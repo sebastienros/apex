@@ -29,6 +29,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     private MySqlServerStatus _status = MySqlServerStatus.AutoCommit;
     private MySqlCommandInfo _lastCommandInfo = MySqlCommandInfo.Empty;
     private IReadOnlyList<MySqlColumnMetadata> _lastColumns = Array.Empty<MySqlColumnMetadata>();
+    private MySqlResultShapeCache? _resultShapes;
     private DatabaseMetadata _databaseMetadata = new("MySQL", "unknown", 0, 0);
     private MySqlServerVersion _serverVersion = new("unknown", 0, 0, 0, false);
     private uint _connectionId;
@@ -450,12 +451,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
       chain is not null &&
       (errors & ~SslPolicyErrors.RemoteCertificateNameMismatch) == SslPolicyErrors.None;
 
-    private static string GetOperation(string sql)
-    {
-        var text = sql.AsSpan().TrimStart();
-        var separator = text.IndexOfAny(" \t\r\n");
-        return (separator < 0 ? text : text[..separator]).ToString().ToUpperInvariant();
-    }
+    private static string GetOperation(string sql) => MySqlOperationName.Get(sql);
 
     private static void ValidateOptions(MySqlConnectOptions options)
     {

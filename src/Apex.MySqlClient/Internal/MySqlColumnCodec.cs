@@ -29,7 +29,8 @@ internal static class MySqlColumnCodec
     internal static MySqlColumnMetadata Read(ReadOnlySpan<byte> payload)
     {
         MySqlPayloadReader reader = new(payload);
-        _ = reader.ReadLengthEncodedString();
+        // The catalog is always "def"; skip it without decoding a string.
+        _ = reader.ReadLengthEncodedSpan(out _);
         var schema = reader.ReadLengthEncodedString();
         var table = reader.ReadLengthEncodedString();
         var originalTable = reader.ReadLengthEncodedString();

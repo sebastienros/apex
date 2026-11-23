@@ -624,6 +624,90 @@ public sealed class MySqlRowDecoderTests
             0));
     }
 
+    [TestMethod]
+    public void LocatesFieldsAfterNullsAndLongLengthPrefixesInTextRows()
+    {
+        var medium = new string('m', 300);
+        var large = new string('L', 70_000);
+        var decoder = CreateDecoder(
+          [
+              Column("a", MySqlType.VarString),
+              Column("b", MySqlType.VarString),
+              Column("c", MySqlType.VarString),
+              Column("d", MySqlType.VarString),
+              Column("e", MySqlType.Long),
+          ],
+          binary: false);
+        var row = BuildTextRowRaw(
+          [
+              Encoding.UTF8.GetBytes("short"),
+              null,
+              Encoding.UTF8.GetBytes(medium),
+              Encoding.UTF8.GetBytes(large),
+              Encoding.UTF8.GetBytes("42"),
+          ]);
+        decoder.ValidateRow(row);
+
+        Assert.AreEqual("short", decoder.Decode<string>(row, 0));
+        Assert.IsNull(decoder.Decode<string?>(row, 1));
+        Assert.AreEqual(medium, decoder.Decode<string>(row, 2));
+        Assert.AreEqual(large, decoder.Decode<string>(row, 3));
+        Assert.AreEqual(42, decoder.Decode<int>(row, 4));
+        CollectionAssert.AreEqual("42"u8.ToArray(), decoder.GetField(row, 4, out var isNull).ToArray());
+        Assert.IsFalse(isNull);
+        _ = decoder.GetField(row, 1, out isNull);
+        Assert.IsTrue(isNull);
+    }
+
+    [TestMethod]
+    public void LocatesFieldsAfterMixedWidthsAndNullsInBinaryRows()
+    {
+        var medium = new string('m', 300);
+        MySqlColumnMetadata[] columns =
+        [
+            Column("tiny", MySqlType.Tiny),
+            Column("short", MySqlType.Short),
+            Column("null", MySqlType.Long),
+            Column("long", MySqlType.Long),
+            Column("big", MySqlType.LongLong),
+            Column("date", MySqlType.Date),
+            Column("text", MySqlType.VarString),
+            Column("stamp", MySqlType.DateTime),
+            Column("double", MySqlType.Double),
+            Column("last", MySqlType.VarString),
+        ];
+        var decoder = CreateDecoder(columns, binary: true);
+        BinaryRowBuilder builder = new(columns.Length);
+        builder.WriteInt8(0, -5);
+        builder.WriteInt16(1, 1234);
+        builder.SetNull(2);
+        builder.WriteInt32(3, 987654);
+        builder.WriteInt64(4, long.MaxValue);
+        builder.WriteDate(5, 2024, 2, 29);
+        builder.WriteLengthEncodedBytes(6, Encoding.UTF8.GetBytes(medium));
+        builder.WriteDateTime(7, 2024, 1, 2, 3, 4, 5, 678);
+        builder.WriteDouble(8, 2.5);
+        builder.WriteLengthEncodedBytes(9, "end"u8);
+        var row = builder.Build();
+        decoder.ValidateRow(row);
+
+        Assert.AreEqual((sbyte)-5, decoder.Decode<sbyte>(row, 0));
+        Assert.AreEqual((short)1234, decoder.Decode<short>(row, 1));
+        Assert.IsNull(decoder.Decode<int?>(row, 2));
+        Assert.AreEqual(987654, decoder.Decode<int>(row, 3));
+        Assert.AreEqual(long.MaxValue, decoder.Decode<long>(row, 4));
+        Assert.AreEqual(new DateOnly(2024, 2, 29), decoder.Decode<DateOnly>(row, 5));
+        Assert.AreEqual(medium, decoder.Decode<string>(row, 6));
+        Assert.AreEqual(
+          new DateTime(2024, 1, 2, 3, 4, 5).AddTicks(6780),
+          decoder.Decode<DateTime>(row, 7));
+        Assert.AreEqual(2.5, decoder.Decode<double>(row, 8));
+        Assert.AreEqual("end", decoder.Decode<string>(row, 9));
+        CollectionAssert.AreEqual("end"u8.ToArray(), decoder.GetField(row, 9, out var isNull).ToArray());
+        Assert.IsFalse(isNull);
+        Assert.AreEqual(8, decoder.GetField(row, 8, out _).Length);
+    }
+
     private static MySqlRowDecoder CreateDecoder(
         MySqlColumnMetadata[] columns,
         bool binary,

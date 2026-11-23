@@ -17,7 +17,14 @@ public sealed partial class MySqlConnection
         bool binary,
         CancellationToken cancellationToken)
     {
-        List<ResultData> results = [];
+        var first = await ReadResultSetAsync(binary, cancellationToken).ConfigureAwait(false);
+        if ((_status & MySqlServerStatus.MoreResultsExist) == 0)
+        {
+            // Most commands produce one result; skip the list used to chain several.
+            return new SqlRowSet(first.Columns, first.Rows, first.AffectedRows, first.CommandTag, null);
+        }
+
+        List<ResultData> results = [first];
         while (true)
         {
             results.Add(await ReadResultSetAsync(binary, cancellationToken).ConfigureAwait(false));
@@ -169,11 +176,27 @@ public sealed partial class MySqlConnection
         bool binary,
         CancellationToken cancellationToken)
     {
-        var metadata = await ReadColumnMetadataAsync(columnCount, cancellationToken)
-          .ConfigureAwait(false);
-        MySqlRowDecoder decoder = new(_strings, _options.ZeroDateBehavior);
-        decoder.SetColumns(metadata, binary);
-        _lastColumns = metadata;
+        var shapes = _resultShapes ??= new MySqlResultShapeCache(_strings, _options.ZeroDateBehavior);
+        shapes.Begin();
+        for (var i = 0; i < columnCount; i++)
+        {
+            using var packet = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (MySqlPackets.IsError(packet.Span))
+            {
+                throw ReadCommandError(packet.Span);
+            }
+
+            shapes.Append(packet.Span);
+        }
+
+        if (columnCount > 0 && !DeprecateEof)
+        {
+            using var packet = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            EnsureEndOfMetadata(packet.Span);
+        }
+
+        var decoder = shapes.Complete(columnCount, binary);
+        _lastColumns = decoder.Metadata;
         return decoder;
     }
 
