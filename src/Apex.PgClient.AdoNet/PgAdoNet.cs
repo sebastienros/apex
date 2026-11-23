@@ -194,21 +194,17 @@ internal sealed class PgAdoReaderFactory : ApexResultReaderFactory
     private PgAdoReaderFactory() : base("PostgreSQL") { }
 
     // A single statement that cannot return rows has the same outcome through the native ExecuteAsync
-    // as through a drained reader, without buffering rows or allocating result-boundary state.
-    // Multi-statement text keeps the reader so RecordsAffected sums every statement.
-    public override bool CanExecuteNonQuery(string sql, int parameterCount) =>
-        !string.IsNullOrWhiteSpace(sql) &&
+    // as through a drained reader, without allocating result-boundary state. Multi-statement text keeps
+    // the reader so RecordsAffected sums every statement, and so does RETURNING (even a false match in a
+    // literal or identifier), whose rows ExecuteAsync would buffer instead of streaming past.
+    public override bool CanExecuteNonQuery(string sql) =>
         IsNonQueryKeyword(Internal.PgSqlText.GetLeadingKeyword(sql)) &&
+        !sql.Contains("RETURNING", StringComparison.OrdinalIgnoreCase) &&
         Internal.PgSqlText.IsSingleStatement(sql);
 
-    // Matches the reader's RecordsAffected: only INSERT, UPDATE, DELETE and MERGE report a count.
+    // The reader's RecordsAffected rule: only INSERT, UPDATE, DELETE and MERGE report a count.
     public override int GetRecordsAffected(SqlCommandResult result) =>
-        result.CommandTag.StartsWith("INSERT ", StringComparison.Ordinal) ||
-        result.CommandTag.StartsWith("UPDATE ", StringComparison.Ordinal) ||
-        result.CommandTag.StartsWith("DELETE ", StringComparison.Ordinal) ||
-        result.CommandTag.StartsWith("MERGE ", StringComparison.Ordinal)
-            ? checked((int)result.AffectedRows)
-            : -1;
+        PgConnection.ReportsRecordsAffected(result.CommandTag) ? checked((int)result.AffectedRows) : -1;
 
     private static bool IsNonQueryKeyword(ReadOnlySpan<char> keyword) =>
         keyword.Equals("INSERT", StringComparison.OrdinalIgnoreCase) ||

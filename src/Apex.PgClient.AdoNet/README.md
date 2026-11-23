@@ -39,7 +39,13 @@ protocol; it never splits or rewrites SQL. The limits are PostgreSQL's:
   `PrepareAsync` accept only one.
 - Statements in one simple query run in one implicit transaction unless the text
   contains its own transaction control. A failure stops the remaining statements.
-- The statement count assumes `standard_conforming_strings` is on (the default). Server failures become
+- The statement count assumes `standard_conforming_strings` is on (the default).
+- Text-format values are parsed as the server formats them, so session settings that
+  change the text output (a non-ISO `DateStyle` or `IntervalStyle`, for example) can
+  make dates, timestamps and intervals unreadable. Single statements return binary
+  values and are not affected.
+- `COPY ... FROM STDIN` and `COPY ... TO STDOUT` are not supported in command text,
+  alone or with other statements; use the native `PgConnection` copy APIs. Server failures become
 `ApexDbException : DbException`, retaining `PgException` as the inner exception and
 exposing its SQLSTATE and transient classification.
 

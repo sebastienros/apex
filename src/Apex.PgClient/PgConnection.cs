@@ -2283,6 +2283,13 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         PgException { Severity: "FATAL" or "PANIC" } or
         PgException { SqlState: "57P01" or "57P02" or "57P03" or "08006" };
 
+    /// <summary>Returns whether a command tag reports an ADO.NET RecordsAffected count.</summary>
+    internal static bool ReportsRecordsAffected(string commandTag) =>
+        commandTag.StartsWith("INSERT ", StringComparison.Ordinal) ||
+        commandTag.StartsWith("UPDATE ", StringComparison.Ordinal) ||
+        commandTag.StartsWith("DELETE ", StringComparison.Ordinal) ||
+        commandTag.StartsWith("MERGE ", StringComparison.Ordinal);
+
     private static long ParseAffectedRows(string commandTag)
     {
         var tag = commandTag.AsSpan();
@@ -3414,12 +3421,6 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                   .Throw();
             }
         }
-
-        private static bool ReportsRecordsAffected(string commandTag) =>
-            commandTag.StartsWith("INSERT ", StringComparison.Ordinal) ||
-            commandTag.StartsWith("UPDATE ", StringComparison.Ordinal) ||
-            commandTag.StartsWith("DELETE ", StringComparison.Ordinal) ||
-            commandTag.StartsWith("MERGE ", StringComparison.Ordinal);
 
         private void SignalRead(bool result, Exception? error)
         {

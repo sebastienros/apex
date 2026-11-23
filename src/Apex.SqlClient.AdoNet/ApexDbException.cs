@@ -44,11 +44,15 @@ internal sealed class ApexOperationCancellation : IDisposable
     private readonly int _timeoutSeconds;
     private volatile bool _canceled;
 
+    // CancelAfter accepts at most uint.MaxValue - 1 milliseconds (about 49.7 days); longer timeouts,
+    // such as int.MaxValue used as "effectively infinite", never fire.
+    private const int MaximumTimeoutSeconds = (int)((uint.MaxValue - 1) / 1000);
+
     internal ApexOperationCancellation(CancellationToken callerToken, int timeoutSeconds)
     {
         _source = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
         _callerToken = callerToken;
-        _timeoutSeconds = timeoutSeconds;
+        _timeoutSeconds = timeoutSeconds > MaximumTimeoutSeconds ? 0 : timeoutSeconds;
     }
 
     internal CancellationTokenSource Source => _source;

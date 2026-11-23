@@ -195,6 +195,16 @@ public sealed class AdapterContractTests
         command.Cancel();
         await Assert.ThrowsAsync<OperationCanceledException>(() => execution);
 
+        // Timeouts too long for a timer (int.MaxValue is a common "infinite") never fire.
+        server.HangOn = Stage.None;
+        command.CommandTimeout = int.MaxValue;
+        await using (var reader = await command.ExecuteReaderAsync())
+        {
+            Assert.IsTrue(await reader.ReadAsync());
+        }
+
+        server.HangOn = Stage.Execute;
+
         // Without a timeout nothing is translated, even if the operation runs long.
         command.CommandTimeout = 0;
         using var late = new CancellationTokenSource(TimeSpan.FromMilliseconds(1200));
@@ -282,7 +292,13 @@ public sealed class AdapterContractTests
         Assert.AreEqual("execute", server.Last.Kind);
 
         // Row-returning and multi-statement text keep the reader, whose RecordsAffected sums statements.
-        foreach (var sql in new[] { "SELECT 1", "WITH x AS (SELECT 1) SELECT * FROM x", "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)" })
+        foreach (var sql in new[]
+        {
+            "SELECT 1",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)",
+            "DELETE FROM t RETURNING *",
+        })
         {
             command.CommandText = sql;
             server.RecordsAffected = 2;
@@ -400,6 +416,16 @@ public sealed class AdapterContractTests
             new FakeReader(new FakeConnection(server), server.Columns, 0, 0), CommandBehavior.Default, null);
         Assert.AreEqual(typeof(object), standalone.GetFieldType(0));
         Assert.AreEqual("23", standalone.GetDataTypeName(0));
+
+        server.Columns = [];
+        await using (var reader = await command.ExecuteReaderAsync())
+        {
+            // A result without columns has no schema table, as with other providers.
+            Assert.IsEmpty(reader.GetColumnSchema());
+            Assert.IsNull(reader.GetSchemaTable());
+            await reader.CloseAsync();
+            Assert.ThrowsExactly<InvalidOperationException>(() => reader.GetColumnSchema());
+        }
     }
 
     [TestMethod]

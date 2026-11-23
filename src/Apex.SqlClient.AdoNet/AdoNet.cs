@@ -356,7 +356,7 @@ public abstract class ApexDbCommand : DbCommand
     {
         // Providers whose native command result is equivalent to draining a result reader (a single
         // statement whose affected-row count the provider can classify) skip the reader machinery.
-        if (_adoReaderFactory is null || _adoReaderFactory.CanExecuteNonQuery(CommandText, _parameters.Count))
+        if (_adoReaderFactory is null || _adoReaderFactory.CanExecuteNonQuery(CommandText))
         {
             return await ExecuteNativeNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
@@ -730,6 +730,7 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
     /// </summary>
     public ReadOnlyCollection<DbColumn> GetColumnSchema()
     {
+        if (_closed) throw new InvalidOperationException("The reader is closed.");
         var columns = new DbColumn[_columns.Count];
         for (var i = 0; i < columns.Length; i++)
         {
@@ -740,8 +741,15 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
         return new ReadOnlyCollection<DbColumn>(columns);
     }
 
-    /// <summary>Returns <see cref="GetColumnSchema"/> as a schema table with the standard column set.</summary>
-    public override DataTable GetSchemaTable() => ApexSchemaTable.Create(GetColumnSchema());
+    /// <summary>
+    /// Returns <see cref="GetColumnSchema"/> as a schema table with the standard column set, or null when the
+    /// current result has no columns (a statement that returns no rows), as other providers do.
+    /// </summary>
+    public override DataTable? GetSchemaTable()
+    {
+        var columns = GetColumnSchema();
+        return columns.Count == 0 ? null : ApexSchemaTable.Create(columns);
+    }
     public override bool GetBoolean(int ordinal) =>
         ApexExceptionBoundary.Invoke(() => _reader.GetBoolean(ordinal), TranslateException);
     public override byte GetByte(int ordinal) => GetFieldValue<byte>(ordinal);
@@ -1064,7 +1072,7 @@ internal interface IApexAdoReaderFactory
     /// Returns whether the native <c>ExecuteAsync</c> result is equivalent to draining a result reader for this
     /// command text, so ExecuteNonQueryAsync can skip the reader and its result-boundary state.
     /// </summary>
-    bool CanExecuteNonQuery(string sql, int parameterCount);
+    bool CanExecuteNonQuery(string sql);
 
     /// <summary>Converts a native command result to <see cref="DbDataReader.RecordsAffected"/> semantics.</summary>
     int GetRecordsAffected(SqlCommandResult result);
@@ -1073,7 +1081,7 @@ internal interface IApexAdoReaderFactory
 /// <summary>Executes commands through the native result-preserving reader capabilities.</summary>
 internal class ApexResultReaderFactory(string providerName) : IApexAdoReaderFactory
 {
-    public virtual bool CanExecuteNonQuery(string sql, int parameterCount) => false;
+    public virtual bool CanExecuteNonQuery(string sql) => false;
 
     public virtual int GetRecordsAffected(SqlCommandResult result) => checked((int)result.AffectedRows);
 
