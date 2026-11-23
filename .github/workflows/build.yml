@@ -2,7 +2,7 @@ name: Build
 
 on:
   push:
-    branches: [ main, sebros/dazzling-visvesvaraya-ea2bac ] # TEMP: remove branch before merge
+    branches: [ main ]
 
 jobs:
   test:
