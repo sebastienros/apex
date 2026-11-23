@@ -56,4 +56,74 @@ public sealed class SqlRowPageTests
         Assert.AreEqual(42, rows[0].GetInt32(0));
     }
 
+    [TestMethod]
+    public void BuiltRowsDoNotAliasScratchBuffersReusedByLaterResults()
+    {
+        TestRowDecoder decoder = new();
+        SqlColumn[] columns = [new("value", 23, 4, -1, SqlDataFormat.Binary)];
+        SqlRowPageCollectionBuilder first = new(decoder);
+        for (var i = 0; i < 600; i++)
+        {
+            first.Add(TestRowDecoder.Encode(i));
+        }
+
+        var rows = first.Build(columns);
+        for (var round = 0; round < 4; round++)
+        {
+            SqlRowPageCollectionBuilder later = new(decoder);
+            for (var i = 0; i < 600; i++)
+            {
+                later.Add(TestRowDecoder.Encode(-1 - i));
+            }
+
+            _ = later.Build(columns);
+        }
+
+        for (var i = 0; i < rows.Length; i++)
+        {
+            Assert.AreEqual(i, rows[i].GetInt32(0));
+        }
+
+        Assert.AreSame(rows, first.Build(columns));
+        Assert.ThrowsExactly<InvalidOperationException>(
+            () => first.Add(TestRowDecoder.Encode(1)));
+    }
+
+    [TestMethod]
+    public void SplitsPagesAtTheByteLimitAndKeepsOversizedRowsWhole()
+    {
+        TestRowDecoder decoder = new();
+        SqlColumn[] columns = [new("value", 17, -1, -1, SqlDataFormat.Binary)];
+        SqlRowPageCollectionBuilder builder = new(decoder);
+        byte[][] payloads =
+        [
+            Filled(10, 9),
+            Filled(40_000, 1),
+            Filled(40_000, 2),
+            Filled(100_000, 3),
+            Filled(10, 4),
+            [],
+            Filled(20_000, 5),
+            Filled(30_000, 6),
+        ];
+        foreach (var payload in payloads)
+        {
+            builder.Add(TestRowDecoder.Encode(payload));
+        }
+
+        var rows = builder.Build(columns);
+
+        Assert.HasCount(payloads.Length, rows);
+        for (var i = 0; i < payloads.Length; i++)
+        {
+            CollectionAssert.AreEqual(payloads[i], rows[i].GetBytes(0));
+        }
+    }
+
+    private static byte[] Filled(int length, byte value)
+    {
+        var bytes = new byte[length];
+        bytes.AsSpan().Fill(value);
+        return bytes;
+    }
 }

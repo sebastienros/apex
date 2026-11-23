@@ -235,6 +235,7 @@ enum Apex.SqlClient.SqlDataFormat : System.IComparable, System.IConvertible, Sys
   Field: Int16 value__
 struct Apex.SqlClient.SqlParameters : System.Collections.Generic.IEnumerable`1[Apex.SqlClient.SqlValue], System.Collections.Generic.IReadOnlyCollection`1[Apex.SqlClient.SqlValue], System.Collections.Generic.IReadOnlyList`1[Apex.SqlClient.SqlValue], System.Collections.IEnumerable
   Method: Apex.SqlClient.SqlParameters Create(Apex.SqlClient.SqlValue[])
+  Method: Apex.SqlClient.SqlParameters Create(System.ReadOnlySpan`1[Apex.SqlClient.SqlValue])
   Method: Apex.SqlClient.SqlParameters From(System.ReadOnlySpan`1[Apex.SqlClient.SqlValue])
   Method: Apex.SqlClient.SqlParameters FromObjects(System.ReadOnlySpan`1[System.Object])
   Method: Apex.SqlClient.SqlParameters get_Empty()

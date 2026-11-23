@@ -150,6 +150,82 @@ public sealed class SqlConnectionPoolTests
             () => pool.GetConnectionAsync().AsTask());
     }
 
+    public static IEnumerable<object[]> LongestAcquisitionTimeouts =>
+    [
+        [Timeout.InfiniteTimeSpan],
+        [TimeSpan.FromMilliseconds(uint.MaxValue - 1)],
+    ];
+
+    [TestMethod]
+    [DynamicData(nameof(LongestAcquisitionTimeouts))]
+    public async Task ContendedAcquireWaitsForReleaseWithLongestTimeouts(TimeSpan timeout)
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(
+            created,
+            new SqlPoolOptions
+            {
+                MaximumSize = 1,
+                AcquisitionTimeout = timeout,
+                CleanerPeriod = TimeSpan.Zero,
+            });
+        var lease = await pool.GetConnectionAsync();
+
+        var queued = pool.GetConnectionAsync().AsTask();
+        Assert.IsFalse(queued.IsCompleted);
+        await lease.DisposeAsync();
+
+        await using var next = await queued.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.HasCount(1, created);
+    }
+
+    [TestMethod]
+    public async Task InfiniteExpirationAndDisabledCleanerAreAccepted()
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(
+            created,
+            new SqlPoolOptions
+            {
+                MaximumSize = 1,
+                AcquisitionTimeout = TimeSpan.FromSeconds(5),
+                IdleTimeout = Timeout.InfiniteTimeSpan,
+                MaximumLifetime = Timeout.InfiniteTimeSpan,
+                CleanerPeriod = Timeout.InfiniteTimeSpan,
+            });
+
+        await (await pool.GetConnectionAsync()).DisposeAsync();
+        await (await pool.GetConnectionAsync()).DisposeAsync();
+
+        Assert.HasCount(1, created);
+    }
+
+    public static IEnumerable<object[]> OutOfRangeOptions =>
+    [
+        [new SqlPoolOptions { MaximumSize = 0 }],
+        [new SqlPoolOptions { MaximumWaitQueueSize = -2 }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.Zero }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.FromMilliseconds(-2) }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.FromMilliseconds(uint.MaxValue) }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.MaxValue }],
+        [new SqlPoolOptions { IdleTimeout = TimeSpan.Zero }],
+        [new SqlPoolOptions { IdleTimeout = TimeSpan.FromSeconds(-5) }],
+        [new SqlPoolOptions { MaximumLifetime = TimeSpan.Zero }],
+        [new SqlPoolOptions { MaximumLifetime = TimeSpan.FromSeconds(-5) }],
+        [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromSeconds(-5) }],
+        [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromMilliseconds(uint.MaxValue) }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.FromTicks(5_000) }],
+        [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromTicks(5_000) }],
+    ];
+
+    [TestMethod]
+    [DynamicData(nameof(OutOfRangeOptions))]
+    public void RejectsOutOfRangeOptions(SqlPoolOptions options)
+    {
+        List<FakeConnection> created = [];
+        Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => CreatePool(created, options));
+    }
+
     [TestMethod]
     public async Task EvictsExpiredAndNonReusableConnections()
     {
@@ -235,6 +311,53 @@ public sealed class SqlConnectionPoolTests
         await using var next = await queued.WaitAsync(TimeSpan.FromSeconds(1));
 
         Assert.HasCount(1, created);
+    }
+
+    [TestMethod]
+    public async Task OneShotQueryHoldsTheConnectionUntilCompletion()
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(created);
+        await pool.ExecuteAsync("SELECT 1");
+        var connection = created[0];
+        connection.BlockQuery();
+
+        var query = pool.QueryAsync("SELECT 1", SqlParameters.Create(1)).AsTask();
+        await connection.QueryStarted.Task;
+        var queued = pool.GetConnectionAsync().AsTask();
+        Assert.IsFalse(queued.IsCompleted);
+
+        connection.ReleaseQuery();
+        await query;
+        await using var next = await queued.WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.HasCount(1, created);
+        Assert.AreEqual(1, pool.Size);
+    }
+
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task FailedOneShotQueryReturnsTheConnectionThroughTheReuseCheck(bool breaks)
+    {
+        List<FakeConnection> created = [];
+        await using var pool = CreatePool(created);
+        await (await pool.GetConnectionAsync()).DisposeAsync();
+        var connection = created[0];
+        InvalidOperationException failure = new("query failed");
+        connection.QueryFailure = failure;
+        connection.BreaksOnFailure = breaks;
+        var reusable = !breaks;
+
+        var thrown = await Assert.ThrowsExactlyAsync<InvalidOperationException>(
+            () => pool.QueryAsync("SELECT 1").AsTask());
+
+        Assert.AreSame(failure, thrown);
+        Assert.AreEqual(reusable ? 0 : 1, connection.DisposeCount);
+        Assert.AreEqual(reusable ? 1 : 0, pool.Size);
+        connection.QueryFailure = null;
+        await pool.QueryAsync("SELECT 1");
+        Assert.HasCount(reusable ? 1 : 2, created);
     }
 
     [TestMethod]
@@ -457,6 +580,10 @@ public sealed class SqlConnectionPoolTests
 
         internal int QueryCount { get; private set; }
 
+        internal Exception? QueryFailure { get; set; }
+
+        internal bool BreaksOnFailure { get; set; }
+
         internal FakePreparedStatement? PreparedStatement { get; private set; }
 
         internal ISqlRowReader ResultReader { get; set; } = new FakeResultRowReader();
@@ -481,6 +608,12 @@ public sealed class SqlConnectionPoolTests
             if (_queryRelease is not null)
             {
                 await _queryRelease.Task.WaitAsync(cancellationToken);
+            }
+
+            if (QueryFailure is not null)
+            {
+                IsReusable &= !BreaksOnFailure;
+                throw QueryFailure;
             }
 
             return SqlRowSet.Empty;
