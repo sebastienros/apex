@@ -112,9 +112,21 @@ internal sealed class TdsStreamingTokenReader
     /// invalid). It then consumes nothing from the packet reader, but <paramref name="row"/> may
     /// be partly overwritten.
     /// </summary>
-    internal bool TryReadBufferedRow(ReadOnlySpan<TdsColumn> columns, TdsRowBuffer row)
+    internal bool TryReadBufferedRow(ReadOnlySpan<TdsColumn> columns, TdsRowBuffer row) =>
+        TryReadBufferedRow(_reader, columns, row);
+
+    /// <inheritdoc cref="TryReadBufferedRow(ReadOnlySpan{TdsColumn}, TdsRowBuffer)"/>
+    /// <remarks>
+    /// The streaming row reader calls this between rows, while its pump (which owns the token
+    /// reader) is parked. Reading the next packet header may throw on an invalid header, before
+    /// it consumes anything.
+    /// </remarks>
+    internal static bool TryReadBufferedRow(
+        TdsPacketReader reader,
+        ReadOnlySpan<TdsColumn> columns,
+        TdsRowBuffer row)
     {
-        var buffered = _reader.GetBufferedPayload();
+        var buffered = reader.GetBufferedPayload();
         if (buffered.IsEmpty)
         {
             return false;
@@ -132,7 +144,7 @@ internal sealed class TdsStreamingTokenReader
             return false;
         }
 
-        _reader.AdvancePayload(1 + consumed);
+        reader.AdvancePayload(1 + consumed);
         return true;
     }
 

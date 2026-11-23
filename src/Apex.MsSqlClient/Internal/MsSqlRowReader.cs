@@ -48,7 +48,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     private CancellationToken _readCancellationToken;
     private CancellationToken _cancellationToken;
     private MsSqlConnection.AttentionState? _attention;
-    private IReadOnlyList<TdsColumn> _tdsColumns = Array.Empty<TdsColumn>();
+    private TdsColumn[] _tdsColumns = Array.Empty<TdsColumn>();
     private IReadOnlyList<SqlColumn> _columns = Array.Empty<SqlColumn>();
     private SqlColumnOrdinalMap? _ordinals;
     private int _resultSetGeneration;
@@ -279,41 +279,20 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     {
         if (_stopped ||
             _canceled ||
-            _tdsColumns.Count == 0 ||
+            _tdsColumns.Length == 0 ||
             _results is { HasPendingTransition: true })
         {
             return false;
         }
 
-        var reader = _connection.Reader;
         try
         {
-            // This may step over the header of the next packet of the message, exactly as the
-            // pump's next read would; it throws on a bad header before consuming it.
-            var payload = reader.GetBufferedPayload();
-            if (payload.IsEmpty ||
-                payload[0] is not (TdsTokenType.Row or TdsTokenType.NbcRow))
-            {
-                return false;
-            }
-
-            if (!TdsRowCodec.TryReadRow(
-                  payload[1..],
-                  _tdsColumns,
-                  nullCompressed: payload[0] == TdsTokenType.NbcRow,
-                  _current,
-                  out var consumed))
-            {
-                return false;
-            }
-
-            reader.AdvancePayload(1 + consumed);
-            return true;
+            return TdsStreamingTokenReader.TryReadBufferedRow(_connection.Reader, _tdsColumns, _current);
         }
         catch (Exception)
         {
-            // Nothing was consumed: the pump reads the same bytes again and reports the failure
-            // the usual way, breaking the connection.
+            // An invalid packet header throws before anything is consumed: the pump reads the
+            // same bytes again and reports the failure the usual way, breaking the connection.
             return false;
         }
     }
@@ -608,7 +587,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             break;
                         case TdsTokenType.Row:
                         case TdsTokenType.NbcRow:
-                            if (_tdsColumns.Count == 0)
+                            if (_tdsColumns.Length == 0)
                             {
                                 throw new InvalidDataException(
                                   "SQL Server sent a ROW token before COLMETADATA.");
