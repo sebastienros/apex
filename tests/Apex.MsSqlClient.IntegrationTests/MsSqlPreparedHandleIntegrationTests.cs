@@ -102,7 +102,7 @@ public sealed class MsSqlPreparedHandleIntegrationTests
     }
 
     [TestMethod]
-    public async Task PreparedExecuteSendsPositionalMixedParametersWithNulls()
+    public async Task PreparedExecuteRoundTripsMixedParametersWithNulls()
     {
         await using var connection =
           await MsSqlClient.ConnectAsync(MsSqlTestEnvironment.Options);
@@ -162,7 +162,11 @@ public sealed class MsSqlPreparedHandleIntegrationTests
 
         await using var connection =
           await MsSqlClient.ConnectAsync(MsSqlTestEnvironment.Options);
+        List<int> infoNumbers = [];
+        connection.InfoMessage += info => infoNumbers.Add(info.Number);
         await connection.ExecuteAsync("USE tempdb");
+        // With fUseDB set the server also reports the change as INFO 5701, as SSMS shows it.
+        CollectionAssert.Contains(infoNumbers, 5701);
         _ = await connection.QueryAsync("SELECT 1");
         await connection.ExecuteAsync("USE master");
         _ = await connection.QueryAsync("SELECT 1");
