@@ -233,10 +233,12 @@ public sealed class PgBufferedReadWireTests
     }
 
     [TestMethod]
-    [DataRow(0)]
-    [DataRow(2)]
-    public async Task NextResultSkipsTheUnreadRowsOfTheCurrentResult(int rowsReadFirst)
+    [DataRow(0, int.MaxValue)]
+    [DataRow(2, int.MaxValue)]
+    [DataRow(2, 7)]
+    public async Task NextResultSkipsTheUnreadRowsOfTheCurrentResult(int rowsReadFirst, int chunkSize)
     {
+        // With small chunks, most of the first result is still arriving while it is skipped.
         const int rowCount = 30;
         var batch = Join(
             Message((byte)'1', []),
@@ -250,7 +252,7 @@ public sealed class PgBufferedReadWireTests
             Message((byte)'Z', [(byte)'I']));
         using TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
-        var server = RunServerAsync(listener, [batch], chunkSize: int.MaxValue);
+        var server = RunServerAsync(listener, [batch], chunkSize);
         await using var connection = await PgClient.ConnectAsync(CreateOptions(listener));
         await using (var reader = await connection.ExecuteResultReaderAsync("SELECT value", default, default))
         {
