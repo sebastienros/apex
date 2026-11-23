@@ -20,6 +20,14 @@ public readonly struct SqlParameters : IReadOnlyList<SqlValue>
         return values.Length == 0 ? Empty : new SqlParameters((SqlValue[])values.Clone());
     }
 
+    /// <summary>Creates parameters from a copy of <paramref name="values"/>.</summary>
+    /// <remarks>
+    /// Argument lists bind to this overload, which copies the values once instead of
+    /// allocating a params array and then cloning it.
+    /// </remarks>
+    public static SqlParameters Create(params ReadOnlySpan<SqlValue> values) =>
+        values.IsEmpty ? Empty : new SqlParameters(values.ToArray());
+
     public static SqlParameters From(ReadOnlySpan<SqlValue> values) =>
         values.IsEmpty ? Empty : new SqlParameters(values.ToArray());
 
