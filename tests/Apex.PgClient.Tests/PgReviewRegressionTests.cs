@@ -32,6 +32,7 @@ public sealed class PgReviewRegressionTests
     [DataRow("25P03", "FATAL", true)] // idle_in_transaction_session_timeout (severity only)
     [DataRow("XX000", "PANIC", true)]
     [DataRow("23505", "ERROR", false)]
+    [DataRow("08P01", "ERROR", false)] // protocol violation reported as ERROR keeps the session
     public void ClassifiesServerFatalErrorsAsConnectionFatal(string sqlState, string severity, bool fatal)
     {
         PgException error = new(new Dictionary<char, string>
@@ -62,6 +63,32 @@ public sealed class PgReviewRegressionTests
         Assert.AreEqual('P', sent[0], "The next command must start with its own Parse.");
         Assert.DoesNotContain("SELECT $1", sent);
         Assert.Contains("SELECT 1", sent);
+    }
+
+    [TestMethod]
+    public async Task FailedCommandEncodingKeepsEarlierUnflushedPipelinedCommands()
+    {
+        using MemoryStream stream = new();
+        PgWireWriter writer = new(stream, new PgTypeRegistry());
+
+        // A pipelined prepared execute buffered with flush: false must survive the rollback.
+        await writer.WritePreparedQueryAsync(
+            "S1",
+            SqlParameters.Create(42),
+            CancellationToken.None,
+            flush: false);
+        await Assert.ThrowsExactlyAsync<InvalidOperationException>(async () =>
+            await writer.WriteExtendedQueryAsync(
+                "SELECT $1",
+                SqlParameters.Create(SqlValue.From(new UnformattableValue())),
+                CancellationToken.None));
+        await writer.FlushAsync(CancellationToken.None);
+
+        var sent = System.Text.Encoding.UTF8.GetString(stream.ToArray());
+        Assert.AreEqual('B', sent[0], "The buffered Bind for S1 must be sent first.");
+        Assert.Contains("S1", sent);
+        Assert.Contains("42", sent);
+        Assert.DoesNotContain("SELECT $1", sent);
     }
 
     private sealed class UnformattableValue
