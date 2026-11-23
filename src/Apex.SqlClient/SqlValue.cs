@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -117,8 +118,22 @@ public readonly struct SqlValue
           SqlValueKind.TimeOnly => new TimeOnly(_payload.Scalar),
           SqlValueKind.DateTime => DateTime.FromBinary(_payload.Scalar),
           SqlValueKind.DateTimeOffset => _payload.DateTimeOffset,
+          SqlValueKind.ReadOnlyMemory => GetReadOnlyMemory(),
           _ => _reference,
       };
+
+    private ReadOnlyMemory<byte> GetReadOnlyMemory()
+    {
+        var start = _payload.RangeStart;
+        var length = _payload.RangeLength;
+        return _reference switch
+        {
+            byte[] array => new ReadOnlyMemory<byte>(array, start, length),
+            MemoryManager<byte> manager => manager.Memory.Slice(start, length),
+            ReadOnlyMemory<byte> boxed => boxed,
+            _ => ReadOnlyMemory<byte>.Empty,
+        };
+    }
 
     public static implicit operator SqlValue(bool value) =>
       new(SqlValueKind.Boolean, new SqlValuePayload(value ? 1 : 0));
@@ -151,8 +166,32 @@ public readonly struct SqlValue
     public static implicit operator SqlValue(byte[]? value) =>
       value is null ? Null : new(SqlValueKind.Bytes, reference: value);
 
-    public static implicit operator SqlValue(ReadOnlyMemory<byte> value) =>
-      new(SqlValueKind.ReadOnlyMemory, reference: value);
+    // Stores the memory's owner (a MemoryManager or an array) in the reference field and its
+    // range in the payload, so wrapping memory does not box it.
+    public static implicit operator SqlValue(ReadOnlyMemory<byte> value)
+    {
+        if (MemoryMarshal.TryGetMemoryManager(
+              value,
+              out MemoryManager<byte>? manager,
+              out var managerStart,
+              out var managerLength))
+        {
+            return new(
+              SqlValueKind.ReadOnlyMemory,
+              SqlValuePayload.FromRange(managerStart, managerLength),
+              manager);
+        }
+
+        if (MemoryMarshal.TryGetArray(value, out var segment))
+        {
+            return new(
+              SqlValueKind.ReadOnlyMemory,
+              SqlValuePayload.FromRange(segment.Offset, segment.Count),
+              segment.Array ?? Array.Empty<byte>());
+        }
+
+        return new(SqlValueKind.ReadOnlyMemory, reference: value);
+    }
 
     public static implicit operator SqlValue(Guid value) =>
       new(SqlValueKind.Guid, new SqlValuePayload(value));
@@ -219,6 +258,16 @@ public readonly struct SqlValue
             case SqlValueKind.DateTimeOffset when typeof(T) == typeof(DateTimeOffset):
                 value = Reinterpret<DateTimeOffset, T>(_payload.DateTimeOffset);
                 return true;
+            case SqlValueKind.ReadOnlyMemory:
+                // The reference holds the memory's owner, which must not escape on its own.
+                if (typeof(T) == typeof(ReadOnlyMemory<byte>))
+                {
+                    value = Reinterpret<ReadOnlyMemory<byte>, T>(GetReadOnlyMemory());
+                    return true;
+                }
+
+                value = default!;
+                return false;
             default:
                 if (_reference is T reference)
                 {
@@ -256,6 +305,13 @@ public readonly struct SqlValue
             this = default;
             Scalar = value;
         }
+
+        public int RangeStart => (int)(Scalar >> 32);
+
+        public int RangeLength => (int)Scalar;
+
+        public static SqlValuePayload FromRange(int start, int length) =>
+          new(((long)start << 32) | (uint)length);
 
         public SqlValuePayload(decimal value)
         {

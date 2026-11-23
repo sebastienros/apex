@@ -1,4 +1,6 @@
+using System.Buffers;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 
 namespace Apex.SqlClient.Tests;
 
@@ -17,6 +19,70 @@ public sealed class SqlParametersTests
         Assert.AreEqual(1, parameters[0].Get<int>());
         Assert.AreEqual("two", parameters[1].Get<string>());
         Assert.IsTrue(parameters[2].IsNull);
+    }
+
+    [TestMethod]
+    public void CreateFromArgumentListsAndSpansCopiesValues()
+    {
+        Span<SqlValue> values = [1, "two"];
+
+        var fromSpan = SqlParameters.Create(values);
+        values[0] = 42;
+        var fromArguments = SqlParameters.Create(3, "four", SqlValue.Null);
+
+        Assert.AreEqual(1, fromSpan[0].Get<int>());
+        Assert.AreEqual(3, fromArguments.Count);
+        Assert.AreEqual("four", fromArguments[1].Get<string>());
+        Assert.AreEqual(0, SqlParameters.Create().Count);
+        Assert.ThrowsExactly<ArgumentNullException>(
+            () => SqlParameters.Create((SqlValue[])null!));
+    }
+
+    [TestMethod]
+    public void ReadOnlyMemoryValuesRoundTripTheirRangeWithoutExposingTheOwner()
+    {
+        byte[] bytes = [1, 2, 3, 4, 5, 6];
+        SqlValue slice = new ReadOnlyMemory<byte>(bytes, 2, 3);
+
+        var memory = slice.GetRequired<ReadOnlyMemory<byte>>();
+        Assert.AreEqual(SqlValueKind.ReadOnlyMemory, slice.Kind);
+        Assert.IsTrue(memory.Span.SequenceEqual(new byte[] { 3, 4, 5 }));
+        Assert.ThrowsExactly<InvalidCastException>(() => slice.Get<byte[]>());
+        Assert.IsInstanceOfType<ReadOnlyMemory<byte>>(slice.ToObject());
+        Assert.IsTrue(((ReadOnlyMemory<byte>)slice.ToObject()!).Span.SequenceEqual(memory.Span));
+
+        SqlValue empty = ReadOnlyMemory<byte>.Empty;
+        Assert.AreEqual(SqlValueKind.ReadOnlyMemory, empty.Kind);
+        Assert.IsTrue(empty.GetRequired<ReadOnlyMemory<byte>>().IsEmpty);
+
+        using TestMemoryManager manager = new([9, 8, 7, 6]);
+        SqlValue managed = (ReadOnlyMemory<byte>)manager.Memory[1..3];
+        Assert.IsTrue(
+            managed.GetRequired<ReadOnlyMemory<byte>>().Span.SequenceEqual(new byte[] { 8, 7 }));
+        Assert.IsTrue(
+            MemoryMarshal.TryGetMemoryManager(
+                managed.GetRequired<ReadOnlyMemory<byte>>(),
+                out TestMemoryManager? owner));
+        Assert.AreSame(manager, owner);
+
+        SqlValue converted = SqlValue.From(new ReadOnlyMemory<byte>(bytes, 1, 2));
+        Assert.IsTrue(
+            converted.GetRequired<ReadOnlyMemory<byte>>().Span.SequenceEqual(new byte[] { 2, 3 }));
+    }
+
+    private sealed class TestMemoryManager(byte[] bytes) : MemoryManager<byte>
+    {
+        public override Span<byte> GetSpan() => bytes;
+
+        public override MemoryHandle Pin(int elementIndex = 0) => throw new NotSupportedException();
+
+        public override void Unpin()
+        {
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+        }
     }
 
     [TestMethod]
