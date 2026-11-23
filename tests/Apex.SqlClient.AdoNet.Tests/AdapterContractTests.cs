@@ -317,7 +317,7 @@ public sealed class AdapterContractTests
     [DataRow("Reader")]
     public async Task BatchTimeoutBoundsEachCommandForEveryExecutionMethod(string method)
     {
-        var server = new FakeServer { ExecuteDelay = TimeSpan.FromMilliseconds(450) };
+        var server = new FakeServer { ExecuteDelay = TimeSpan.FromMilliseconds(350) };
         await using var connection = server.Connect("PostgreSql");
         await connection.OpenAsync();
         await using var batch = connection.CreateBatch();
@@ -329,7 +329,7 @@ public sealed class AdapterContractTests
             batch.BatchCommands.Add(batchCommand);
         }
 
-        // Four commands take ~1.8 s in total, more than Timeout, but each finishes well within it.
+        // Four commands take ~1.4 s in total, more than Timeout, but each finishes well within it.
         await ExecuteBatchAsync(batch, method);
 
         server.ExecuteDelay = TimeSpan.Zero;

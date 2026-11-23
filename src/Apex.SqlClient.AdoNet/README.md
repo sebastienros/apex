@@ -73,8 +73,8 @@ caller spends between them. `DbBatch.Timeout` applies the same way to each comma
 of the batch, for every execution method; it is not a deadline for the whole batch.
 
 When the timeout elapses, the operation fails with `ApexDbException` whose
-`InnerException` is a `TimeoutException` and whose `IsTransient` is true, as Npgsql
-reports timeouts. Cancelling the caller's `CancellationToken`, or calling
+`InnerException` is a `TimeoutException` and whose `IsTransient` is true. This follows
+Npgsql, whose `NpgsqlException.IsTransient` is true for an inner `TimeoutException`. Cancelling the caller's `CancellationToken`, or calling
 `DbCommand.Cancel`, still fails with `OperationCanceledException`.
 
 ## Errors
