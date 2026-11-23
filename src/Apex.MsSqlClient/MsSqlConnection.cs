@@ -69,7 +69,8 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         _scheduler = new BoundedOrderedCommandScheduler(
           inFlightLimit: 1,
           queueCapacity: 64,
-          IsFatalConnectionError);
+          IsFatalConnectionError,
+          abortTransport: socket.Dispose);
         _database = options.Database;
         IsSecure = secure;
         if (preLoginVersion is not null)
@@ -366,10 +367,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         _disposed = true;
         try
         {
-            await _scheduler.ExecuteAsync(
-              static _ => ValueTask.CompletedTask,
-              static _ => ValueTask.FromResult(true),
-              barrier: true).ConfigureAwait(false);
+            await _scheduler.CloseAsync(static _ => ValueTask.CompletedTask).ConfigureAwait(false);
         }
         catch (Exception exception) when (IsFatalConnectionError(exception))
         {

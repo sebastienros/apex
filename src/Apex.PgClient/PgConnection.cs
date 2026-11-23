@@ -67,7 +67,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
           options.PipeliningLimit,
           (int)Math.Max(16, Math.Min(4096, (long)options.PipeliningLimit * 4)),
                     IsFatalConnectionError,
-                    _writer.FlushAsync);
+                    _writer.FlushAsync,
+                    abortTransport: socket.Dispose);
         _statementCache = options.CachePreparedStatements && options.PreparedStatementCacheSize > 0
           ? new LruCache<string, string>(
             options.PreparedStatementCacheSize,
@@ -624,14 +625,12 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         {
             if (Volatile.Read(ref _copyActive) == 0)
             {
-                await _scheduler.ExecuteAsync(
+                await _scheduler.CloseAsync(
                 async token =>
                 {
                     token.ThrowIfCancellationRequested();
                     await _writer.WriteTerminateAsync(CancellationToken.None).ConfigureAwait(false);
-                },
-                static _ => ValueTask.FromResult(true),
-                barrier: true).ConfigureAwait(false);
+                }).ConfigureAwait(false);
             }
             else
             {
@@ -807,16 +806,24 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             ObjectDisposedException.ThrowIf(_disposed, this);
             ValueTask<SqlRowSet> execution;
             var cachedExecution = false;
+
+            // Static lambdas over a value-type state: the scheduler stores it in the pooled
+            // command, so a query allocates no closure or delegates here.
+            QueryState state = new(this, sql, parameters, cancellationToken);
             if (parameters.Count == 0)
             {
                 execution = _scheduler.ExecuteAsync(
-                  async token =>
+                  state,
+                  static async (state, token) =>
                   {
                       token.ThrowIfCancellationRequested();
-                      ThrowIfCopyActive();
-                      await _writer.WriteQueryAsync(sql, CancellationToken.None, flush: false).ConfigureAwait(false);
+                      state.Connection.ThrowIfCopyActive();
+                      await state.Connection._writer.WriteQueryAsync(
+                        state.Sql,
+                        CancellationToken.None,
+                        flush: false).ConfigureAwait(false);
                   },
-                  _ => ReceiveQueryAsync(cancellationToken),
+                  static (state, _) => state.Connection.ReceiveQueryAsync(state.CancellationToken),
                   barrier: cancellationToken.CanBeCanceled,
                   cancellationToken: cancellationToken,
                   flushBatch: true);
@@ -827,29 +834,34 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             {
                 cachedExecution = true;
                 execution = _scheduler.ExecuteAsync(
-                  _ =>
+                  state,
+                  static (state, _) =>
                   {
-                      ThrowIfCopyActive();
+                      state.Connection.ThrowIfCopyActive();
                       return ValueTask.CompletedTask;
                   },
-                  _ => PrepareCacheAndExecuteAsync(sql, parameters, cancellationToken),
+                  static (state, _) => state.Connection.PrepareCacheAndExecuteAsync(
+                    state.Sql,
+                    state.Parameters,
+                    state.CancellationToken),
                   barrier: true,
                   cancellationToken);
             }
             else
             {
                 execution = _scheduler.ExecuteAsync(
-                  async token =>
+                  state,
+                  static async (state, token) =>
                   {
                       token.ThrowIfCancellationRequested();
-                      ThrowIfCopyActive();
-                      await _writer.WriteExtendedQueryAsync(
-                sql,
-                parameters,
-                CancellationToken.None,
-                flush: false).ConfigureAwait(false);
+                      state.Connection.ThrowIfCopyActive();
+                      await state.Connection._writer.WriteExtendedQueryAsync(
+                        state.Sql,
+                        state.Parameters,
+                        CancellationToken.None,
+                        flush: false).ConfigureAwait(false);
                   },
-                  _ => ReceiveQueryAsync(cancellationToken),
+                  static (state, _) => state.Connection.ReceiveQueryAsync(state.CancellationToken),
                   barrier: cancellationToken.CanBeCanceled,
                   cancellationToken: cancellationToken,
                   flushBatch: true);
@@ -869,12 +881,16 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                 }
 
                 return await _scheduler.ExecuteAsync(
-                  _ =>
+                  new QueryState(this, sql, parameters, cancellationToken),
+                  static (state, _) =>
                   {
-                      ThrowIfCopyActive();
+                      state.Connection.ThrowIfCopyActive();
                       return ValueTask.CompletedTask;
                   },
-                  _ => PrepareCacheAndExecuteAsync(sql, parameters, cancellationToken),
+                  static (state, _) => state.Connection.PrepareCacheAndExecuteAsync(
+                    state.Sql,
+                    state.Parameters,
+                    state.CancellationToken),
                   barrier: true,
                   cancellationToken).ConfigureAwait(false);
             }
@@ -894,6 +910,12 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
               error);
         }
     }
+
+    private readonly record struct QueryState(
+        PgConnection Connection,
+        string Sql,
+        SqlParameters Parameters,
+        CancellationToken CancellationToken);
 
     private async ValueTask<SqlRowSet> ExecuteTypedQueryCoreAsync(
         string sql,

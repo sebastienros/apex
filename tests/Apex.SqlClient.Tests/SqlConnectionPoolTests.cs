@@ -66,6 +66,45 @@ public sealed class SqlConnectionPoolTests
     }
 
     [TestMethod]
+    public async Task DisposeDisposesIdleConnectionsConcurrently()
+    {
+        List<FakeConnection> created = [];
+        var pool = CreatePool(
+            created,
+            new SqlPoolOptions
+            {
+                MaximumSize = 3,
+                AcquisitionTimeout = TimeSpan.FromSeconds(5),
+                CleanerPeriod = TimeSpan.Zero,
+            });
+        var leases = new[]
+        {
+            await pool.GetConnectionAsync(),
+            await pool.GetConnectionAsync(),
+            await pool.GetConnectionAsync(),
+        };
+        foreach (var lease in leases)
+        {
+            await lease.DisposeAsync();
+        }
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        foreach (var connection in created)
+        {
+            connection.DisposeGate = gate.Task;
+        }
+
+        var dispose = pool.DisposeAsync().AsTask();
+
+        // Every connection started disposing although none has finished.
+        Assert.HasCount(3, created);
+        Assert.IsTrue(created.All(static connection => connection.DisposeCount == 1));
+        Assert.IsFalse(dispose.IsCompleted);
+        gate.SetResult();
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [TestMethod]
     public async Task PipelinePoolDisposesPreparedStatementsBeforeConnections()
     {
         List<FakeConnection> created = [];
@@ -673,10 +712,14 @@ public sealed class SqlConnectionPoolTests
             CancellationToken cancellationToken = default) =>
             ValueTask.FromResult<ISqlTransaction>(new FakeTransaction());
 
+        // When set, disposal completes only once this task does, like a connection whose close is
+        // still waiting for work in flight.
+        internal Task? DisposeGate { get; set; }
+
         public ValueTask DisposeAsync()
         {
             DisposeCount++;
-            return ValueTask.CompletedTask;
+            return DisposeGate is { } gate ? new ValueTask(gate) : ValueTask.CompletedTask;
         }
 
         internal void BlockQuery() =>

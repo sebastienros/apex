@@ -13,6 +13,14 @@ internal sealed class LowLevelTlsStream : Stream
     private const int CipherBufferSize = 32 * 1024;
     private const int MaximumCipherBufferSize = 1024 * 1024;
     private const int MaximumTlsPlaintextSize = 16 * 1024;
+
+    // How long disposal tries to send close_notify. It needs the application write lock, which a
+    // writer blocked because the peer stopped reading holds until its write ends. At the deadline
+    // the transport is disposed: that fails the blocked write (and a close_notify that is itself
+    // stuck), and disposal goes on without close_notify.
+    internal static readonly TimeSpan DefaultShutdownTimeout = TimeSpan.FromSeconds(1);
+    private static readonly Action<object?> s_abortTransport =
+      static state => ((Stream)state!).Dispose();
     private readonly Stream _inner;
     private readonly SslClientAuthenticationOptions _authenticationOptions;
     private readonly TlsContext _context;
@@ -56,6 +64,8 @@ internal sealed class LowLevelTlsStream : Stream
       _session.NegotiatedApplicationProtocol;
 
     internal X509Certificate2? RemoteCertificate => _session.GetRemoteCertificate();
+
+    internal TimeSpan ShutdownTimeout { get; set; } = DefaultShutdownTimeout;
 
     public override bool CanRead => Volatile.Read(ref _disposed) == 0 && _inner.CanRead;
 
@@ -829,58 +839,79 @@ internal sealed class LowLevelTlsStream : Stream
         }
     }
 
+    // close_notify is best effort: disposal does not fail because the peer is gone, the
+    // transport was already aborted (for example by the command scheduler), or the deadline hit.
+    private static bool IsShutdownFailure(Exception exception) =>
+      exception is IOException or ObjectDisposedException or OperationCanceledException;
+
     private void Shutdown()
     {
-        _applicationWriteLock.Wait();
+        using CancellationTokenSource deadline = new(ShutdownTimeout);
+        using var abort = deadline.Token.UnsafeRegister(s_abortTransport, _inner);
         try
         {
-            _stateLock.Wait();
+            _applicationWriteLock.Wait(deadline.Token);
             try
             {
-                if (_session.IsHandshakeComplete)
+                _stateLock.Wait(deadline.Token);
+                try
                 {
-                    _ = _session.Shutdown(GetCipherOutput(), out var written);
-                    WriteCiphertext(written);
-                    DrainPendingOutput();
-                    _inner.Flush();
+                    if (_session.IsHandshakeComplete)
+                    {
+                        _ = _session.Shutdown(GetCipherOutput(), out var written);
+                        WriteCiphertext(written);
+                        DrainPendingOutput();
+                        _inner.Flush();
+                    }
+                }
+                finally
+                {
+                    _stateLock.Release();
                 }
             }
             finally
             {
-                _stateLock.Release();
+                _applicationWriteLock.Release();
             }
         }
-        finally
+        catch (Exception exception) when (IsShutdownFailure(exception))
         {
-            _applicationWriteLock.Release();
         }
     }
 
     private async ValueTask ShutdownAsync()
     {
-        await _applicationWriteLock.WaitAsync().ConfigureAwait(false);
+        using CancellationTokenSource deadline = new(ShutdownTimeout);
+        await using var abort = deadline.Token.UnsafeRegister(s_abortTransport, _inner)
+          .ConfigureAwait(false);
         try
         {
-            await _stateLock.WaitAsync().ConfigureAwait(false);
+            await _applicationWriteLock.WaitAsync(deadline.Token).ConfigureAwait(false);
             try
             {
-                if (_session.IsHandshakeComplete)
+                await _stateLock.WaitAsync(deadline.Token).ConfigureAwait(false);
+                try
                 {
-                    _ = _session.Shutdown(GetCipherOutput(), out var written);
-                    await WriteCiphertextAsync(written, CancellationToken.None).ConfigureAwait(false);
-                    await DrainPendingOutputAsync(CancellationToken.None)
-                      .ConfigureAwait(false);
-                    await _inner.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+                    if (_session.IsHandshakeComplete)
+                    {
+                        _ = _session.Shutdown(GetCipherOutput(), out var written);
+                        await WriteCiphertextAsync(written, deadline.Token).ConfigureAwait(false);
+                        await DrainPendingOutputAsync(deadline.Token).ConfigureAwait(false);
+                        await _inner.FlushAsync(deadline.Token).ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    _stateLock.Release();
                 }
             }
             finally
             {
-                _stateLock.Release();
+                _applicationWriteLock.Release();
             }
         }
-        finally
+        catch (Exception exception) when (IsShutdownFailure(exception))
         {
-            _applicationWriteLock.Release();
         }
     }
 

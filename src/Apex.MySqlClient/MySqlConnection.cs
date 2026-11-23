@@ -59,7 +59,8 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
           options.PipeliningLimit,
           (int)Math.Max(16, Math.Min(4096, (long)options.PipeliningLimit * 4)),
                     IsFatalConnectionError,
-          FlushSchedulerBatchAsync);
+          FlushSchedulerBatchAsync,
+          abortTransport: socket.Dispose);
         _statementCache = options.CachePreparedStatements && options.PreparedStatementCacheSize > 0
           ? new LruCache<string, MySqlStatement>(options.PreparedStatementCacheSize, StringComparer.Ordinal)
           : null;
@@ -307,15 +308,13 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
         {
             if (Volatile.Read(ref _broken) == 0)
             {
-                await _scheduler.ExecuteAsync(
+                await _scheduler.CloseAsync(
                   async token =>
                   {
                       token.ThrowIfCancellationRequested();
                       _writer.WriteCommand(MySqlCommand.Quit);
                       await _writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
-                  },
-                  static _ => ValueTask.FromResult(true),
-                  barrier: true).ConfigureAwait(false);
+                  }).ConfigureAwait(false);
             }
         }
         catch (Exception exception) when (!_socket.Connected || IsFatalConnectionError(exception))

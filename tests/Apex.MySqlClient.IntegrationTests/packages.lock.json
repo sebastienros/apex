@@ -238,10 +238,23 @@
           "Apex.SqlClient": "[0.1.0-preview.1, )"
         }
       },
+      "apex.mysqlclient.adonet": {
+        "type": "Project",
+        "dependencies": {
+          "Apex.MySqlClient": "[0.1.0-preview.1, )",
+          "Apex.SqlClient.AdoNet": "[0.1.0-preview.1, )"
+        }
+      },
       "apex.sqlclient": {
         "type": "Project",
         "dependencies": {
           "System.IO.Hashing": "[10.0.11, )"
+        }
+      },
+      "apex.sqlclient.adonet": {
+        "type": "Project",
+        "dependencies": {
+          "Apex.SqlClient": "[0.1.0-preview.1, )"
         }
       },
       "apex.sqlclient.specificationtests": {

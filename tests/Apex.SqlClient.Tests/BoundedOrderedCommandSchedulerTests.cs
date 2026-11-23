@@ -490,6 +490,421 @@ public sealed class BoundedOrderedCommandSchedulerTests
     }
 
     [TestMethod]
+    public async Task CancellationWhileQueuedCompletesBeforeEarlierCommandsFinish()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 4);
+        ConcurrentQueue<string> events = [];
+        using CancellationTokenSource cancellation = new();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+
+        var canceled = Execute(scheduler, 2, events: events, cancellationToken: cancellation.Token);
+        var third = Execute(scheduler, 3, events: events);
+        Assert.IsFalse(canceled.IsCompleted);
+
+        cancellation.Cancel();
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+          async () =>
+          {
+              _ = await canceled.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+          });
+        Assert.IsFalse(third.IsCompleted);
+
+        releasePump.SetResult();
+        await blocker;
+        Assert.AreEqual(3, await third);
+        CollectionAssert.AreEqual(new[] { "send-3", "receive-3" }, events.ToArray());
+
+        // The early-completed rental is still referenced by its channel entry until the pump skips
+        // it; renting again afterwards must not run any command twice.
+        for (var i = 0; i < 100; i++)
+        {
+            using CancellationTokenSource unused = new();
+            Assert.AreEqual(i, await Execute(scheduler, i, cancellationToken: unused.Token));
+        }
+    }
+
+    [TestMethod]
+    public async Task CancellationOfADeferredBarrierCompletesBeforeTheBatchFinishes()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(2, 4);
+        ConcurrentQueue<string> events = [];
+        using CancellationTokenSource cancellation = new();
+        var sendStarted = NewGate();
+        var releaseSend = NewGate();
+
+        var first = Execute(
+          scheduler,
+          1,
+          send: async _ =>
+          {
+              sendStarted.SetResult();
+              await releaseSend.Task;
+          },
+          events: events);
+        var barrier = Execute(
+          scheduler,
+          2,
+          events: events,
+          barrier: true,
+          cancellationToken: cancellation.Token);
+        var third = Execute(scheduler, 3, events: events);
+        await sendStarted.Task;
+
+        cancellation.Cancel();
+        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+          async () =>
+          {
+              _ = await barrier.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+          });
+        Assert.IsFalse(first.IsCompleted);
+
+        releaseSend.SetResult();
+        CollectionAssert.AreEqual(
+          new[] { 1, 3 },
+          await Task.WhenAll(first.AsTask(), third.AsTask()));
+        CollectionAssert.AreEqual(
+          new[] { "receive-1", "send-3", "receive-3" },
+          events.ToArray());
+    }
+
+    [TestMethod]
+    public async Task DisposalNeverRunsQueuedCommandsOrADeferredBarrier()
+    {
+        BoundedOrderedCommandScheduler scheduler = new(2, 8);
+        ConcurrentQueue<string> events = [];
+        var sendStarted = NewGate();
+        var first = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1));
+        var barrier = Execute(scheduler, 2, events: events, barrier: true);
+        var third = Execute(scheduler, 3, events: events);
+        var fourth = Execute(scheduler, 4, events: events);
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync();
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(first);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(barrier);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(third);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(fourth);
+        Assert.IsEmpty(events);
+    }
+
+    [TestMethod]
+    public async Task DisposalStopsReceivingTheRestOfAPipelinedBatch()
+    {
+        BoundedOrderedCommandScheduler scheduler = new(3, 8);
+        ConcurrentQueue<string> events = [];
+        var receiveStarted = NewGate();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+        var first = scheduler.ExecuteAsync(
+          _ =>
+          {
+              events.Enqueue("send-1");
+              return ValueTask.CompletedTask;
+          },
+          async cancellationToken =>
+          {
+              receiveStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+              return 1;
+          });
+        var second = Execute(scheduler, 2, events: events);
+        var third = Execute(scheduler, 3, events: events);
+        releasePump.SetResult();
+        await blocker;
+        await receiveStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(first);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(second);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(third);
+        CollectionAssert.AreEqual(new[] { "send-1", "send-2", "send-3" }, events.ToArray());
+    }
+
+    [TestMethod]
+    public async Task DisposalStopsSendingTheRestOfAPipelinedBatch()
+    {
+        var flushes = 0;
+        BoundedOrderedCommandScheduler scheduler = new(
+          3,
+          8,
+          flushBatchAsync: _ =>
+          {
+              Interlocked.Increment(ref flushes);
+              return ValueTask.CompletedTask;
+          });
+        ConcurrentQueue<string> events = [];
+        var sendStarted = NewGate();
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+        var first = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1),
+          flushBatch: true);
+
+        // These sends ignore their token, like a driver that writes with CancellationToken.None.
+        var second = Execute(scheduler, 2, events: events, flushBatch: true);
+        var third = Execute(scheduler, 3, events: events, flushBatch: true);
+        releasePump.SetResult();
+        await blocker;
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(first);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(second);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(third);
+        Assert.IsEmpty(events);
+        Assert.AreEqual(0, Volatile.Read(ref flushes));
+    }
+
+    [TestMethod]
+    public async Task DisposalCancelsABlockedSendOfACancellableCommand()
+    {
+        BoundedOrderedCommandScheduler scheduler = new(1, 2);
+        using CancellationTokenSource cancellation = new();
+        var sendStarted = NewGate();
+        var blocked = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1),
+          cancellationToken: cancellation.Token);
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocked);
+    }
+
+    // PostgreSQL's notification wait is a receive that its subscriber cancels through the caller's
+    // token to interleave LISTEN commands, so the receive token must follow the caller's token.
+    [TestMethod]
+    public async Task CancellingTheCallerTokenCancelsAReceiveInProgress()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 4);
+        for (var i = 0; i < 3; i++)
+        {
+            using CancellationTokenSource cancellation = new();
+            var receiveStarted = NewGate();
+            var waiting = scheduler.ExecuteAsync(
+              _ => ValueTask.CompletedTask,
+              async cancellationToken =>
+              {
+                  receiveStarted.SetResult();
+                  await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                  return 0;
+              },
+              barrier: true,
+              cancellationToken: cancellation.Token);
+            await receiveStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            var queued = Execute(scheduler, i);
+
+            cancellation.Cancel();
+            await Assert.ThrowsExactlyAsync<OperationCanceledException>(
+              async () =>
+              {
+                  _ = await waiting.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+              });
+            Assert.AreEqual(i, await queued.AsTask().WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+
+        // A receive after the cancelled ones does not see their cancellation.
+        using CancellationTokenSource later = new();
+        var canceledOnEntry = true;
+        Assert.AreEqual(
+          7,
+          await scheduler.ExecuteAsync(
+            _ => ValueTask.CompletedTask,
+            cancellationToken =>
+            {
+                canceledOnEntry = cancellationToken.IsCancellationRequested;
+                return ValueTask.FromResult(7);
+            },
+            cancellationToken: later.Token));
+        Assert.IsFalse(canceledOnEntry);
+    }
+
+    [TestMethod]
+    public async Task ACancelledSendDoesNotCancelLaterSends()
+    {
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 2);
+        using CancellationTokenSource cancellation = new();
+        var sendStarted = NewGate();
+        var canceled = scheduler.ExecuteAsync(
+          async cancellationToken =>
+          {
+              sendStarted.SetResult();
+              await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+          },
+          _ => ValueTask.FromResult(1),
+          cancellationToken: cancellation.Token);
+        await sendStarted.Task;
+        cancellation.Cancel();
+        await AssertValueTaskThrowsExactlyAsync<OperationCanceledException, int>(canceled);
+
+        for (var i = 0; i < 3; i++)
+        {
+            using CancellationTokenSource later = new();
+            var canceledOnEntry = true;
+            var canceledAfterCallerCancel = false;
+            Assert.AreEqual(
+              i,
+              await scheduler.ExecuteAsync(
+                cancellationToken =>
+                {
+                    canceledOnEntry = cancellationToken.IsCancellationRequested;
+
+                    // The caller's token still reaches the send it runs with.
+                    later.Cancel();
+                    canceledAfterCallerCancel = cancellationToken.IsCancellationRequested;
+                    return ValueTask.CompletedTask;
+                },
+                _ => ValueTask.FromResult(i),
+                cancellationToken: later.Token));
+            Assert.IsFalse(canceledOnEntry);
+            Assert.IsTrue(canceledAfterCallerCancel);
+        }
+
+        Assert.AreEqual(3, await Execute(scheduler, 3));
+    }
+
+    [TestMethod]
+    public async Task CloseSendsTheGoodbyeAfterTheQueuedCommands()
+    {
+        var aborted = false;
+        await using BoundedOrderedCommandScheduler scheduler = new(
+          2,
+          4,
+          abortTransport: () => aborted = true);
+        ConcurrentQueue<string> events = [];
+        (var blocker, var releasePump) = await HoldPumpAsync(scheduler);
+        var first = Execute(scheduler, 1, events: events);
+        var second = Execute(scheduler, 2, events: events);
+
+        var close = scheduler.CloseAsync(
+          _ =>
+          {
+              events.Enqueue("goodbye");
+              return ValueTask.CompletedTask;
+          });
+        releasePump.SetResult();
+        await close.AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await scheduler.DisposeAsync();
+
+        Assert.AreEqual(0, await blocker);
+        CollectionAssert.AreEqual(
+          new[] { 1, 2 },
+          await Task.WhenAll(first.AsTask(), second.AsTask()));
+        Assert.AreEqual("goodbye", events.Last());
+        Assert.IsFalse(aborted);
+    }
+
+    // A receive that ignores its token and only ends when the transport is torn down, like a
+    // driver waiting on a long-running query. Without a bound, closing waits for it forever.
+    [TestMethod]
+    public async Task CloseAbortsTheTransportWhenAnInFlightReceiveIgnoresShutdown()
+    {
+        var transport = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var aborts = 0;
+        BoundedOrderedCommandScheduler scheduler = new(
+          1,
+          4,
+          exception => exception is IOException,
+          abortTransport: () =>
+          {
+              Interlocked.Increment(ref aborts);
+              transport.TrySetException(new IOException("aborted"));
+          },
+          closeTimeout: TimeSpan.FromMilliseconds(200),
+          abortGracePeriod: TimeSpan.FromMilliseconds(100));
+        ConcurrentQueue<string> events = [];
+        var receiveStarted = NewGate();
+        var inFlight = scheduler.ExecuteAsync(
+          _ => ValueTask.CompletedTask,
+          _ =>
+          {
+              receiveStarted.SetResult();
+              return new ValueTask<int>(transport.Task);
+          });
+        var queued = Execute(scheduler, 2, events: events);
+        await receiveStarted.Task;
+
+        var elapsed = Stopwatch.StartNew();
+        await scheduler.CloseAsync(
+          _ =>
+          {
+              events.Enqueue("goodbye");
+              return ValueTask.CompletedTask;
+          }).AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.IsGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(250), elapsed.Elapsed);
+        Assert.IsGreaterThanOrEqualTo(1, Volatile.Read(ref aborts));
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(inFlight);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(queued);
+        Assert.IsEmpty(events);
+    }
+
+    // A send blocked because the peer stopped reading, in a driver that does not pass the token
+    // down to the socket.
+    [TestMethod]
+    public async Task DisposalAbortsTheTransportWhenASendIgnoresShutdown()
+    {
+        var transport = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        BoundedOrderedCommandScheduler scheduler = new(
+          1,
+          4,
+          exception => exception is IOException,
+          abortTransport: () => transport.TrySetException(new IOException("aborted")),
+          abortGracePeriod: TimeSpan.FromMilliseconds(100));
+        var sendStarted = NewGate();
+        var blocked = scheduler.ExecuteAsync(
+          _ =>
+          {
+              sendStarted.SetResult();
+              return new ValueTask(transport.Task);
+          },
+          _ => ValueTask.FromResult(1));
+        var queued = Execute(scheduler, 2);
+        await sendStarted.Task;
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.IsTrue(transport.Task.IsFaulted);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocked);
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(queued);
+    }
+
+    [TestMethod]
+    public async Task DisposalDoesNotAbortAPumpThatUnwindsOnShutdown()
+    {
+        var aborted = false;
+        BoundedOrderedCommandScheduler scheduler = new(
+          1,
+          4,
+          abortTransport: () => aborted = true,
+          abortGracePeriod: TimeSpan.FromSeconds(30));
+        (var blocker, _) = await HoldPumpAsync(scheduler);
+
+        await scheduler.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        await AssertValueTaskThrowsExactlyAsync<ObjectDisposedException, int>(blocker);
+        Assert.IsFalse(aborted);
+    }
+
+    [TestMethod]
     public async Task DisposalFailsCommandsWaitingForChannelCapacity()
     {
         BoundedOrderedCommandScheduler scheduler = new(1, 1);
@@ -600,6 +1015,134 @@ public sealed class BoundedOrderedCommandSchedulerTests
         }
     }
 
+    // Callers cancel some of their commands right after submitting them, while the channel is full
+    // and the pump is busy, so a command often completes early while its channel entry is still
+    // queued. Its caller then consumes and releases it before the pump has seen the entry. The pump's
+    // ownership must keep that rental from being re-rented under the stale entry.
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task PooledCommandsSurviveCancellationWhileQueuedUnderAFullChannel()
+    {
+        const int callers = 4;
+        const int maximumCallsPerCaller = 50_000;
+        var budget = TimeSpan.FromSeconds(2);
+        var commandDeadline = TimeSpan.FromSeconds(30);
+        await using BoundedOrderedCommandScheduler scheduler = new(1, 1);
+        var sends = new int[callers * maximumCallsPerCaller];
+        var receives = new int[callers * maximumCallsPerCaller];
+        var outcomes = new CancelStressOutcome[callers * maximumCallsPerCaller];
+        var issued = new int[callers];
+        ConcurrentQueue<string> failures = [];
+        var elapsed = Stopwatch.StartNew();
+
+        var threads = Enumerable.Range(0, callers)
+          .Select(caller => new Thread(() => RunCaller(caller)) { IsBackground = true })
+          .ToArray();
+        foreach (var thread in threads)
+        {
+            thread.Start();
+        }
+
+        foreach (var thread in threads)
+        {
+            thread.Join();
+        }
+
+        // The channel is FIFO, so once this completes the pump has skipped or run every earlier entry.
+        Assert.AreEqual(-1, await Execute(scheduler, -1));
+
+        Assert.IsEmpty(failures, string.Join(Environment.NewLine, failures.Take(10)));
+        var canceledCount = 0;
+        for (var caller = 0; caller < callers; caller++)
+        {
+            for (var call = 0; call < issued[caller]; call++)
+            {
+                var id = caller * maximumCallsPerCaller + call;
+                var expected = outcomes[id] == CancelStressOutcome.Completed ? 1 : 0;
+                canceledCount += 1 - expected;
+                if (sends[id] != expected || receives[id] != expected)
+                {
+                    Assert.Fail(
+                      $"Command {id} ({outcomes[id]}) was sent {sends[id]} and received {receives[id]} times.");
+                }
+            }
+        }
+
+        Assert.IsGreaterThan(0, canceledCount);
+
+        void RunCaller(int caller)
+        {
+            var random = new Random(caller);
+            for (var call = 0;
+                 call < maximumCallsPerCaller && failures.IsEmpty && elapsed.Elapsed < budget;
+                 call++)
+            {
+                var id = caller * maximumCallsPerCaller + call;
+                issued[caller] = call + 1;
+
+                // 0: no token; 1: a token that is never cancelled; 2: cancelled right after
+                // submission; 3: already cancelled.
+                var mode = random.Next(4);
+                using var cancellation = mode == 0 ? null : new CancellationTokenSource();
+                if (mode == 3)
+                {
+                    cancellation!.Cancel();
+                }
+
+                try
+                {
+                    var command = scheduler.ExecuteAsync(
+                      _ =>
+                      {
+                          Interlocked.Increment(ref sends[id]);
+                          return ValueTask.CompletedTask;
+                      },
+                      _ =>
+                      {
+                          Interlocked.Increment(ref receives[id]);
+                          return ValueTask.FromResult(new CancelStressResult(id));
+                      },
+                      cancellationToken: cancellation?.Token ?? default);
+                    if (mode == 2)
+                    {
+                        cancellation!.Cancel();
+                    }
+
+                    var submitted = elapsed.Elapsed;
+                    SpinWait spin = default;
+                    while (!command.IsCompleted)
+                    {
+                        if (elapsed.Elapsed - submitted > commandDeadline)
+                        {
+                            failures.Enqueue($"Command {id} did not complete.");
+                            return;
+                        }
+
+                        spin.SpinOnce(sleep1Threshold: -1);
+                    }
+
+                    try
+                    {
+                        var result = command.GetAwaiter().GetResult();
+                        outcomes[id] = CancelStressOutcome.Completed;
+                        if (result.Id != id)
+                        {
+                            failures.Enqueue($"Command {id} completed with the result of command {result.Id}.");
+                        }
+                    }
+                    catch (OperationCanceledException) when (mode >= 2)
+                    {
+                        outcomes[id] = CancelStressOutcome.Canceled;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    failures.Enqueue($"Command {id} (mode {mode}) failed: {exception.GetType().Name}: {exception.Message}");
+                }
+            }
+        }
+    }
+
     private static ValueTask<int> Execute(
         BoundedOrderedCommandScheduler scheduler,
         int value,
@@ -669,4 +1212,13 @@ public sealed class BoundedOrderedCommandSchedulerTests
     // A dedicated result type gives the stress test its own static command pool, isolated from the
     // Command<int> pool that the other tests share.
     private readonly record struct StressResult(int Id);
+
+    private readonly record struct CancelStressResult(int Id);
+
+    private enum CancelStressOutcome
+    {
+        NotObserved,
+        Completed,
+        Canceled,
+    }
 }
