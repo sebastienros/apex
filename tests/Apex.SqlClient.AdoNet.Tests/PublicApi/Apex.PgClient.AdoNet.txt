@@ -10,7 +10,7 @@ class Apex.PgClient.PgDbCommand : Apex.SqlClient.ApexDbCommand, System.Component
 class Apex.PgClient.PgDbConnection : Apex.SqlClient.ApexDbConnection, System.ComponentModel.IComponent, System.Data.IDbConnection, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor()
   Constructor: Void .ctor(System.String)
-class Apex.PgClient.PgDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+class Apex.PgClient.PgDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.Common.IDbColumnSchemaGenerator, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
 class Apex.PgClient.PgDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(System.String)

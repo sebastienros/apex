@@ -455,13 +455,16 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         ObjectDisposedException.ThrowIf(_disposed, this);
         ThrowIfCopyActive();
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        // The extended protocol accepts one statement, so parameterless multi-statement text uses the
+        // simple query protocol, which returns each statement's result (in text format).
         return ValueTask.FromResult<ISqlRowReader>(
           new PgResultReader(
             this,
             sql,
             statementName: null,
             parameters,
-            cancellationToken));
+            cancellationToken,
+            simpleQuery: parameters.Count == 0 && PgSqlText.HasMultipleStatements(sql)));
     }
 
     ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
@@ -2686,8 +2689,16 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         string? sql,
         string? statementName,
         SqlParameters parameters,
-        CancellationToken cancellationToken) :
-        PgRowReader(connection, sql, statementName, parameters, cancellationToken, preserveResultBoundaries: true),
+        CancellationToken cancellationToken,
+        bool simpleQuery = false) :
+        PgRowReader(
+            connection,
+            sql,
+            statementName,
+            parameters,
+            cancellationToken,
+            preserveResultBoundaries: true,
+            simpleQuery),
         ISqlResultBoundaryReader,
         ISqlRecordsAffectedReader
     {
@@ -2729,7 +2740,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             string? statementName,
             SqlParameters parameters,
             CancellationToken cancellationToken,
-            bool preserveResultBoundaries = false)
+            bool preserveResultBoundaries = false,
+            bool simpleQuery = false)
         {
             _connection = connection;
             _results = preserveResultBoundaries ? new SqlResultReaderState() : null;
@@ -2744,7 +2756,11 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
               {
                   token.ThrowIfCancellationRequested();
                   connection.ThrowIfCopyActive();
-                  if (sql is not null)
+                  if (simpleQuery)
+                  {
+                      await connection._writer.WriteQueryAsync(sql!, CancellationToken.None).ConfigureAwait(false);
+                  }
+                  else if (sql is not null)
                   {
                       await connection._writer.WriteExtendedQueryAsync(
                   sql,

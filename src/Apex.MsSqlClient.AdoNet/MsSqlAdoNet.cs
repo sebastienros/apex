@@ -101,6 +101,12 @@ public sealed class MsSqlDbDataReader : ApexDbDataReader
         CancellationTokenSource operationCancellation,
         Func<ValueTask> onClose)
         : base(reader, behavior, connection, operationCancellation, onClose) { }
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal override Type GetColumnFieldType(SqlColumn column) => MsSqlAdoColumnTypes.GetFieldType(column);
+    internal override string GetColumnDataTypeName(SqlColumn column) => MsSqlAdoColumnTypes.GetDataTypeName(column);
 }
 public sealed class MsSqlDbTransaction : ApexDbTransaction
 {
@@ -187,4 +193,95 @@ internal static class MsSqlAdoErrors
         exception is MsSqlException sqlServer
             ? new ApexDbException(sqlServer, errorCode: sqlServer.Number)
             : new ApexDbException(exception);
+}
+
+/// <summary>Maps SQL Server (TDS) result columns to the CLR type and type name of the native object decoder.</summary>
+internal static class MsSqlAdoColumnTypes
+{
+    // TDS data type tokens (MS-TDS 2.2.5.4).
+    private const byte Image = 0x22, Text = 0x23, Guid = 0x24, VarBinary = 0x25, IntN = 0x26, VarChar = 0x27,
+        Date = 0x28, Time = 0x29, DateTime2 = 0x2A, DateTimeOffset = 0x2B, Binary = 0x2D, Char = 0x2F,
+        Int1 = 0x30, Bit = 0x32, Int2 = 0x34, Decimal = 0x37, Int4 = 0x38, DateTime4 = 0x3A, Float4 = 0x3B,
+        Money = 0x3C, DateTime = 0x3D, Float8 = 0x3E, Numeric = 0x3F, NText = 0x63, BitN = 0x68,
+        DecimalN = 0x6A, NumericN = 0x6C, FloatN = 0x6D, MoneyN = 0x6E, DateTimeN = 0x6F, Money4 = 0x7A,
+        Int8 = 0x7F, BigVarBinary = 0xA5, BigVarChar = 0xA7, BigBinary = 0xAD, BigChar = 0xAF,
+        NVarChar = 0xE7, NChar = 0xEF, Udt = 0xF0, Xml = 0xF1, Json = 0xF4;
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal static Type GetFieldType(SqlColumn column) => column.TypeId switch
+    {
+        Int1 => typeof(byte),
+        Bit or BitN => typeof(bool),
+        Int2 => typeof(short),
+        Int4 => typeof(int),
+        Int8 => typeof(long),
+        IntN => column.TypeSize switch
+        {
+            1 => typeof(byte),
+            2 => typeof(short),
+            4 => typeof(int),
+            8 => typeof(long),
+            _ => typeof(object),
+        },
+        Float4 => typeof(float),
+        Float8 => typeof(double),
+        FloatN => column.TypeSize == 4 ? typeof(float) : typeof(double),
+        Decimal or Numeric or DecimalN or NumericN or Money or Money4 or MoneyN => typeof(decimal),
+        Guid => typeof(System.Guid),
+        Date => typeof(DateOnly),
+        Time => typeof(TimeOnly),
+        DateTime2 or DateTime or DateTime4 or DateTimeN => typeof(System.DateTime),
+        DateTimeOffset => typeof(System.DateTimeOffset),
+        NVarChar or NChar or NText or Xml or Json or Char or VarChar or BigChar or BigVarChar or Text =>
+            typeof(string),
+        Binary or VarBinary or BigBinary or BigVarBinary or Image or Udt => typeof(byte[]),
+        _ => typeof(object),
+    };
+
+    internal static string GetDataTypeName(SqlColumn column) => column.TypeId switch
+    {
+        Int1 => "tinyint",
+        Bit or BitN => "bit",
+        Int2 => "smallint",
+        Int4 => "int",
+        Int8 => "bigint",
+        IntN => column.TypeSize switch
+        {
+            1 => "tinyint",
+            2 => "smallint",
+            8 => "bigint",
+            _ => "int",
+        },
+        Float4 => "real",
+        Float8 => "float",
+        FloatN => column.TypeSize == 4 ? "real" : "float",
+        Decimal or DecimalN => "decimal",
+        Numeric or NumericN => "numeric",
+        Money => "money",
+        Money4 => "smallmoney",
+        MoneyN => column.TypeSize == 4 ? "smallmoney" : "money",
+        Guid => "uniqueidentifier",
+        Date => "date",
+        Time => "time",
+        DateTime2 => "datetime2",
+        DateTimeOffset => "datetimeoffset",
+        DateTime => "datetime",
+        DateTime4 => "smalldatetime",
+        DateTimeN => column.TypeSize == 4 ? "smalldatetime" : "datetime",
+        NVarChar => "nvarchar",
+        NChar => "nchar",
+        NText => "ntext",
+        Xml => "xml",
+        Json => "json",
+        Char or BigChar => "char",
+        VarChar or BigVarChar => "varchar",
+        Text => "text",
+        Binary or BigBinary => "binary",
+        VarBinary or BigVarBinary => "varbinary",
+        Image => "image",
+        Udt => "udt",
+        _ => column.TypeId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
 }

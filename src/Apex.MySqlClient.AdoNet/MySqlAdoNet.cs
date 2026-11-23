@@ -101,6 +101,12 @@ public sealed class MySqlDbDataReader : ApexDbDataReader
         CancellationTokenSource operationCancellation,
         Func<ValueTask> onClose)
         : base(reader, behavior, connection, operationCancellation, onClose) { }
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal override Type GetColumnFieldType(SqlColumn column) => MySqlAdoColumnTypes.GetFieldType(column);
+    internal override string GetColumnDataTypeName(SqlColumn column) => MySqlAdoColumnTypes.GetDataTypeName(column);
 }
 public sealed class MySqlDbTransaction : ApexDbTransaction
 {
@@ -187,4 +193,80 @@ internal static class MySqlAdoErrors
         exception is MySqlException mysql
             ? new ApexDbException(mysql, mysql.SqlState, errorCode: mysql.ErrorNumber)
             : new ApexDbException(exception);
+}
+
+/// <summary>Maps MySQL result columns to the CLR type and type name of the native object decoder.</summary>
+internal static class MySqlAdoColumnTypes
+{
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal static Type GetFieldType(SqlColumn column)
+    {
+        var metadata = MySqlColumnMetadata.FromColumn(column);
+        var unsigned = metadata.IsUnsigned;
+        return metadata.Type switch
+        {
+            MySqlType.Tiny => unsigned ? typeof(byte) : typeof(sbyte),
+            MySqlType.Short => unsigned ? typeof(ushort) : typeof(short),
+            MySqlType.Year => typeof(int),
+            MySqlType.Int24 or MySqlType.Long => unsigned ? typeof(uint) : typeof(int),
+            MySqlType.LongLong => unsigned ? typeof(ulong) : typeof(long),
+            MySqlType.Bit => typeof(ulong),
+            MySqlType.Float => typeof(float),
+            MySqlType.Double => typeof(double),
+            MySqlType.Decimal or MySqlType.NewDecimal => typeof(MySqlDecimal),
+            MySqlType.Date or MySqlType.NewDate => typeof(DateOnly),
+            MySqlType.DateTime or MySqlType.DateTime2 or MySqlType.Timestamp or MySqlType.Timestamp2 =>
+                typeof(DateTime),
+            MySqlType.Time or MySqlType.Time2 => typeof(TimeSpan),
+            MySqlType.Json => typeof(System.Text.Json.JsonElement),
+            MySqlType.Null => typeof(object),
+            MySqlType.Geometry or MySqlType.Vector => typeof(byte[]),
+            _ => metadata.IsBinary ? typeof(byte[]) : typeof(string),
+        };
+    }
+
+    internal static string GetDataTypeName(SqlColumn column)
+    {
+        var metadata = MySqlColumnMetadata.FromColumn(column);
+        var binary = metadata.IsBinary;
+        var name = metadata.Type switch
+        {
+            MySqlType.Tiny => "TINYINT",
+            MySqlType.Short => "SMALLINT",
+            MySqlType.Int24 => "MEDIUMINT",
+            MySqlType.Long => "INT",
+            MySqlType.LongLong => "BIGINT",
+            MySqlType.Year => "YEAR",
+            MySqlType.Bit => "BIT",
+            MySqlType.Float => "FLOAT",
+            MySqlType.Double => "DOUBLE",
+            MySqlType.Decimal or MySqlType.NewDecimal => "DECIMAL",
+            MySqlType.Date or MySqlType.NewDate => "DATE",
+            MySqlType.DateTime or MySqlType.DateTime2 => "DATETIME",
+            MySqlType.Timestamp or MySqlType.Timestamp2 => "TIMESTAMP",
+            MySqlType.Time or MySqlType.Time2 => "TIME",
+            MySqlType.Json => "JSON",
+            MySqlType.Null => "NULL",
+            MySqlType.Geometry => "GEOMETRY",
+            MySqlType.Vector => "VECTOR",
+            MySqlType.Enum => "ENUM",
+            MySqlType.Set => "SET",
+            MySqlType.TinyBlob => binary ? "TINYBLOB" : "TINYTEXT",
+            MySqlType.MediumBlob => binary ? "MEDIUMBLOB" : "MEDIUMTEXT",
+            MySqlType.LongBlob => binary ? "LONGBLOB" : "LONGTEXT",
+            MySqlType.Blob => binary ? "BLOB" : "TEXT",
+            MySqlType.VarChar or MySqlType.VarString => binary ? "VARBINARY" : "VARCHAR",
+            MySqlType.String when (metadata.Flags & MySqlColumnFlags.Enum) != 0 => "ENUM",
+            MySqlType.String when (metadata.Flags & MySqlColumnFlags.Set) != 0 => "SET",
+            MySqlType.String => binary ? "BINARY" : "CHAR",
+            _ => ((byte)metadata.Type).ToString(System.Globalization.CultureInfo.InvariantCulture),
+        };
+        return metadata.IsUnsigned && metadata.Type is
+            MySqlType.Tiny or MySqlType.Short or MySqlType.Int24 or MySqlType.Long or MySqlType.LongLong or
+            MySqlType.Float or MySqlType.Double or MySqlType.Decimal or MySqlType.NewDecimal
+            ? name + " UNSIGNED"
+            : name;
+    }
 }

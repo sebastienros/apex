@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.ObjectModel;
 using System.Data;
 using System.Data.Common;
 
@@ -47,13 +48,11 @@ public abstract class ApexDbParameter : DbParameter
             throw new NotSupportedException("Only input parameters are supported.");
         }
 
-        if (_dbTypeWasSet)
-        {
-            throw new NotSupportedException(
-                "Explicit DbType is not supported; Apex infers parameter metadata from Value.");
-        }
-
-        return Value is null or DBNull ? SqlValue.Null : SqlValue.From(Value);
+        var value = Value;
+        if (value is null or DBNull) return SqlValue.Null;
+        return _dbTypeWasSet
+            ? ApexDbTypeConverter.ToSqlValue(_dbType, value, ParameterName)
+            : SqlValue.From(value);
     }
 }
 
@@ -155,7 +154,7 @@ public abstract class ApexDbParameterCollection : DbParameterCollection
 public abstract class ApexDbCommand : DbCommand
 {
     private readonly ApexDbParameterCollection _parameters;
-    private CancellationTokenSource? _activeCancellation;
+    private ApexOperationCancellation? _activeCancellation;
     private DbConnection? _connection;
     private DbTransaction? _transaction;
     private ISqlPreparedStatement? _preparedStatement;
@@ -215,7 +214,7 @@ public abstract class ApexDbCommand : DbCommand
             ? connection.TranslateException(exception)
             : new ApexDbException(exception);
 
-    public override void Cancel() => ApexCancellation.TryCancel(_activeCancellation);
+    public override void Cancel() => Volatile.Read(ref _activeCancellation)?.Cancel();
     public override void Prepare() => throw AsyncOnly();
     public override Task PrepareAsync(CancellationToken cancellationToken = default) =>
         ApexExceptionBoundary.RunAsync(() => PrepareCoreAsync(cancellationToken), TranslateException);
@@ -223,28 +222,35 @@ public abstract class ApexDbCommand : DbCommand
     {
         Validate();
         await DisposePreparedAsync().ConfigureAwait(false);
-        using var timeout = CreateTimeoutToken(cancellationToken);
-        var execution = await OpenForExecutionAsync(timeout.Token).ConfigureAwait(false);
+        var cancellation = BeginOperation(cancellationToken);
         try
         {
-            _preparedStatement = await execution.Connection
-                .PrepareAsync(CommandText!, timeout.Token).ConfigureAwait(false);
-            _preparedConnection = execution.Connection;
-            _preparedConnectionOwner = execution.ConnectionOwner;
-            _preparedConnectionWasAutoOpened = execution.CloseWhenDone;
-        }
-        catch
-        {
-            if (execution.CloseWhenDone)
+            var execution = await OpenForExecutionAsync(cancellation.Token).ConfigureAwait(false);
+            try
             {
-                await execution.ConnectionOwner.CloseAsync().ConfigureAwait(false);
+                _preparedStatement = await execution.Connection
+                    .PrepareAsync(CommandText!, cancellation.Token).ConfigureAwait(false);
+                _preparedConnection = execution.Connection;
+                _preparedConnectionOwner = execution.ConnectionOwner;
+                _preparedConnectionWasAutoOpened = execution.CloseWhenDone;
             }
+            catch
+            {
+                if (execution.CloseWhenDone)
+                {
+                    await execution.ConnectionOwner.CloseAsync().ConfigureAwait(false);
+                }
 
-            throw;
+                throw;
+            }
+        }
+        catch (Exception exception) when (cancellation.TranslateTimeout(exception, cancellationToken) is { } timeout)
+        {
+            throw timeout;
         }
         finally
         {
-            CompleteOperation(timeout);
+            CompleteOperation(cancellation);
         }
     }
 
@@ -265,47 +271,48 @@ public abstract class ApexDbCommand : DbCommand
         await DisposeInvalidatedPreparedAsync().ConfigureAwait(false);
         Validate();
         ValidateBehavior(behavior);
-        var timeout = CreateTimeoutToken(cancellationToken);
+        var cancellation = BeginOperation(cancellationToken);
         ExecutionConnection execution = default;
         ISqlRowReader? nativeReader = null;
         var transferred = false;
         try
         {
             var parameters = _parameters.ToSqlParameters();
-            execution = await OpenForExecutionAsync(timeout.Token).ConfigureAwait(false);
-            var prepared = _preparedStatement is not null &&
-                ReferenceEquals(execution.Connection, _preparedConnection)
-                ? _preparedStatement
-                : null;
+            execution = await OpenForExecutionAsync(cancellation.Token).ConfigureAwait(false);
+            var prepared = GetPreparedStatement(execution.Connection);
             nativeReader = _adoReaderFactory is not null
                 ? await _adoReaderFactory.ExecuteReaderAsync(
                     execution.Connection,
                     CommandText!,
                     parameters,
                     prepared,
-                    timeout.Token).ConfigureAwait(false)
+                    cancellation.Token).ConfigureAwait(false)
                 : prepared is not null
-                    ? await prepared.ExecuteReaderAsync(parameters, timeout.Token).ConfigureAwait(false)
+                    ? await prepared.ExecuteReaderAsync(parameters, cancellation.Token).ConfigureAwait(false)
                     : await execution.Connection.ExecuteReaderAsync(
                         CommandText!,
                         parameters,
-                        timeout.Token).ConfigureAwait(false);
+                        cancellation.Token).ConfigureAwait(false);
             var result = CreateReader(
                 nativeReader,
                 behavior,
                 execution.ConnectionOwner,
-                timeout,
-                () => CompleteReaderAsync(timeout, execution, behavior));
-            result.ConfigureCommandTimeout(CommandTimeout);
-            await result.InitializeAsync(timeout.Token).ConfigureAwait(false);
+                cancellation.Source,
+                () => CompleteReaderAsync(cancellation, execution, behavior));
+            result.ConfigureCancellation(cancellation);
+            await result.InitializeAsync(cancellation.Token).ConfigureAwait(false);
             transferred = true;
             return result;
+        }
+        catch (Exception exception) when (cancellation.TranslateTimeout(exception, cancellationToken) is { } timeout)
+        {
+            throw timeout;
         }
         finally
         {
             if (!transferred)
             {
-                timeout.Cancel();
+                ApexCancellation.TryCancel(cancellation.Source);
                 try
                 {
                     if (nativeReader is not null)
@@ -324,7 +331,7 @@ public abstract class ApexDbCommand : DbCommand
                     }
                     finally
                     {
-                        CompleteOperation(timeout);
+                        CompleteOperation(cancellation);
                     }
                 }
             }
@@ -336,39 +343,11 @@ public abstract class ApexDbCommand : DbCommand
 
     private async Task<int> ExecuteNonQueryCoreAsync(CancellationToken cancellationToken)
     {
-        if (_adoReaderFactory is null)
+        // Providers whose native command result is equivalent to draining a result reader (a single
+        // statement whose affected-row count the provider can classify) skip the reader machinery.
+        if (_adoReaderFactory is null || _adoReaderFactory.CanExecuteNonQuery(CommandText, _parameters.Count))
         {
-            await DisposeInvalidatedPreparedAsync().ConfigureAwait(false);
-            Validate();
-            using var timeout = CreateTimeoutToken(cancellationToken);
-            ExecutionConnection execution = default;
-            try
-            {
-                var parameters = _parameters.ToSqlParameters();
-                execution = await OpenForExecutionAsync(timeout.Token).ConfigureAwait(false);
-                var result = _preparedStatement is not null &&
-                    ReferenceEquals(execution.Connection, _preparedConnection)
-                    ? await _preparedStatement.ExecuteAsync(parameters, timeout.Token).ConfigureAwait(false)
-                    : await execution.Connection.ExecuteAsync(
-                        CommandText!,
-                        parameters,
-                        timeout.Token).ConfigureAwait(false);
-                return checked((int)result.AffectedRows);
-            }
-            finally
-            {
-                try
-                {
-                    if (execution.CloseWhenDone)
-                    {
-                        await execution.ConnectionOwner.CloseAsync().ConfigureAwait(false);
-                    }
-                }
-                finally
-                {
-                    CompleteOperation(timeout);
-                }
-            }
+            return await ExecuteNativeNonQueryAsync(cancellationToken).ConfigureAwait(false);
         }
 
         var reader = await ExecuteDbDataReaderAsync(CommandBehavior.Default, cancellationToken)
@@ -388,6 +367,45 @@ public abstract class ApexDbCommand : DbCommand
         finally
         {
             await reader.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    private async Task<int> ExecuteNativeNonQueryAsync(CancellationToken cancellationToken)
+    {
+        await DisposeInvalidatedPreparedAsync().ConfigureAwait(false);
+        Validate();
+        var cancellation = BeginOperation(cancellationToken);
+        ExecutionConnection execution = default;
+        try
+        {
+            var parameters = _parameters.ToSqlParameters();
+            execution = await OpenForExecutionAsync(cancellation.Token).ConfigureAwait(false);
+            var prepared = GetPreparedStatement(execution.Connection);
+            var result = prepared is not null
+                ? await prepared.ExecuteAsync(parameters, cancellation.Token).ConfigureAwait(false)
+                : await execution.Connection.ExecuteAsync(
+                    CommandText!,
+                    parameters,
+                    cancellation.Token).ConfigureAwait(false);
+            return _adoReaderFactory?.GetRecordsAffected(result) ?? checked((int)result.AffectedRows);
+        }
+        catch (Exception exception) when (cancellation.TranslateTimeout(exception, cancellationToken) is { } timeout)
+        {
+            throw timeout;
+        }
+        finally
+        {
+            try
+            {
+                if (execution.CloseWhenDone)
+                {
+                    await execution.ConnectionOwner.CloseAsync().ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                CompleteOperation(cancellation);
+            }
         }
     }
 
@@ -424,11 +442,12 @@ public abstract class ApexDbCommand : DbCommand
         Func<ValueTask> onClose) =>
         new(reader, behavior, executedConnection, operationCancellation, onClose);
 
-    private CancellationTokenSource CreateTimeoutToken(CancellationToken cancellationToken)
+    private ApexOperationCancellation BeginOperation(CancellationToken cancellationToken)
     {
-        _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (CommandTimeout > 0) _activeCancellation.CancelAfter(TimeSpan.FromSeconds(CommandTimeout));
-        return _activeCancellation;
+        var cancellation = new ApexOperationCancellation(cancellationToken, CommandTimeout);
+        cancellation.Arm();
+        Volatile.Write(ref _activeCancellation, cancellation);
+        return cancellation;
     }
 
     private void Validate()
@@ -448,6 +467,11 @@ public abstract class ApexDbCommand : DbCommand
 
     }
 
+    private ISqlPreparedStatement? GetPreparedStatement(ISqlConnection connection) =>
+        _preparedStatement is not null && ReferenceEquals(connection, _preparedConnection)
+            ? _preparedStatement
+            : null;
+
     private async ValueTask<ExecutionConnection> OpenForExecutionAsync(CancellationToken cancellationToken)
     {
         if (_connection is not ApexDbConnection connection)
@@ -462,7 +486,10 @@ public abstract class ApexDbCommand : DbCommand
             var native = GetConnection();
             if (_preparedStatement is not null && !ReferenceEquals(native, _preparedConnection))
             {
-                throw new InvalidOperationException("The prepared statement belongs to a different connection.");
+                // The connection was closed and reopened since PrepareAsync, so the statement's native
+                // connection is gone. Release it (a pooled lease stays pinned until then) and execute
+                // unprepared, as other providers do; PrepareAsync prepares it on the new connection.
+                await DisposePreparedAsync().ConfigureAwait(false);
             }
 
             return new ExecutionConnection(native, connection, closeWhenDone);
@@ -479,7 +506,7 @@ public abstract class ApexDbCommand : DbCommand
     }
 
     private async ValueTask CompleteReaderAsync(
-        CancellationTokenSource cancellation,
+        ApexOperationCancellation cancellation,
         ExecutionConnection execution,
         CommandBehavior behavior)
     {
@@ -496,12 +523,10 @@ public abstract class ApexDbCommand : DbCommand
         }
     }
 
-    private void CompleteOperation(CancellationTokenSource cancellation)
+    private void CompleteOperation(ApexOperationCancellation cancellation)
     {
-        if (ReferenceEquals(Interlocked.CompareExchange(ref _activeCancellation, null, cancellation), cancellation))
-        {
-            cancellation.Dispose();
-        }
+        Interlocked.CompareExchange(ref _activeCancellation, null, cancellation);
+        cancellation.Dispose();
     }
 
     private readonly record struct ExecutionConnection(
@@ -519,10 +544,18 @@ public abstract class ApexDbCommand : DbCommand
     internal static NotSupportedException AsyncOnly() =>
         new("Apex ADO.NET adapters support asynchronous I/O only. Use the corresponding Async method.");
 
+    // A prepared statement is stale once its owner was closed (and possibly reopened on another native
+    // connection): it can no longer be closed on the server, and closing the owner would close the
+    // caller's new connection.
+    private bool PreparedIsStale() =>
+        _preparedConnectionOwner is not { } owner ||
+        !ReferenceEquals(owner.CurrentConnection, _preparedConnection);
+
     private void DisposePreparedSynchronously()
     {
         if (_preparedStatement is null) return;
         var statement = _preparedStatement;
+        var stale = PreparedIsStale();
         _preparedStatement = null;
         _preparedConnection = null;
         var connectionOwner = _preparedConnectionOwner;
@@ -532,9 +565,13 @@ public abstract class ApexDbCommand : DbCommand
             ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException)
                 .AsTask().GetAwaiter().GetResult();
         }
+        catch (Exception) when (stale)
+        {
+            // The statement's connection is gone; there is nothing left to release on the server.
+        }
         finally
         {
-            if (_preparedConnectionWasAutoOpened && connectionOwner is not null)
+            if (!stale && _preparedConnectionWasAutoOpened && connectionOwner is not null)
             {
                 connectionOwner.Close();
             }
@@ -552,6 +589,7 @@ public abstract class ApexDbCommand : DbCommand
             return;
         }
         var statement = _preparedStatement;
+        var stale = PreparedIsStale();
         _preparedStatement = null;
         _preparedConnection = null;
         var connectionOwner = _preparedConnectionOwner;
@@ -560,9 +598,13 @@ public abstract class ApexDbCommand : DbCommand
         {
             await ApexExceptionBoundary.RunValueAsync(statement.DisposeAsync, TranslateException).ConfigureAwait(false);
         }
+        catch (Exception) when (stale)
+        {
+            // The statement's connection is gone; there is nothing left to release on the server.
+        }
         finally
         {
-            if (_preparedConnectionWasAutoOpened && connectionOwner is not null)
+            if (!stale && _preparedConnectionWasAutoOpened && connectionOwner is not null)
             {
                 await connectionOwner.CloseAsync().ConfigureAwait(false);
             }
@@ -589,14 +631,14 @@ public abstract class ApexDbCommand : DbCommand
 }
 
 /// <summary>Streaming ADO.NET reader over an Apex borrowed reader.</summary>
-public class ApexDbDataReader : DbDataReader
+public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
 {
     private ISqlRowReader _reader;
     private readonly CommandBehavior _behavior;
     private readonly DbConnection? _connection;
     private readonly CancellationTokenSource? _operationCancellation;
     private readonly Func<ValueTask>? _onClose;
-    private int _commandTimeout;
+    private ApexOperationCancellation? _cancellation;
     private bool _closed;
     private bool _returnedSingleRow;
     private IReadOnlyList<SqlColumn> _columns;
@@ -651,9 +693,42 @@ public class ApexDbDataReader : DbDataReader
     }
 #pragma warning restore CA2201
 #pragma warning disable IL2093 // DbDataReader's annotation differs between supported frameworks.
-    public override Type GetFieldType(int ordinal) => typeof(object);
+    /// <summary>Gets the CLR type that <see cref="GetValue"/> returns for the column's provider type.</summary>
+    public override Type GetFieldType(int ordinal) => GetColumnFieldType(_columns[ordinal]);
 #pragma warning restore IL2093
-    public override string GetDataTypeName(int ordinal) => _columns[ordinal].TypeId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    public override string GetDataTypeName(int ordinal) => GetColumnDataTypeName(_columns[ordinal]);
+
+    /// <summary>
+    /// Maps a provider column to the CLR type its <see cref="GetValue"/> returns. Readers without a provider
+    /// mapping report <see cref="object"/>.
+    /// </summary>
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal virtual Type GetColumnFieldType(SqlColumn column) => typeof(object);
+
+    /// <summary>Maps a provider column to its provider type name; without a mapping, the numeric type id.</summary>
+    internal virtual string GetColumnDataTypeName(SqlColumn column) =>
+        column.TypeId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Describes the current result's columns from the protocol metadata: name, ordinal, CLR type and provider
+    /// type name. Base table, key, nullability and size details are not reported.
+    /// </summary>
+    public ReadOnlyCollection<DbColumn> GetColumnSchema()
+    {
+        var columns = new DbColumn[_columns.Count];
+        for (var i = 0; i < columns.Length; i++)
+        {
+            var column = _columns[i];
+            columns[i] = new ApexDbColumn(column.Name, i, GetColumnFieldType(column), GetColumnDataTypeName(column));
+        }
+
+        return new ReadOnlyCollection<DbColumn>(columns);
+    }
+
+    /// <summary>Returns <see cref="GetColumnSchema"/> as a schema table with the standard column set.</summary>
+    public override DataTable GetSchemaTable() => ApexSchemaTable.Create(GetColumnSchema());
     public override bool GetBoolean(int ordinal) =>
         ApexExceptionBoundary.Invoke(() => _reader.GetBoolean(ordinal), TranslateException);
     public override byte GetByte(int ordinal) => GetFieldValue<byte>(ordinal);
@@ -738,6 +813,10 @@ public class ApexDbDataReader : DbDataReader
             if (read) ClearValueCaches();
             return read;
         }
+        catch (Exception exception) when (TranslateTimeout(exception, cancellationToken) is { } timeout)
+        {
+            throw timeout;
+        }
         finally
         {
             DisarmTimeout();
@@ -778,6 +857,10 @@ public class ApexDbDataReader : DbDataReader
             }
             ClearValueCaches();
             return true;
+        }
+        catch (Exception exception) when (TranslateTimeout(exception, cancellationToken) is { } timeout)
+        {
+            throw timeout;
         }
         finally
         {
@@ -874,23 +957,26 @@ public class ApexDbDataReader : DbDataReader
             _hasRowsInResult = _prefetchedRow;
             _columns = _reader.Columns;
         }
+        catch (Exception exception) when (TranslateTimeout(exception, cancellationToken) is { } timeout)
+        {
+            throw timeout;
+        }
         finally
         {
             DisarmTimeout();
         }
     }
 
-    internal void ConfigureCommandTimeout(int commandTimeout) => _commandTimeout = commandTimeout;
+    internal void ConfigureCancellation(ApexOperationCancellation cancellation) => _cancellation = cancellation;
 
-    private void ArmTimeout()
-    {
-        if (_commandTimeout > 0)
-        {
-            _operationCancellation?.CancelAfter(TimeSpan.FromSeconds(_commandTimeout));
-        }
-    }
+    private void ArmTimeout() => _cancellation?.Arm();
 
-    private void DisarmTimeout() => _operationCancellation?.CancelAfter(Timeout.InfiniteTimeSpan);
+    private void DisarmTimeout() => _cancellation?.Disarm();
+
+    // The native reader surfaces a timeout as cancellation of the operation token (or as the server's
+    // error for the cancel it triggered); report it as a provider timeout instead.
+    private ApexDbException? TranslateTimeout(Exception exception, CancellationToken cancellationToken) =>
+        _cancellation?.TranslateTimeout(exception, cancellationToken);
 
     private byte[] GetCachedBytes(int ordinal)
     {
@@ -960,11 +1046,24 @@ internal interface IApexAdoReaderFactory
         SqlParameters parameters,
         ISqlPreparedStatement? preparedStatement,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Returns whether the native <c>ExecuteAsync</c> result is equivalent to draining a result reader for this
+    /// command text, so ExecuteNonQueryAsync can skip the reader and its result-boundary state.
+    /// </summary>
+    bool CanExecuteNonQuery(string sql, int parameterCount);
+
+    /// <summary>Converts a native command result to <see cref="DbDataReader.RecordsAffected"/> semantics.</summary>
+    int GetRecordsAffected(SqlCommandResult result);
 }
 
 /// <summary>Executes commands through the native result-preserving reader capabilities.</summary>
-internal sealed class ApexResultReaderFactory(string providerName) : IApexAdoReaderFactory
+internal class ApexResultReaderFactory(string providerName) : IApexAdoReaderFactory
 {
+    public virtual bool CanExecuteNonQuery(string sql, int parameterCount) => false;
+
+    public virtual int GetRecordsAffected(SqlCommandResult result) => checked((int)result.AffectedRows);
+
     public ValueTask<ISqlRowReader> ExecuteReaderAsync(
         ISqlConnection connection,
         string sql,
@@ -1078,6 +1177,7 @@ public abstract class ApexDbConnection : DbConnection
     public override ConnectionState State => _state;
     protected ISqlConnection NativeConnection =>
         _connection ?? throw new InvalidOperationException("The connection is not open.");
+    internal ISqlConnection? CurrentConnection => _connection;
 
     protected abstract Task<ISqlConnection> OpenCoreAsync(CancellationToken cancellationToken);
     internal virtual DbException TranslateException(SqlClientException exception) => new ApexDbException(exception);
@@ -1272,7 +1372,7 @@ public abstract class ApexDbBatchCommandCollection : DbBatchCommandCollection
     }
 }
 
-internal sealed class ApexDbBatchDataReader : DbDataReader
+internal sealed class ApexDbBatchDataReader : DbDataReader, IDbColumnSchemaGenerator
 {
     private readonly int _commandCount;
     private readonly CommandBehavior _behavior;
@@ -1361,6 +1461,8 @@ internal sealed class ApexDbBatchDataReader : DbDataReader
     public override long GetChars(int ordinal, long dataOffset, char[]? buffer, int bufferOffset, int length) =>
         _reader.GetChars(ordinal, dataOffset, buffer, bufferOffset, length);
     public override string GetDataTypeName(int ordinal) => _reader.GetDataTypeName(ordinal);
+    public override DataTable? GetSchemaTable() => _reader.GetSchemaTable();
+    public ReadOnlyCollection<DbColumn> GetColumnSchema() => _reader.GetColumnSchema();
     public override DateTime GetDateTime(int ordinal) => _reader.GetDateTime(ordinal);
     public override decimal GetDecimal(int ordinal) => _reader.GetDecimal(ordinal);
     public override double GetDouble(int ordinal) => _reader.GetDouble(ordinal);
@@ -1562,6 +1664,12 @@ public abstract class ApexDbBatch : DbBatch
             }
         }
     }
+    /// <summary>
+    /// Gets or sets the timeout, in seconds, of each command in the batch: like
+    /// <see cref="DbCommand.CommandTimeout"/>, it bounds each command's execution and each subsequent
+    /// read or next-result call, for every execution method. It is not a deadline for the whole batch.
+    /// Zero disables it.
+    /// </summary>
     public override int Timeout { get; set; } = 30;
     protected abstract ApexDbBatchCommand CreateBatchCommandCore();
     protected abstract ApexDbCommand CreateCommandCore(ApexDbBatchCommand command, DbConnection connection);
@@ -1607,7 +1715,6 @@ public abstract class ApexDbBatch : DbBatch
         ValidateConfiguration();
         var total = -1;
         _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (Timeout > 0) _activeCancellation.CancelAfter(TimeSpan.FromSeconds(Timeout));
         var closeWhenDone = false;
         try
         {
@@ -1659,7 +1766,6 @@ public abstract class ApexDbBatch : DbBatch
         ValidateConfiguration();
         if (_commands.Count == 0) return null;
         _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (Timeout > 0) _activeCancellation.CancelAfter(TimeSpan.FromSeconds(Timeout));
         var closeWhenDone = false;
         try
         {
@@ -1952,5 +2058,189 @@ public abstract class ApexDbBatch : DbBatch
     {
         DisposePreparedCommandsSynchronously();
         base.Dispose();
+    }
+}
+
+/// <summary>Converts an explicitly typed parameter value to the native value the <see cref="DbType"/> implies.</summary>
+internal static class ApexDbTypeConverter
+{
+    /// <summary>
+    /// Honors the <see cref="DbType"/> where a native <see cref="SqlValue"/> kind represents it, converting
+    /// compatible values (integers and enums to the declared integer width, numbers to the declared
+    /// floating-point or decimal type, characters to strings, date/time variants to the declared kind).
+    /// DbTypes without a distinct native kind (unsigned and 8-bit integers, <see cref="DbType.Object"/>)
+    /// keep the inferred value, and string and binary variants share the native string and binary kinds.
+    /// Values the declared type cannot represent are rejected.
+    /// </summary>
+    internal static SqlValue ToSqlValue(DbType dbType, object value, string? parameterName)
+    {
+        if (value is SqlValue sqlValue) return sqlValue;
+        var culture = System.Globalization.CultureInfo.InvariantCulture;
+        switch (dbType)
+        {
+            case DbType.Object:
+                return SqlValue.From(value);
+            case DbType.Boolean when value is bool:
+                return SqlValue.From(value);
+            case DbType.Byte when IsInteger(value):
+                return SqlValue.From(Convert.ToByte(value, culture));
+            case DbType.SByte when IsInteger(value):
+                return SqlValue.From(Convert.ToSByte(value, culture));
+            case DbType.Int16 when IsInteger(value):
+                return Convert.ToInt16(value, culture);
+            case DbType.Int32 when IsInteger(value):
+                return Convert.ToInt32(value, culture);
+            case DbType.Int64 when IsInteger(value):
+                return Convert.ToInt64(value, culture);
+            case DbType.UInt16 when IsInteger(value):
+                return SqlValue.From(Convert.ToUInt16(value, culture));
+            case DbType.UInt32 when IsInteger(value):
+                return SqlValue.From(Convert.ToUInt32(value, culture));
+            case DbType.UInt64 when IsInteger(value):
+                return SqlValue.From(Convert.ToUInt64(value, culture));
+            case DbType.Single when IsNumber(value):
+                return Convert.ToSingle(value, culture);
+            case DbType.Double when IsNumber(value):
+                return Convert.ToDouble(value, culture);
+            case DbType.Decimal or DbType.Currency or DbType.VarNumeric when IsNumber(value):
+                return Convert.ToDecimal(value, culture);
+            case DbType.String or DbType.StringFixedLength or DbType.AnsiString or
+                DbType.AnsiStringFixedLength or DbType.Xml:
+                switch (value)
+                {
+                    case string:
+                        return SqlValue.From(value);
+                    case char character:
+                        return character.ToString();
+                    case char[] characters:
+                        return new string(characters);
+                }
+
+                break;
+            case DbType.Binary:
+                switch (value)
+                {
+                    case byte[] or ReadOnlyMemory<byte>:
+                        return SqlValue.From(value);
+                    case Memory<byte> memory:
+                        return (ReadOnlyMemory<byte>)memory;
+                    case ArraySegment<byte> segment:
+                        return (ReadOnlyMemory<byte>)segment;
+                }
+
+                break;
+            case DbType.Guid when value is Guid:
+                return SqlValue.From(value);
+            case DbType.Date:
+                switch (value)
+                {
+                    case DateOnly:
+                        return SqlValue.From(value);
+                    case DateTime dateTime:
+                        return DateOnly.FromDateTime(dateTime);
+                }
+
+                break;
+            case DbType.Time when value is TimeOnly or TimeSpan:
+                // TimeSpan keeps its native mapping (a duration or time of day, depending on the provider).
+                return SqlValue.From(value);
+            case DbType.DateTime or DbType.DateTime2:
+                switch (value)
+                {
+                    case DateTime:
+                        return SqlValue.From(value);
+                    case DateOnly date:
+                        return date.ToDateTime(TimeOnly.MinValue);
+                }
+
+                break;
+            case DbType.DateTimeOffset:
+                switch (value)
+                {
+                    case DateTimeOffset:
+                        return SqlValue.From(value);
+                    case DateTime { Kind: DateTimeKind.Utc } utc:
+                        return new DateTimeOffset(utc);
+                }
+
+                break;
+        }
+
+        throw new InvalidCastException(
+            $"Parameter '{parameterName}' has a value of type '{value.GetType().FullName}', " +
+            $"which cannot be sent as DbType.{dbType}.");
+    }
+
+    private static bool IsInteger(object value) =>
+        value is byte or sbyte or short or ushort or int or uint or long or ulong or Enum;
+
+    private static bool IsNumber(object value) =>
+        IsInteger(value) || value is float or double or decimal;
+}
+
+/// <summary>Column metadata reported by <see cref="ApexDbDataReader.GetColumnSchema"/>.</summary>
+internal sealed class ApexDbColumn : DbColumn
+{
+    internal ApexDbColumn(string name, int ordinal, Type dataType, string dataTypeName)
+    {
+        ColumnName = name;
+        ColumnOrdinal = ordinal;
+        DataType = dataType;
+        DataTypeName = dataTypeName;
+    }
+}
+
+internal static class ApexSchemaTable
+{
+    [System.Diagnostics.CodeAnalysis.UnconditionalSuppressMessage(
+        "Trimming",
+        "IL2111",
+        Justification = "The DataType column only stores Type instances; nothing reflects over System.Type's members.")]
+    internal static DataTable Create(ReadOnlyCollection<DbColumn> columns)
+    {
+        DataTable table = new("SchemaTable") { Locale = System.Globalization.CultureInfo.InvariantCulture };
+        var name = table.Columns.Add(SchemaTableColumn.ColumnName, typeof(string));
+        var ordinal = table.Columns.Add(SchemaTableColumn.ColumnOrdinal, typeof(int));
+        var size = table.Columns.Add(SchemaTableColumn.ColumnSize, typeof(int));
+        var precision = table.Columns.Add(SchemaTableColumn.NumericPrecision, typeof(int));
+        var scale = table.Columns.Add(SchemaTableColumn.NumericScale, typeof(int));
+        var dataType = table.Columns.Add(SchemaTableColumn.DataType, typeof(Type));
+        var dataTypeName = table.Columns.Add("DataTypeName", typeof(string));
+        var allowDbNull = table.Columns.Add(SchemaTableColumn.AllowDBNull, typeof(bool));
+        var isKey = table.Columns.Add(SchemaTableColumn.IsKey, typeof(bool));
+        var isUnique = table.Columns.Add(SchemaTableColumn.IsUnique, typeof(bool));
+        var isLong = table.Columns.Add(SchemaTableColumn.IsLong, typeof(bool));
+        var isAliased = table.Columns.Add(SchemaTableColumn.IsAliased, typeof(bool));
+        var isExpression = table.Columns.Add(SchemaTableColumn.IsExpression, typeof(bool));
+        var baseColumnName = table.Columns.Add(SchemaTableColumn.BaseColumnName, typeof(string));
+        var baseTableName = table.Columns.Add(SchemaTableColumn.BaseTableName, typeof(string));
+        var baseSchemaName = table.Columns.Add(SchemaTableColumn.BaseSchemaName, typeof(string));
+        var isReadOnly = table.Columns.Add(SchemaTableOptionalColumn.IsReadOnly, typeof(bool));
+        var isAutoIncrement = table.Columns.Add(SchemaTableOptionalColumn.IsAutoIncrement, typeof(bool));
+        foreach (var column in columns)
+        {
+            var row = table.NewRow();
+            row[name] = column.ColumnName;
+            row[ordinal] = column.ColumnOrdinal ?? -1;
+            row[size] = (object?)column.ColumnSize ?? DBNull.Value;
+            row[precision] = (object?)column.NumericPrecision ?? DBNull.Value;
+            row[scale] = (object?)column.NumericScale ?? DBNull.Value;
+            row[dataType] = (object?)column.DataType ?? DBNull.Value;
+            row[dataTypeName] = (object?)column.DataTypeName ?? DBNull.Value;
+            row[allowDbNull] = (object?)column.AllowDBNull ?? DBNull.Value;
+            row[isKey] = (object?)column.IsKey ?? DBNull.Value;
+            row[isUnique] = (object?)column.IsUnique ?? DBNull.Value;
+            row[isLong] = (object?)column.IsLong ?? DBNull.Value;
+            row[isAliased] = (object?)column.IsAliased ?? DBNull.Value;
+            row[isExpression] = (object?)column.IsExpression ?? DBNull.Value;
+            row[baseColumnName] = (object?)column.BaseColumnName ?? DBNull.Value;
+            row[baseTableName] = (object?)column.BaseTableName ?? DBNull.Value;
+            row[baseSchemaName] = (object?)column.BaseSchemaName ?? DBNull.Value;
+            row[isReadOnly] = (object?)column.IsReadOnly ?? DBNull.Value;
+            row[isAutoIncrement] = (object?)column.IsAutoIncrement ?? DBNull.Value;
+            table.Rows.Add(row);
+        }
+
+        return table;
     }
 }
