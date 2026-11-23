@@ -78,9 +78,12 @@ jobs:
       # still running, writes <app>_<pid>_hang.log and .dmp to TestResults, and kills the test
       # process. 60 s is above the 30 s per-command deadline in the scheduler stress test, which
       # then reports its own failure first, and leaves time to write the dump inside the 2 minutes.
+      # On macOS runners createdump never completes (it printed nothing for 24 minutes), so macOS
+      # uses type None: the hanging test is still named, in the log and in <app>_<pid>_hang.log,
+      # and the process is killed at 60 s instead of the step timing out.
       - name: Test
         timeout-minutes: 2
-        run: dotnet test --project "${{ github.workspace }}/${{ matrix.project }}" --configuration Release --no-build --results-directory "${{ github.workspace }}/TestResults" --hangdump --hangdump-timeout 60s --hangdump-type Mini
+        run: dotnet test --project "${{ github.workspace }}/${{ matrix.project }}" --configuration Release --no-build --results-directory "${{ github.workspace }}/TestResults" --hangdump --hangdump-timeout 60s --hangdump-type ${{ runner.os == 'macOS' && 'None' || 'Mini' }}
       - name: Name the test results artifact
         if: failure()
         shell: bash
