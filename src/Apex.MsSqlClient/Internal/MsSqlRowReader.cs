@@ -593,11 +593,11 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                     switch (token)
                     {
                         case TdsTokenType.ColumnMetadata:
-                            _tdsColumns = await tokens.ReadColumnsAsync().ConfigureAwait(false);
-                            _columns = _tdsColumns
-                              .Select(static column => column.Column)
-                              .ToArray();
-                            _ordinals = SqlColumnOrdinalMapCache.GetOrAdd(_columns);
+                            var shape = await tokens.ReadColumnMetadataAsync(
+                              _connection.ResultShapes).ConfigureAwait(false);
+                            _tdsColumns = shape.Columns;
+                            _columns = shape.SqlColumns;
+                            _ordinals = shape.Ordinals;
                             _currentResultIndex = _resultCount;
                             _hasCurrentResult = true;
                             _resultSetGeneration++;

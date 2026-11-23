@@ -278,19 +278,41 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
     }
 
     // Disposes every connection even when some fail, so one bad connection can't leak the rest
-    // or leave the size count stale; failures are reported after all have been attempted.
+    // or leave the size count stale; failures are reported after all have been attempted. The
+    // connections are disposed concurrently: one whose close is stuck can take up to the
+    // scheduler's close timeout plus its abort grace period, and those waits should not add up.
     private async ValueTask DisposeConnectionsAsync(List<PooledConnection> connections)
     {
         List<Exception>? errors = null;
-        foreach (var pooled in connections)
+        if (connections.Count == 1)
         {
             try
             {
-                await DisposeConnectionAsync(pooled.Connection).ConfigureAwait(false);
+                await DisposeConnectionAsync(connections[0].Connection).ConfigureAwait(false);
             }
             catch (Exception exception)
             {
-                (errors ??= []).Add(exception);
+                errors = [exception];
+            }
+        }
+        else if (connections.Count > 1)
+        {
+            var disposals = new Task[connections.Count];
+            for (var index = 0; index < disposals.Length; index++)
+            {
+                disposals[index] = DisposeConnectionAsync(connections[index].Connection).AsTask();
+            }
+
+            foreach (var disposal in disposals)
+            {
+                try
+                {
+                    await disposal.ConfigureAwait(false);
+                }
+                catch (Exception exception)
+                {
+                    (errors ??= []).Add(exception);
+                }
             }
         }
 

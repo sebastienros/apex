@@ -67,7 +67,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
           options.PipeliningLimit,
           (int)Math.Max(16, Math.Min(4096, (long)options.PipeliningLimit * 4)),
                     IsFatalConnectionError,
-                    _writer.FlushAsync);
+                    _writer.FlushAsync,
+                    abortTransport: socket.Dispose);
         _statementCache = options.CachePreparedStatements && options.PreparedStatementCacheSize > 0
           ? new LruCache<string, string>(
             options.PreparedStatementCacheSize,
@@ -455,13 +456,16 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         ObjectDisposedException.ThrowIf(_disposed, this);
         ThrowIfCopyActive();
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
+        // The extended protocol accepts one statement, so parameterless multi-statement text uses the
+        // simple query protocol, which returns each statement's result (in text format).
         return ValueTask.FromResult<ISqlRowReader>(
           new PgResultReader(
             this,
             sql,
             statementName: null,
             parameters,
-            cancellationToken));
+            cancellationToken,
+            simpleQuery: parameters.Count == 0 && PgSqlText.HasMultipleStatements(sql)));
     }
 
     ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
@@ -621,14 +625,12 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         {
             if (Volatile.Read(ref _copyActive) == 0)
             {
-                await _scheduler.ExecuteAsync(
+                await _scheduler.CloseAsync(
                 async token =>
                 {
                     token.ThrowIfCancellationRequested();
                     await _writer.WriteTerminateAsync(CancellationToken.None).ConfigureAwait(false);
-                },
-                static _ => ValueTask.FromResult(true),
-                barrier: true).ConfigureAwait(false);
+                }).ConfigureAwait(false);
             }
             else
             {
@@ -804,16 +806,24 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             ObjectDisposedException.ThrowIf(_disposed, this);
             ValueTask<SqlRowSet> execution;
             var cachedExecution = false;
+
+            // Static lambdas over a value-type state: the scheduler stores it in the pooled
+            // command, so a query allocates no closure or delegates here.
+            QueryState state = new(this, sql, parameters, cancellationToken);
             if (parameters.Count == 0)
             {
                 execution = _scheduler.ExecuteAsync(
-                  async token =>
+                  state,
+                  static async (state, token) =>
                   {
                       token.ThrowIfCancellationRequested();
-                      ThrowIfCopyActive();
-                      await _writer.WriteQueryAsync(sql, CancellationToken.None, flush: false).ConfigureAwait(false);
+                      state.Connection.ThrowIfCopyActive();
+                      await state.Connection._writer.WriteQueryAsync(
+                        state.Sql,
+                        CancellationToken.None,
+                        flush: false).ConfigureAwait(false);
                   },
-                  _ => ReceiveQueryAsync(cancellationToken),
+                  static (state, _) => state.Connection.ReceiveQueryAsync(state.CancellationToken),
                   barrier: cancellationToken.CanBeCanceled,
                   cancellationToken: cancellationToken,
                   flushBatch: true);
@@ -824,29 +834,34 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             {
                 cachedExecution = true;
                 execution = _scheduler.ExecuteAsync(
-                  _ =>
+                  state,
+                  static (state, _) =>
                   {
-                      ThrowIfCopyActive();
+                      state.Connection.ThrowIfCopyActive();
                       return ValueTask.CompletedTask;
                   },
-                  _ => PrepareCacheAndExecuteAsync(sql, parameters, cancellationToken),
+                  static (state, _) => state.Connection.PrepareCacheAndExecuteAsync(
+                    state.Sql,
+                    state.Parameters,
+                    state.CancellationToken),
                   barrier: true,
                   cancellationToken);
             }
             else
             {
                 execution = _scheduler.ExecuteAsync(
-                  async token =>
+                  state,
+                  static async (state, token) =>
                   {
                       token.ThrowIfCancellationRequested();
-                      ThrowIfCopyActive();
-                      await _writer.WriteExtendedQueryAsync(
-                sql,
-                parameters,
-                CancellationToken.None,
-                flush: false).ConfigureAwait(false);
+                      state.Connection.ThrowIfCopyActive();
+                      await state.Connection._writer.WriteExtendedQueryAsync(
+                        state.Sql,
+                        state.Parameters,
+                        CancellationToken.None,
+                        flush: false).ConfigureAwait(false);
                   },
-                  _ => ReceiveQueryAsync(cancellationToken),
+                  static (state, _) => state.Connection.ReceiveQueryAsync(state.CancellationToken),
                   barrier: cancellationToken.CanBeCanceled,
                   cancellationToken: cancellationToken,
                   flushBatch: true);
@@ -866,12 +881,16 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                 }
 
                 return await _scheduler.ExecuteAsync(
-                  _ =>
+                  new QueryState(this, sql, parameters, cancellationToken),
+                  static (state, _) =>
                   {
-                      ThrowIfCopyActive();
+                      state.Connection.ThrowIfCopyActive();
                       return ValueTask.CompletedTask;
                   },
-                  _ => PrepareCacheAndExecuteAsync(sql, parameters, cancellationToken),
+                  static (state, _) => state.Connection.PrepareCacheAndExecuteAsync(
+                    state.Sql,
+                    state.Parameters,
+                    state.CancellationToken),
                   barrier: true,
                   cancellationToken).ConfigureAwait(false);
             }
@@ -891,6 +910,12 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
               error);
         }
     }
+
+    private readonly record struct QueryState(
+        PgConnection Connection,
+        string Sql,
+        SqlParameters Parameters,
+        CancellationToken CancellationToken);
 
     private async ValueTask<SqlRowSet> ExecuteTypedQueryCoreAsync(
         string sql,
@@ -2280,6 +2305,13 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         PgException { Severity: "FATAL" or "PANIC" } or
         PgException { SqlState: "57P01" or "57P02" or "57P03" or "08006" };
 
+    /// <summary>Returns whether a command tag reports an ADO.NET RecordsAffected count.</summary>
+    internal static bool ReportsRecordsAffected(string commandTag) =>
+        commandTag.StartsWith("INSERT ", StringComparison.Ordinal) ||
+        commandTag.StartsWith("UPDATE ", StringComparison.Ordinal) ||
+        commandTag.StartsWith("DELETE ", StringComparison.Ordinal) ||
+        commandTag.StartsWith("MERGE ", StringComparison.Ordinal);
+
     private static long ParseAffectedRows(string commandTag)
     {
         var tag = commandTag.AsSpan();
@@ -2686,8 +2718,16 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         string? sql,
         string? statementName,
         SqlParameters parameters,
-        CancellationToken cancellationToken) :
-        PgRowReader(connection, sql, statementName, parameters, cancellationToken, preserveResultBoundaries: true),
+        CancellationToken cancellationToken,
+        bool simpleQuery = false) :
+        PgRowReader(
+            connection,
+            sql,
+            statementName,
+            parameters,
+            cancellationToken,
+            preserveResultBoundaries: true,
+            simpleQuery),
         ISqlResultBoundaryReader,
         ISqlRecordsAffectedReader
     {
@@ -2729,7 +2769,8 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             string? statementName,
             SqlParameters parameters,
             CancellationToken cancellationToken,
-            bool preserveResultBoundaries = false)
+            bool preserveResultBoundaries = false,
+            bool simpleQuery = false)
         {
             _connection = connection;
             _results = preserveResultBoundaries ? new SqlResultReaderState() : null;
@@ -2744,7 +2785,11 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
               {
                   token.ThrowIfCancellationRequested();
                   connection.ThrowIfCopyActive();
-                  if (sql is not null)
+                  if (simpleQuery)
+                  {
+                      await connection._writer.WriteQueryAsync(sql!, CancellationToken.None).ConfigureAwait(false);
+                  }
+                  else if (sql is not null)
                   {
                       await connection._writer.WriteExtendedQueryAsync(
                   sql,
@@ -3444,12 +3489,6 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                   .Throw();
             }
         }
-
-        private static bool ReportsRecordsAffected(string commandTag) =>
-            commandTag.StartsWith("INSERT ", StringComparison.Ordinal) ||
-            commandTag.StartsWith("UPDATE ", StringComparison.Ordinal) ||
-            commandTag.StartsWith("DELETE ", StringComparison.Ordinal) ||
-            commandTag.StartsWith("MERGE ", StringComparison.Ordinal);
 
         private void SignalRead(bool result, Exception? error)
         {

@@ -8,6 +8,37 @@ namespace Apex.PgClient;
 
 public sealed record PgConnectOptions : SqlConnectOptions
 {
+    // Keys Apply maps to driver options, used to suggest a fix for a misspelled key.
+    private static readonly string[] s_driverKeys =
+    [
+        "host", "port", "user", "username", "password", "database", "dbname", "sslmode",
+        "sslnegotiation", "channel_binding", "pipelininglimit", "useexperimentallowleveltls",
+        "cachepreparedstatements",
+    ];
+
+    // Server parameters accepted directly as connection-string keys, sent in the startup
+    // message under these canonical names. Any other server parameter goes through
+    // options='-c name=value' or the Properties option, so that a misspelled driver key (or a
+    // secret under a misspelled key) is rejected instead of being sent to the server.
+    private static readonly string[] s_startupParameters =
+    [
+        "application_name", "client_encoding", "options", "search_path", "TimeZone",
+        "DateStyle", "IntervalStyle", "extra_float_digits",
+    ];
+
+    // libpq connection keywords that configure the client, not the server. They are rejected
+    // like any other unknown key, but sending them with options='-c …' would not work either.
+    private static readonly string[] s_libpqClientKeywords =
+    [
+        "hostaddr", "passfile", "connect_timeout", "fallback_application_name", "keepalives",
+        "keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout",
+        "replication", "gssencmode", "requiressl", "sslcompression", "sslcert", "sslkey",
+        "sslkeylogfile", "sslpassword", "sslcertmode", "sslrootcert", "sslcrl", "sslcrldir",
+        "sslsni", "requirepeer", "require_auth", "ssl_min_protocol_version",
+        "ssl_max_protocol_version", "min_protocol_version", "max_protocol_version", "krbsrvname",
+        "gsslib", "gssdelegation", "service", "target_session_attrs", "load_balance_hosts",
+    ];
+
     public PgConnectOptions()
     {
         Port = 5432;
@@ -182,12 +213,88 @@ public sealed record PgConnectOptions : SqlConnectOptions
                     };
                     break;
                 default:
-                    properties[key] = value;
+                    properties[GetStartupParameterName(key)] = value;
                     break;
             }
         }
 
         return options with { Properties = properties };
+    }
+
+    private static string GetStartupParameterName(string key)
+    {
+        foreach (var name in s_startupParameters)
+        {
+            if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return name;
+            }
+        }
+
+        // The message names the key but never its value, which may be a secret.
+        foreach (var keyword in s_libpqClientKeywords)
+        {
+            if (string.Equals(key, keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new FormatException(
+                    $"Unsupported PostgreSQL connection option '{key}': Apex.PgClient does not " +
+                    "read this libpq client option from connection strings. Set the matching " +
+                    "PgConnectOptions property instead.");
+            }
+        }
+
+        var suggestion = FindSuggestion(key);
+        throw new FormatException(
+            $"Unsupported PostgreSQL connection option '{key}'." +
+            (suggestion is null ? string.Empty : $" Did you mean '{suggestion}'?") +
+            " To send another server parameter at startup, use options='-c name=value'.");
+    }
+
+    private static string? FindSuggestion(string key)
+    {
+        if (key.Length < 4)
+        {
+            return null;
+        }
+
+        var lowered = key.ToLowerInvariant();
+        string? best = null;
+        var bestDistance = 3;
+        foreach (var candidate in s_driverKeys.Concat(s_startupParameters))
+        {
+            var distance = EditDistance(lowered, candidate.ToLowerInvariant());
+            if (distance < bestDistance)
+            {
+                best = candidate;
+                bestDistance = distance;
+            }
+        }
+
+        return best;
+    }
+
+    private static int EditDistance(string left, string right)
+    {
+        var previous = new int[right.Length + 1];
+        var current = new int[right.Length + 1];
+        for (var j = 0; j <= right.Length; j++)
+        {
+            previous[j] = j;
+        }
+
+        for (var i = 1; i <= left.Length; i++)
+        {
+            current[0] = i;
+            for (var j = 1; j <= right.Length; j++)
+            {
+                var substitution = previous[j - 1] + (left[i - 1] == right[j - 1] ? 0 : 1);
+                current[j] = Math.Min(substitution, Math.Min(previous[j], current[j - 1]) + 1);
+            }
+
+            (previous, current) = (current, previous);
+        }
+
+        return previous[right.Length];
     }
 
     private static string? GetEnvironment(string name) =>

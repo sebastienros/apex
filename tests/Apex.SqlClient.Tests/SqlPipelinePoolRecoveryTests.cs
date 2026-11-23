@@ -285,6 +285,26 @@ public sealed class SqlPipelinePoolRecoveryTests
     }
 
     [TestMethod]
+    public async Task DisposeDisposesTheConnectionsConcurrently()
+    {
+        ConnectionFactory factory = new(initialConnections: 3);
+        var pool = await factory.CreatePoolAsync();
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        foreach (var connection in factory.Created)
+        {
+            connection.DisposeGate = gate.Task;
+        }
+
+        var dispose = pool.DisposeAsync().AsTask();
+        await Task.WhenAll(factory.Created.Select(static c => c.Disposed.Task)).WaitAsync(Timeout);
+        Assert.IsFalse(dispose.IsCompleted);
+
+        gate.SetResult();
+        await dispose.WaitAsync(Timeout);
+        Assert.IsTrue(factory.Created.All(static c => c.DisposeCount == 1));
+    }
+
+    [TestMethod]
     public async Task DisposeReleasesAConnectionThatArrivesAfterIt()
     {
         ConnectionFactory factory = new(initialConnections: 2) { IgnoreCancellation = true };
@@ -755,12 +775,19 @@ public sealed class SqlPipelinePoolRecoveryTests
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
 
-        public ValueTask DisposeAsync()
+        // When set, disposal completes only once this task does, like a connection still waiting
+        // for work in flight.
+        internal Task? DisposeGate { get; set; }
+
+        public async ValueTask DisposeAsync()
         {
             Kill();
             Interlocked.Increment(ref _disposeCount);
             Disposed.TrySetResult();
-            return ValueTask.CompletedTask;
+            if (DisposeGate is { } gate)
+            {
+                await gate;
+            }
         }
     }
 

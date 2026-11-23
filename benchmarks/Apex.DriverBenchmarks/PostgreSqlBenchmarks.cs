@@ -27,6 +27,7 @@ public class PostgreSqlBenchmarks
     private const string WideRowsSql = "SELECT id, name, amount, created, missing FROM bench_wide";
     private readonly Task<SqlRowSet>[] _pipeline = new Task<SqlRowSet>[PipelineDepth];
     private readonly SqlParameters _pipelineParameters = SqlParameters.Create(42);
+    private readonly CancellationTokenSource _neverCanceled = new();
     private PgConnection _apex = null!;
     private PgDbConnection _ado = null!;
     private System.Data.Common.DbCommand _adoRowsPrepared = null!;
@@ -117,6 +118,15 @@ public class PostgreSqlBenchmarks
     public async Task<int> ApexSimpleQueryAsync()
     {
         SqlRowSet rows = await _apex.QueryAsync("SELECT 1");
+        return rows[0].Get<int>(0);
+    }
+
+    // A caller token that can be cancelled but never is, as an ASP.NET Core request token would be.
+    // Exercises the scheduler's cancellable-command path (registration, send token).
+    [Benchmark]
+    public async Task<int> ApexSimpleQueryWithTokenAsync()
+    {
+        SqlRowSet rows = await _apex.QueryAsync("SELECT 1", _neverCanceled.Token);
         return rows[0].Get<int>(0);
     }
 

@@ -51,6 +51,63 @@ public sealed class ProviderWireTests
         });
 
     [TestMethod]
+    [DataRow("MySql")]
+    [DataRow("SqlServer")]
+    public Task IdenticallyShapedResultsKeepTheirBoundaries(string provider) =>
+        RunAsync(provider, async (wire, _) =>
+        {
+            // Both drivers cache result shapes, so these results share their column metadata.
+            await wire.LoginAsync(fail: false);
+            await wire.ExpectQueryAsync();
+            await wire.WriteResultsAsync([new("value", [1, 2]), new("value", [3]), new("value", [])]);
+            await wire.ExpectQueryAsync();
+            await wire.WriteResultsAsync([new("value", [4]), new("value", [5, 6])]);
+            await wire.ExpectCloseAsync();
+        }, async (connection, token) =>
+        {
+            await connection.OpenAsync(token);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "SELECT value; SELECT value; SELECT value";
+            await using (var reader = await command.ExecuteReaderAsync(token))
+            {
+                Assert.IsTrue(await reader.ReadAsync(token));
+                Assert.AreEqual(1, reader.GetInt32(0));
+
+                // The unread row 2 belongs to the first result and must not leak into the second.
+                Assert.IsTrue(await reader.NextResultAsync(token));
+                Assert.IsTrue(await reader.ReadAsync(token));
+                Assert.AreEqual(3, reader.GetInt32(0));
+                Assert.IsFalse(await reader.ReadAsync(token));
+                Assert.IsTrue(await reader.NextResultAsync(token));
+                Assert.AreEqual("value", reader.GetName(0));
+                Assert.IsFalse(reader.HasRows);
+                Assert.IsFalse(await reader.ReadAsync(token));
+                Assert.IsFalse(await reader.NextResultAsync(token));
+            }
+
+            command.CommandText = "SELECT value; SELECT value";
+            await using (var reader = await command.ExecuteReaderAsync(CommandBehavior.CloseConnection, token))
+            {
+                List<int> first = [];
+                while (await reader.ReadAsync(token))
+                {
+                    first.Add(reader.GetInt32(0));
+                }
+
+                Assert.IsTrue(await reader.NextResultAsync(token));
+                List<int> second = [];
+                while (await reader.ReadAsync(token))
+                {
+                    second.Add(reader.GetInt32(0));
+                }
+
+                CollectionAssert.AreEqual(new[] { 4 }, first);
+                CollectionAssert.AreEqual(new[] { 5, 6 }, second);
+                Assert.IsFalse(await reader.NextResultAsync(token));
+            }
+        });
+
+    [TestMethod]
     [DataRow("PostgreSql")]
     [DataRow("MySql")]
     [DataRow("SqlServer")]
@@ -59,9 +116,12 @@ public sealed class ProviderWireTests
         {
             await wire.LoginAsync(fail: false);
             await wire.ExpectQueryAsync();
-            await wire.WriteResultsAsync(provider == "PostgreSql"
-                ? [new("first", [1, 2])]
-                : [new("first", [1, 2]), new("second", [3])]);
+            await wire.WriteResultsAsync([new("first", [1, 2]), new("second", [3])]);
+            if (wire is PgAdapterWireSession postgres)
+            {
+                // Parameterless multi-statement text needs the simple query protocol.
+                Assert.IsTrue(postgres.SimpleQuery);
+            }
             await wire.ExpectQueryAsync();
             await wire.WriteResultsAsync([new("empty", [])]);
             await wire.ExpectQueryAsync();
@@ -73,7 +133,7 @@ public sealed class ProviderWireTests
         {
             await connection.OpenAsync(token);
             await using var command = connection.CreateCommand();
-            command.CommandText = provider == "PostgreSql" ? "SELECT value" : "SELECT value; SELECT other";
+            command.CommandText = "SELECT value; SELECT other";
             await using (var reader = await command.ExecuteReaderAsync(token))
             {
                 Assert.IsTrue(reader.HasRows);
@@ -83,15 +143,12 @@ public sealed class ProviderWireTests
                 Assert.AreEqual(1, reader.GetInt32(0));
 
                 // NextResult must discard the unread second row, not lose the next result's first row.
-                if (provider != "PostgreSql")
-                {
-                    Assert.IsTrue(await reader.NextResultAsync(token));
-                    Assert.AreEqual("second", reader.GetName(0));
-                    Assert.IsTrue(reader.HasRows);
-                    Assert.IsTrue(await reader.ReadAsync(token));
-                    Assert.AreEqual(3, reader.GetInt32(0));
-                    Assert.IsFalse(await reader.ReadAsync(token));
-                }
+                Assert.IsTrue(await reader.NextResultAsync(token));
+                Assert.AreEqual("second", reader.GetName(0));
+                Assert.IsTrue(reader.HasRows);
+                Assert.IsTrue(await reader.ReadAsync(token));
+                Assert.AreEqual(3, reader.GetInt32(0));
+                Assert.IsFalse(await reader.ReadAsync(token));
                 Assert.IsFalse(await reader.NextResultAsync(token));
             }
 

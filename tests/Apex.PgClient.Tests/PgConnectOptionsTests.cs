@@ -91,12 +91,78 @@ public sealed class PgConnectOptionsTests
     {
         PgConnectOptions options = PgConnectOptions.Parse(
           "host=db.example username=app\\ user password='s\\\\ecret' " +
-          "database='app db' custom_option=enabled");
+          "database='app db' search_path=app");
 
         Assert.AreEqual("app user", options.Username);
         Assert.AreEqual("s\\ecret", options.Password);
         Assert.AreEqual("app db", options.Database);
-        Assert.AreEqual("enabled", options.Properties["custom_option"]);
+        Assert.AreEqual("app", options.Properties["search_path"]);
+    }
+
+    [TestMethod]
+    [DataRow("host=db pasword=hunter2", "pasword")]
+    [DataRow("host=db custom_option=hunter2", "custom_option")]
+    [DataRow("postgresql://app@db/app?sslrootcert=hunter2", "sslrootcert")]
+    [DataRow("postgresql://app@db/app?Passwd=hunter2", "Passwd")]
+    public void RejectsUnknownKeysWithoutRevealingTheirValue(string connectionString, string key)
+    {
+        var exception = Assert.ThrowsExactly<FormatException>(
+          () => PgConnectOptions.Parse(connectionString));
+
+        StringAssert.Contains(exception.Message, $"'{key}'");
+        Assert.IsFalse(exception.Message.Contains("hunter2", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    [DataRow("host=db pasword=x", "password")]
+    [DataRow("host=db sslmod=require", "sslmode")]
+    [DataRow("host=db search-path=x", "search_path")]
+    [DataRow("host=db aplication_name=x", "application_name")]
+    public void SuggestsTheClosestKnownKey(string connectionString, string suggestion)
+    {
+        var exception = Assert.ThrowsExactly<FormatException>(
+          () => PgConnectOptions.Parse(connectionString));
+
+        StringAssert.Contains(exception.Message, $"Did you mean '{suggestion}'?");
+    }
+
+    [TestMethod]
+    [DataRow("host=db sslrootcert=/ca.pem", "sslrootcert")]
+    [DataRow("postgresql://app@db/app?connect_timeout=10", "connect_timeout")]
+    [DataRow("host=db Target_Session_Attrs=read-write", "Target_Session_Attrs")]
+    public void ExplainsUnsupportedLibpqClientOptions(string connectionString, string key)
+    {
+        var exception = Assert.ThrowsExactly<FormatException>(
+          () => PgConnectOptions.Parse(connectionString));
+
+        StringAssert.Contains(exception.Message, $"'{key}'");
+        StringAssert.Contains(exception.Message, "libpq client option");
+        Assert.IsFalse(exception.Message.Contains("-c name=value", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
+    public void SendsKnownStartupParametersUnderTheirCanonicalNames()
+    {
+        PgConnectOptions options = PgConnectOptions.Parse(
+          "host=db APPLICATION_NAME=billing datestyle='ISO, DMY' timezone=UTC " +
+          "Search_Path=app options='-c statement_timeout=5s'");
+
+        Assert.AreEqual("billing", options.Properties["application_name"]);
+        Assert.AreEqual("ISO, DMY", options.Properties["DateStyle"]);
+        Assert.AreEqual("UTC", options.Properties["TimeZone"]);
+        Assert.AreEqual("app", options.Properties["search_path"]);
+        Assert.AreEqual("-c statement_timeout=5s", options.Properties["options"]);
+        Assert.IsFalse(options.Properties.ContainsKey("datestyle"));
+        Assert.IsFalse(options.Properties.ContainsKey("APPLICATION_NAME"));
+    }
+
+    [TestMethod]
+    public void AcceptsOptionsInUriQuery()
+    {
+        PgConnectOptions options = PgConnectOptions.Parse(
+          "postgresql://app@db/app?options=-c%20search_path%3Dapp");
+
+        Assert.AreEqual("-c search_path=app", options.Properties["options"]);
     }
 
     [TestMethod]
