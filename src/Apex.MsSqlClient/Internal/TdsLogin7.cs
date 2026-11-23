@@ -48,7 +48,9 @@ internal static class TdsLogin7
         BinaryPrimitives.WriteUInt32BigEndian(login.AsSpan(4), 0x04000074);
         BinaryPrimitives.WriteInt32LittleEndian(login.AsSpan(8), options.PacketSize);
         BinaryPrimitives.WriteInt32LittleEndian(login.AsSpan(16), Environment.ProcessId);
-        login[24] = 0xC0;
+        // OptionFlags1: fUseDB | fDatabase | fSetLang. fUseDB makes the server send an ENVCHANGE
+        // for USE, which keeps the reported database (db.namespace) current.
+        login[24] = 0xE0;
         login[25] = 0x02;
         login[27] = 0x10;
 
