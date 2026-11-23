@@ -42,7 +42,20 @@ internal sealed class PgWireReader
 
     internal int BufferLength => _buffer?.Length ?? 0;
 
-    public async ValueTask<PgWireMessage> ReadAsync(CancellationToken cancellationToken)
+    public ValueTask<PgWireMessage> ReadAsync(CancellationToken cancellationToken)
+    {
+        // A message that is already received is sliced out without the asynchronous path, which
+        // TryPeek leaves every other case to (a partial or invalid message, a buffer to shrink).
+        if (TryPeek(out var message, out var totalLength))
+        {
+            Consume(totalLength);
+            return new ValueTask<PgWireMessage>(message);
+        }
+
+        return ReadSlowAsync(cancellationToken);
+    }
+
+    private async ValueTask<PgWireMessage> ReadSlowAsync(CancellationToken cancellationToken)
     {
         // The previous message's payload is only valid until this call, so the buffer it points
         // into can be released here.
@@ -86,7 +99,7 @@ internal sealed class PgWireReader
     /// <summary>
     /// Returns the next message without consuming it when it is already received in full, so a
     /// caller can inspect it and only then <see cref="Consume"/> it. The payload is valid until the
-    /// next read. Returns false whenever <see cref="ReadAsync"/> would have more to do than slice
+    /// next read. Returns false whenever <see cref="ReadSlowAsync"/> would have more to do than slice
     /// the buffer (a partial or invalid message, or a grown buffer to shrink).
     /// </summary>
     internal bool TryPeek(out PgWireMessage message, out int totalLength)
@@ -95,7 +108,7 @@ internal sealed class PgWireReader
         totalLength = 0;
         var buffer = _buffer;
         var available = _end - _start;
-        // ReadAsync would first give a grown buffer back to the pool (see ShrinkBuffer), so leave
+        // ReadSlowAsync would first give a grown buffer back to the pool (see ShrinkBuffer), so leave
         // that to it; when too much is buffered to shrink, it reads in place as this does.
         if (buffer is null ||
             available < 5 ||

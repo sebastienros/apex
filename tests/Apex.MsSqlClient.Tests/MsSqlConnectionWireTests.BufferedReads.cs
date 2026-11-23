@@ -24,6 +24,8 @@ public sealed partial class MsSqlConnectionWireTests
 
         Assert.IsTrue(await reader.ReadAsync());
         Assert.AreEqual(1, reader.GetInt32(0));
+        // The server task ends once it has written the whole response.
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
         for (var value = 2; value <= rowCount; value++)
         {
             var read = reader.ReadAsync();
@@ -170,6 +172,8 @@ public sealed partial class MsSqlConnectionWireTests
             default,
             default);
         var results = (ISqlResultBoundaryReader)reader;
+        // The server task ends once it has written the whole response.
+        await server.WaitAsync(TimeSpan.FromSeconds(5));
 
         foreach (var start in new[] { 1, 101 })
         {
@@ -201,12 +205,18 @@ public sealed partial class MsSqlConnectionWireTests
         using TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
         var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        var server = RunTwoQueryServerAsync(listener, BuildIntResult(Sequence(1, rowCount)), BuildIntResult(7));
+        TaskCompletionSource firstWritten = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = RunTwoQueryServerAsync(
+            listener,
+            BuildIntResult(Sequence(1, rowCount)),
+            BuildIntResult(7),
+            firstWritten);
         await using var connection = await MsSqlClient.ConnectAsync(TestOptions(port));
         await using var reader = await connection.ExecuteReaderAsync("SELECT value");
         var queued = connection.QueryAsync("SELECT 7 AS value").AsTask();
 
         Assert.IsTrue(await reader.ReadAsync());
+        await firstWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
         for (var value = 2; value <= rowCount; value++)
         {
             Assert.IsTrue(await reader.ReadAsync());
@@ -226,7 +236,8 @@ public sealed partial class MsSqlConnectionWireTests
     private static async Task RunTwoQueryServerAsync(
         TcpListener listener,
         byte[] first,
-        byte[] second)
+        byte[] second,
+        TaskCompletionSource firstWritten)
     {
         using var client = await listener.AcceptTcpClientAsync();
         await using var stream = client.GetStream();
@@ -238,6 +249,7 @@ public sealed partial class MsSqlConnectionWireTests
             var query = await reader.ReadMessageAsync(default);
             Assert.AreEqual(TdsMessageType.SqlBatch, query.Type);
             await writer.WriteMessageAsync(TdsMessageType.TabularResult, response, default);
+            firstWritten.TrySetResult();
         }
     }
 

@@ -63,7 +63,21 @@ internal sealed class MySqlPacketReader
     {
     }
 
-    internal async ValueTask<MySqlPacket> ReadAsync(CancellationToken cancellationToken)
+    internal ValueTask<MySqlPacket> ReadAsync(CancellationToken cancellationToken)
+    {
+        // A single frame that is already received is sliced out without the asynchronous path,
+        // which TryPeek leaves every other case to (a partial frame, a split packet, a frame larger
+        // than the buffer).
+        if (TryPeek(out var packet, out var totalLength))
+        {
+            Consume(totalLength);
+            return new ValueTask<MySqlPacket>(packet);
+        }
+
+        return ReadSlowAsync(cancellationToken);
+    }
+
+    private async ValueTask<MySqlPacket> ReadSlowAsync(CancellationToken cancellationToken)
     {
         var first = await ReadFrameAsync(cancellationToken).ConfigureAwait(false);
         if (first.Length < MySqlProtocol.MaximumFramePayloadLength)
@@ -134,7 +148,7 @@ internal sealed class MySqlPacketReader
     /// <summary>
     /// Returns the next packet without consuming it when it is a single frame already received in
     /// full, so a caller can inspect it and only then <see cref="Consume"/> it. The payload is valid
-    /// until the next read. Returns false whenever <see cref="ReadAsync"/> would have more to do
+    /// until the next read. Returns false whenever <see cref="ReadSlowAsync"/> would have more to do
     /// than slice the buffer (a partial frame, or one that starts a split packet).
     /// </summary>
     internal bool TryPeek(out MySqlPacket packet, out int totalLength)

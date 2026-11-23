@@ -12,6 +12,7 @@ public sealed partial class MySqlConnectionWireTests
     {
         const int rowCount = 200;
         await using var harness = await ServerHarness.StartAsync();
+        TaskCompletionSource written = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Task server = Task.Run(async () =>
         {
             await using var connection = await harness.AcceptAsync();
@@ -27,6 +28,7 @@ public sealed partial class MySqlConnectionWireTests
 
             await connection.WriteFinalOkAsync();
             await connection.FlushBatchAsync();
+            written.SetResult();
             await connection.ExpectCommandAsync(MySqlCommand.Quit);
         });
 
@@ -35,6 +37,7 @@ public sealed partial class MySqlConnectionWireTests
         {
             Assert.IsTrue(await reader.ReadAsync());
             Assert.AreEqual(1, reader.GetInt32(0));
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5));
             for (var value = 2; value <= rowCount; value++)
             {
                 var read = reader.ReadAsync();
@@ -58,6 +61,7 @@ public sealed partial class MySqlConnectionWireTests
     {
         const int rowCount = 30;
         await using var harness = await ServerHarness.StartAsync();
+        TaskCompletionSource written = new(TaskCreationOptions.RunContinuationsAsynchronously);
         Task server = Task.Run(async () =>
         {
             await using var connection = await harness.AcceptAsync();
@@ -78,12 +82,14 @@ public sealed partial class MySqlConnectionWireTests
 
             await connection.WriteErrorAsync(1054, "42S22", "Unknown column 'bad'");
             await connection.FlushBatchAsync();
+            written.SetResult();
             await connection.ExpectCommandAsync(MySqlCommand.Quit);
         });
 
         await using var client = await MySqlClient.ConnectAsync(harness.CreateOptions());
         var reader = await client.ExecuteResultReaderAsync("SELECT n; SELECT n; SELECT bad", default, default);
         var results = (ISqlResultBoundaryReader)reader;
+        await written.Task.WaitAsync(TimeSpan.FromSeconds(5));
         foreach (var start in new[] { 1, 101 })
         {
             Assert.IsTrue(await results.InitializeAsync());

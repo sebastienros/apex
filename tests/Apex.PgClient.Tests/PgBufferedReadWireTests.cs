@@ -19,12 +19,14 @@ public sealed class PgBufferedReadWireTests
         const int rowCount = 200;
         using TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
-        var server = RunServerAsync(listener, [Result(1, rowCount)], chunkSize: int.MaxValue);
+        TaskCompletionSource written = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = RunServerAsync(listener, [Result(1, rowCount)], chunkSize: int.MaxValue, written);
         await using var connection = await PgClient.ConnectAsync(CreateOptions(listener));
         await using (var reader = await connection.ExecuteReaderAsync("SELECT value"))
         {
             Assert.IsTrue(await reader.ReadAsync());
             Assert.AreEqual(1, reader.GetInt32(0));
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5));
             for (var value = 2; value <= rowCount; value++)
             {
                 var read = reader.ReadAsync();
@@ -118,6 +120,46 @@ public sealed class PgBufferedReadWireTests
     }
 
     [TestMethod]
+    public async Task InvalidReceivedRowIsLeftForThePumpToReport()
+    {
+        // The second DataRow has two values for a one-column result. The inline read must leave it
+        // unread, so the pump reads it again and fails the read, instead of skipping it.
+        var invalid = Join(
+            Message((byte)'1', []),
+            Message((byte)'2', []),
+            Message((byte)'T', Join(Int16(1), Column("value", 23, 4))),
+            Message((byte)'D', DataRow("1")),
+            Message((byte)'D', DataRow("2", "3")),
+            Message((byte)'D', DataRow("4")),
+            Message((byte)'C', CString("SELECT 3")),
+            Message((byte)'Z', [(byte)'I']));
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        TaskCompletionSource written = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = RunServerAsync(listener, [invalid], chunkSize: int.MaxValue, written);
+        var connection = await PgClient.ConnectAsync(CreateOptions(listener));
+        try
+        {
+            var reader = await connection.ExecuteReaderAsync("SELECT value");
+            Assert.IsTrue(await reader.ReadAsync());
+            Assert.AreEqual(1, reader.GetInt32(0));
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() => reader.ReadAsync().AsTask());
+            StringAssert.Contains(exception.Message, "2 values");
+            await Assert.ThrowsAsync<InvalidDataException>(() => reader.DisposeAsync().AsTask());
+        }
+        finally
+        {
+            await connection.DisposeAsync();
+        }
+
+        // The connection may close without Terminate after a protocol failure; only the client's
+        // behavior is under test.
+        await Task.WhenAny(server, Task.Delay(TimeSpan.FromSeconds(5)));
+    }
+
+    [TestMethod]
     public async Task DisposingBetweenReceivedRowsDrainsAndReusesTheConnection()
     {
         using TcpListener listener = new(IPAddress.Loopback, 0);
@@ -162,11 +204,13 @@ public sealed class PgBufferedReadWireTests
             Message((byte)'Z', [(byte)'I']));
         using TcpListener listener = new(IPAddress.Loopback, 0);
         listener.Start();
-        var server = RunServerAsync(listener, [batch], chunkSize: int.MaxValue);
+        TaskCompletionSource written = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var server = RunServerAsync(listener, [batch], chunkSize: int.MaxValue, written);
         await using var connection = await PgClient.ConnectAsync(CreateOptions(listener));
         await using (var reader = await connection.ExecuteResultReaderAsync("SELECT value", default, default))
         {
             var results = (ISqlResultBoundaryReader)reader;
+            await written.Task.WaitAsync(TimeSpan.FromSeconds(5));
             foreach (var start in new[] { 1, 101 })
             {
                 Assert.IsTrue(await results.InitializeAsync());
@@ -198,8 +242,13 @@ public sealed class PgBufferedReadWireTests
     };
 
     // Serves one extended-protocol query per response, writing each response in chunks of
-    // chunkSize bytes, then expects Terminate.
-    private static async Task RunServerAsync(TcpListener listener, byte[][] responses, int chunkSize)
+    // chunkSize bytes, then expects Terminate. firstWritten completes once the first response is
+    // written in full.
+    private static async Task RunServerAsync(
+        TcpListener listener,
+        byte[][] responses,
+        int chunkSize,
+        TaskCompletionSource? firstWritten = null)
     {
         using var client = await listener.AcceptTcpClientAsync();
         await using var stream = client.GetStream();
@@ -218,6 +267,8 @@ public sealed class PgBufferedReadWireTests
                 await stream.WriteAsync(response.AsMemory(position, Math.Min(chunkSize, response.Length - position)));
                 await stream.FlushAsync();
             }
+
+            firstWritten?.TrySetResult();
         }
 
         var (terminate, _) = await ReadMessageAsync(stream);
