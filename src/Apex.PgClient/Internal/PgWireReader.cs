@@ -25,8 +25,8 @@ internal sealed class PgWireReader
     private const int MaximumMessageLength = 64 * 1024 * 1024;
     private const int InitialBufferLength = 32 * 1024;
 
-    // A buffer grown past this for one large message goes back to the pool once the data still
-    // buffered fits in a fresh initial-size buffer, so a connection does not hold up to 64 MB forever.
+    // A buffer grown past this for one large message goes back to the pool at the next read, once
+    // the data still buffered fits in half of it, so a connection does not hold up to 64 MB forever.
     internal const int MaximumRetainedBufferLength = 1024 * 1024;
     private readonly Stream _stream;
     private byte[]? _buffer;
@@ -45,9 +45,9 @@ internal sealed class PgWireReader
     {
         // The previous message's payload is only valid until this call, so the buffer it points
         // into can be released here.
-        if (_buffer is { Length: > MaximumRetainedBufferLength })
+        if (_buffer is { Length: > MaximumRetainedBufferLength } grown)
         {
-            ShrinkBuffer();
+            ShrinkBuffer(grown);
         }
 
         await EnsureBufferedAsync(5, cancellationToken).ConfigureAwait(false);
@@ -93,16 +93,17 @@ internal sealed class PgWireReader
         return ValueTask.CompletedTask;
     }
 
-    private void ShrinkBuffer()
+    private void ShrinkBuffer(byte[] buffer)
     {
-        var buffer = _buffer!;
+        // Bytes already read ahead (for example a stream of small rows) move to a buffer just
+        // large enough for them, so a busy stream does not pin the grown buffer either.
         var available = _end - _start;
-        if (available > InitialBufferLength)
+        if (available > MaximumRetainedBufferLength / 2)
         {
             return;
         }
 
-        var shrunk = ArrayPool<byte>.Shared.Rent(InitialBufferLength);
+        var shrunk = ArrayPool<byte>.Shared.Rent(Math.Max(InitialBufferLength, available));
         buffer.AsSpan(_start, available).CopyTo(shrunk);
         if (Interlocked.CompareExchange(ref _buffer, shrunk, buffer) != buffer)
         {

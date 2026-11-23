@@ -1175,6 +1175,61 @@ public sealed class PgConnectionIntegrationTests
     }
 
     [TestMethod]
+    public async Task PipelinedUnpreparedCommandsSurviveAParameterThatFailsToEncode()
+    {
+        var container = _container ??
+          throw new InvalidOperationException("The PostgreSQL container is not running.");
+        PgConnectOptions options = new()
+        {
+            Host = container.Hostname,
+            Port = container.GetMappedPublicPort(5432),
+            Database = "db",
+            Username = "user",
+            Password = "pass",
+            PipeliningLimit = 16,
+        };
+
+        await using var connection = await PgClient.ConnectAsync(options);
+
+        // Unprepared commands share one flush per scheduler batch. A command whose parameter fails
+        // to encode must roll back only its own bytes, so its neighbours (written but not yet
+        // flushed) still reach the server and complete.
+        for (var round = 0; round < 20; round++)
+        {
+            var queries = new Task<SqlRowSet>[16];
+            for (var i = 0; i < queries.Length; i++)
+            {
+                queries[i] = i switch
+                {
+                    5 => connection.QueryAsync(
+                        "SELECT $1::int4, $2::text",
+                        SqlParameters.Create(i, SqlValue.From(new UnformattableValue()))).AsTask(),
+                    _ when i % 2 == 0 => connection.QueryAsync($"SELECT {i}::int4").AsTask(),
+                    _ => connection.QueryAsync("SELECT $1::int4", SqlParameters.Create(i)).AsTask(),
+                };
+            }
+
+            for (var i = 0; i < queries.Length; i++)
+            {
+                if (i == 5)
+                {
+                    await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => queries[i]);
+                    continue;
+                }
+
+                Assert.AreEqual(i, (await queries[i])[0].Get<int>(0));
+            }
+        }
+
+        Assert.AreEqual(7, (await connection.QueryAsync("SELECT 7::int4"))[0].Get<int>(0));
+    }
+
+    private sealed class UnformattableValue
+    {
+        public override string ToString() => throw new InvalidOperationException("cannot format");
+    }
+
+    [TestMethod]
     public async Task ReceivesNotificationsAndReconnectsSubscriptions()
     {
         var container = _container ??

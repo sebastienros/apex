@@ -160,6 +160,36 @@ public sealed class PgWireReaderTests
         await reader.CompleteAsync();
     }
 
+    [TestMethod]
+    public async Task ReleasesGrownBufferWhileManySmallMessagesAreBuffered()
+    {
+        // More than the initial 32 KB of small messages is read ahead with the large one, so the
+        // replacement buffer must hold them all and keep them in order.
+        var large = CreateFrame((byte)'D', new byte[4 * 1024 * 1024]);
+        List<byte> data = [.. large];
+        const int SmallCount = 10_000;
+        for (var i = 0; i < SmallCount; i++)
+        {
+            data.AddRange(CreateFrame((byte)'D', BitConverter.GetBytes(i)));
+        }
+
+        using MemoryStream stream = new([.. data]);
+        PgWireReader reader = new(stream);
+        using (var message = await reader.ReadAsync(CancellationToken.None))
+        {
+            Assert.AreEqual(4 * 1024 * 1024, message.PayloadLength);
+        }
+
+        for (var i = 0; i < SmallCount; i++)
+        {
+            using var message = await reader.ReadAsync(CancellationToken.None);
+            Assert.AreEqual(i, BitConverter.ToInt32(message.Payload.Span));
+            Assert.IsLessThanOrEqualTo(PgWireReader.MaximumRetainedBufferLength, reader.BufferLength);
+        }
+
+        await reader.CompleteAsync();
+    }
+
     private static byte[] CreateFrame(byte type, ReadOnlySpan<byte> payload)
     {
         var frame = GC.AllocateUninitializedArray<byte>(payload.Length + 5);
