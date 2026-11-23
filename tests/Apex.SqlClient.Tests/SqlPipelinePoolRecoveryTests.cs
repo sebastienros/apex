@@ -342,9 +342,13 @@ public sealed class SqlPipelinePoolRecoveryTests
         var (first, second) = (factory.Created[0], factory.Created[1]);
         await using var statement = await pool.PrepareAsync("SELECT value");
 
+        // Hold the reconnects until the first command has seen the dead connection: a reconnect
+        // that fails first would (correctly) turn that command's error into the reconnect error.
+        factory.Block();
         first.Kill();
         second.Kill();
         await Assert.ThrowsExactlyAsync<IOException>(() => pool.QueryAsync("SELECT 1").AsTask());
+        factory.Release();
 
         // A third attempt means one slot already failed once and recorded why.
         await factory.WaitForAttemptsAsync(3);
