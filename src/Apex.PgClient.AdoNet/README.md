@@ -28,7 +28,18 @@ the quote doubled to include it) as well as the libpq keyword strings and
 translated by this adapter; the native parser keeps libpq semantics.
 
 `PgDbDataSource` uses `PgPool` and accepts optional `SqlPoolOptions`. Reader result
-boundaries use the native protocol implementation. Server failures become
+boundaries use the native protocol implementation.
+
+Command text may hold several statements separated by semicolons when the command has
+no parameters. Such text is sent with the simple query protocol, which returns each
+statement's result in text format. The adapter only counts statements to choose the
+protocol; it never splits or rewrites SQL. The limits are PostgreSQL's:
+
+- Parameters (`$1`, ...) require a single statement, since the extended protocol and
+  `PrepareAsync` accept only one.
+- Statements in one simple query run in one implicit transaction unless the text
+  contains its own transaction control. A failure stops the remaining statements.
+- The statement count assumes `standard_conforming_strings` is on (the default). Server failures become
 `ApexDbException : DbException`, retaining `PgException` as the inner exception and
 exposing its SQLSTATE and transient classification.
 
