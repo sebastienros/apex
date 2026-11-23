@@ -54,6 +54,16 @@ jobs:
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
+      - name: Restore
+        timeout-minutes: 5
+        run: dotnet restore "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj"
+      - name: Build
+        timeout-minutes: 5
+        run: dotnet build "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release --no-restore
+      # The three service tests run sequentially, and each retries for up to ~96 s
+      # (DatabaseServiceTests.ConnectWithRetryAsync: 90 s deadline, 5 s attempts, 1 s delay).
+      # Six minutes covers all three services being down, so every failure is reported with the
+      # test's own TimeoutException and last error instead of a bare step kill.
       - name: Test database services
-        timeout-minutes: 1
-        run: dotnet test --project "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release
+        timeout-minutes: 6
+        run: dotnet test --project "${{ github.workspace }}/tests/Apex.DatabaseIntegrationTests/Apex.DatabaseIntegrationTests.csproj" --configuration Release --no-build
