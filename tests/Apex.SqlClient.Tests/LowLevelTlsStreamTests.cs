@@ -106,6 +106,84 @@ public sealed class LowLevelTlsStreamTests
         await server.WaitAsync(TimeSpan.FromSeconds(10));
     }
 
+    // A writer blocked because the peer stopped reading holds the write lock that close_notify
+    // needs. Disposal used to wait for it forever; it now aborts the transport at its deadline.
+    [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task DisposeAbortsAWriteThatNeverCompletes(bool asynchronous)
+    {
+        using var certificate = CreateCertificate();
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using CancellationTokenSource serverStop = new(TimeSpan.FromSeconds(30));
+        var server = RunServerAsync(listener, certificate, serverStop.Token);
+
+        using TcpClient client = new();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        GatedStream gated = new(client.GetStream()) { AbortHeldWriteOnDispose = true };
+        var tls = await LowLevelTlsStream.AuthenticateAsClientAsync(
+            gated,
+            new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                RemoteCertificateValidationCallback = static (_, _, _, _) => true,
+            },
+            CancellationToken.None);
+        tls.ShutdownTimeout = TimeSpan.FromMilliseconds(200);
+
+        gated.HoldNextWrite();
+        var write = tls.WriteAsync("ping"u8.ToArray()).AsTask();
+        await gated.WriteStarted.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var dispose = asynchronous
+          ? tls.DisposeAsync().AsTask()
+          : Task.Run(tls.Dispose);
+        await dispose.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.IsGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(150), elapsed.Elapsed);
+        Assert.IsTrue(gated.IsDisposed);
+        await Assert.ThrowsExactlyAsync<IOException>(() => write);
+        Assert.IsTrue(tls.ResourcesReleased);
+
+        client.Close();
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [TestMethod]
+    public async Task DisposeAfterTheTransportWasAbortedDoesNotThrow()
+    {
+        using var certificate = CreateCertificate();
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using CancellationTokenSource serverStop = new(TimeSpan.FromSeconds(30));
+        var server = RunServerAsync(listener, certificate, serverStop.Token);
+
+        using TcpClient client = new();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var tls = await LowLevelTlsStream.AuthenticateAsClientAsync(
+            client.GetStream(),
+            new SslClientAuthenticationOptions
+            {
+                TargetHost = "localhost",
+                EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                RemoteCertificateValidationCallback = static (_, _, _, _) => true,
+            },
+            CancellationToken.None);
+
+        // What the command scheduler does to a connection stuck in I/O, before the driver
+        // disposes its stream: close_notify can no longer be sent.
+        client.Client.Dispose();
+        await tls.DisposeAsync();
+
+        Assert.IsTrue(tls.ResourcesReleased);
+        await server.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
     [TestMethod]
     public async Task DisposeWithoutPendingOperationsReleasesResources()
     {
@@ -208,6 +286,9 @@ public sealed class LowLevelTlsStreamTests
 
         public bool IsDisposed { get; private set; }
 
+        // Like a socket: disposing fails a write that is still pending.
+        public bool AbortHeldWriteOnDispose { get; init; }
+
         public override bool CanRead => true;
 
         public override bool CanSeek => false;
@@ -230,6 +311,14 @@ public sealed class LowLevelTlsStreamTests
         public void HoldNextWrite() => _holdNextWrite = true;
 
         public void CompleteHeldWrite() => _heldWrite!.SetResult();
+
+        private void AbortHeldWrite()
+        {
+            if (AbortHeldWriteOnDispose)
+            {
+                _heldWrite?.TrySetException(new IOException("The transport was closed."));
+            }
+        }
 
         public override ValueTask<int> ReadAsync(
             Memory<byte> buffer,
@@ -284,6 +373,7 @@ public sealed class LowLevelTlsStreamTests
             if (disposing)
             {
                 IsDisposed = true;
+                AbortHeldWrite();
                 inner.Dispose();
             }
 
@@ -293,6 +383,7 @@ public sealed class LowLevelTlsStreamTests
         public override async ValueTask DisposeAsync()
         {
             IsDisposed = true;
+            AbortHeldWrite();
             await inner.DisposeAsync();
             GC.SuppressFinalize(this);
         }
