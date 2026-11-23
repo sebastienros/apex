@@ -26,10 +26,24 @@ public class MySqlBenchmarks
       "SELECT 'repeated-value' FROM seq";
     private const long ExpectedSum = 100L * 101L / 2L;
 
+    // A wide 10,000-row result read from a temp table, so per-row client cost is a large share
+    // of the time rather than the server's per-query latency.
+    private static readonly string[] WideRowsSetup =
+    [
+      "SET SESSION cte_max_recursion_depth = 10001",
+      "CREATE TEMPORARY TABLE bench_wide (id INT NOT NULL, name VARCHAR(32) NOT NULL, " +
+      "amount DOUBLE NOT NULL, created DATETIME(6) NOT NULL, missing INT NULL)",
+      "INSERT INTO bench_wide " +
+      "WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM seq WHERE n < 10000) " +
+      "SELECT n, CONCAT('name-', n), n / 3, '2026-01-01 00:00:00', NULL FROM seq",
+    ];
+    private const string WideRowsSql = "SELECT id, name, amount, created, missing FROM bench_wide";
+
     private ApexMySql.MySqlConnection _apex = null!;
     private ISqlPreparedStatement _apexPrepared = null!;
     private MySqlConnection _connector = null!;
     private MySqlCommand _connectorPrepared = null!;
+    private MySqlCommand _connectorWideRows = null!;
 
     [GlobalSetup]
     public async Task SetupAsync()
@@ -58,6 +72,14 @@ public class MySqlBenchmarks
         _connectorPrepared = new MySqlCommand("SELECT CAST(@value AS SIGNED)", _connector);
         _connectorPrepared.Parameters.Add(new MySqlParameter("@value", 42));
         await _connectorPrepared.PrepareAsync();
+        foreach (var statement in WideRowsSetup)
+        {
+            await _apex.ExecuteAsync(statement);
+            await using MySqlCommand connectorSetup = new(statement, _connector);
+            await connectorSetup.ExecuteNonQueryAsync();
+        }
+
+        _connectorWideRows = new MySqlCommand(WideRowsSql, _connector);
     }
 
     [GlobalCleanup]
@@ -65,6 +87,7 @@ public class MySqlBenchmarks
     {
         await _apexPrepared.DisposeAsync();
         await _connectorPrepared.DisposeAsync();
+        await _connectorWideRows.DisposeAsync();
         await _apex.DisposeAsync();
         await _connector.DisposeAsync();
     }
@@ -177,5 +200,31 @@ public class MySqlBenchmarks
         }
 
         return count;
+    }
+
+    [Benchmark]
+    public async Task<long> MySqlConnectorReader10kWideRowsAsync()
+    {
+        await using var reader = await _connectorWideRows.ExecuteReaderAsync();
+        long sum = 0;
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0) + reader.GetString(1).Length;
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public async Task<long> ApexBorrowedReader10kWideRowsAsync()
+    {
+        await using var reader = await _apex.ExecuteReaderAsync(WideRowsSql);
+        long sum = 0;
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0) + reader.GetString(1).Length;
+        }
+
+        return sum;
     }
 }
