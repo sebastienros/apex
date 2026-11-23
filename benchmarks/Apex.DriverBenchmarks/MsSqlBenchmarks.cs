@@ -32,6 +32,23 @@ public class MsSqlBenchmarks
     private const string MixedSql =
       "SELECT CAST(@P1 AS int), CAST(@P2 AS nvarchar(32)), CAST(@P3 AS decimal(18,4)), @P4";
 
+    // A wide result read from a temp table, so client-side TDS parsing is a large share of
+    // the time rather than the server's per-query latency.
+    private const string WideRowsSetup =
+      """
+    SELECT TOP (10000)
+      CAST(ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS int) AS id,
+      CAST(N'name-' + CAST(ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS nvarchar(16)) AS nvarchar(32)) AS name,
+      CAST(ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS float) / 3 AS amount,
+      CAST('2026-01-01T00:00:00' AS datetime2(7)) AS created,
+      CAST(NULL AS int) AS missing
+    INTO {0}
+    FROM sys.all_columns a CROSS JOIN sys.all_columns b
+    """;
+    private const string ApexWideRowsSql = "SELECT id, name, amount, created, missing FROM #apex_wide";
+    private const string MicrosoftWideRowsSql =
+      "SELECT id, name, amount, created, missing FROM #microsoft_wide";
+
     private MsSqlConnection _apex = null!;
     private ISqlPreparedStatement _apexPrepared = null!;
     private ISqlPreparedStatement _apexBatch = null!;
@@ -44,6 +61,7 @@ public class MsSqlBenchmarks
     private SqlCommand _microsoftRows = null!;
     private SqlCommand _microsoftStrings = null!;
     private SqlCommand _microsoftBatch = null!;
+    private SqlCommand _microsoftWideRows = null!;
 
     [GlobalSetup]
     public async Task SetupAsync()
@@ -70,6 +88,10 @@ public class MsSqlBenchmarks
         _apexBatchParameters = Enumerable.Range(1, BatchDepth)
           .Select(static value => SqlParameters.Create(value))
           .ToArray();
+        await _apex.ExecuteAsync(string.Format(
+          CultureInfo.InvariantCulture,
+          WideRowsSetup,
+          "#apex_wide"));
 
         _microsoft = new SqlConnection(connectionString);
         await _microsoft.OpenAsync();
@@ -96,6 +118,14 @@ public class MsSqlBenchmarks
         _microsoftBatch.Parameters.Add(
           new SqlParameter("@value", System.Data.SqlDbType.Int));
         await _microsoftBatch.PrepareAsync();
+        await using (SqlCommand setup = new(
+          string.Format(CultureInfo.InvariantCulture, WideRowsSetup, "#microsoft_wide"),
+          _microsoft))
+        {
+            _ = await setup.ExecuteNonQueryAsync();
+        }
+
+        _microsoftWideRows = new SqlCommand(MicrosoftWideRowsSql, _microsoft);
     }
 
     [GlobalCleanup]
@@ -110,6 +140,7 @@ public class MsSqlBenchmarks
         await _microsoftRows.DisposeAsync();
         await _microsoftStrings.DisposeAsync();
         await _microsoftBatch.DisposeAsync();
+        await _microsoftWideRows.DisposeAsync();
         await _microsoft.DisposeAsync();
     }
 
@@ -233,6 +264,45 @@ public class MsSqlBenchmarks
         }
 
         return count;
+    }
+
+    [Benchmark]
+    public async Task<long> MicrosoftReader10kWideRowsAsync()
+    {
+        await using var reader = await _microsoftWideRows.ExecuteReaderAsync();
+        long sum = 0;
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0) + reader.GetString(1).Length;
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public async Task<long> ApexBorrowedReader10kWideRowsAsync()
+    {
+        await using var reader = await _apex.ExecuteReaderAsync(ApexWideRowsSql);
+        long sum = 0;
+        while (await reader.ReadAsync())
+        {
+            sum += reader.GetInt32(0) + reader.GetString(1).Length;
+        }
+
+        return sum;
+    }
+
+    [Benchmark]
+    public async Task<long> ApexBuffered10kWideRowsAsync()
+    {
+        var rows = await _apex.QueryAsync(ApexWideRowsSql);
+        long sum = 0;
+        foreach (var row in rows)
+        {
+            sum += row.GetInt32(0) + row.GetString(1).Length;
+        }
+
+        return sum;
     }
 
     private static async Task<int> ReadMicrosoftRowsAsync(SqlCommand command)
