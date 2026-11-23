@@ -10,7 +10,7 @@ class Apex.MsSqlClient.MsSqlDbCommand : Apex.SqlClient.ApexDbCommand, System.Com
 class Apex.MsSqlClient.MsSqlDbConnection : Apex.SqlClient.ApexDbConnection, System.ComponentModel.IComponent, System.Data.IDbConnection, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor()
   Constructor: Void .ctor(System.String)
-class Apex.MsSqlClient.MsSqlDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+class Apex.MsSqlClient.MsSqlDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.Common.IDbColumnSchemaGenerator, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
 class Apex.MsSqlClient.MsSqlDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(System.String)

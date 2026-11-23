@@ -1,6 +1,7 @@
 using System.Data;
 using System.Data.Common;
 using Apex.SqlClient;
+using Tds = Apex.MsSqlClient.Internal.TdsDataType;
 
 namespace Apex.MsSqlClient;
 
@@ -101,6 +102,12 @@ public sealed class MsSqlDbDataReader : ApexDbDataReader
         CancellationTokenSource operationCancellation,
         Func<ValueTask> onClose)
         : base(reader, behavior, connection, operationCancellation, onClose) { }
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal override Type GetColumnFieldType(SqlColumn column) => MsSqlAdoColumnTypes.GetFieldType(column);
+    internal override string GetColumnDataTypeName(SqlColumn column) => MsSqlAdoColumnTypes.GetDataTypeName(column);
 }
 public sealed class MsSqlDbTransaction : ApexDbTransaction
 {
@@ -187,4 +194,86 @@ internal static class MsSqlAdoErrors
         exception is MsSqlException sqlServer
             ? new ApexDbException(sqlServer, errorCode: sqlServer.Number)
             : new ApexDbException(exception);
+}
+
+/// <summary>Maps SQL Server (TDS) result columns to the CLR type and type name of the native object decoder.</summary>
+internal static class MsSqlAdoColumnTypes
+{
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal static Type GetFieldType(SqlColumn column) => column.TypeId switch
+    {
+        Tds.Int1 => typeof(byte),
+        Tds.Bit or Tds.BitN => typeof(bool),
+        Tds.Int2 => typeof(short),
+        Tds.Int4 => typeof(int),
+        Tds.Int8 => typeof(long),
+        Tds.IntN => column.TypeSize switch
+        {
+            1 => typeof(byte),
+            2 => typeof(short),
+            4 => typeof(int),
+            8 => typeof(long),
+            _ => typeof(object),
+        },
+        Tds.Float4 => typeof(float),
+        Tds.Float8 => typeof(double),
+        Tds.FloatN => column.TypeSize == 4 ? typeof(float) : typeof(double),
+        Tds.Decimal or Tds.Numeric or Tds.DecimalN or Tds.NumericN or Tds.Money or Tds.Money4 or Tds.MoneyN => typeof(decimal),
+        Tds.Guid => typeof(System.Guid),
+        Tds.Date => typeof(DateOnly),
+        Tds.Time => typeof(TimeOnly),
+        Tds.DateTime2 or Tds.DateTime or Tds.DateTime4 or Tds.DateTimeN => typeof(System.DateTime),
+        Tds.DateTimeOffset => typeof(System.DateTimeOffset),
+        Tds.NVarChar or Tds.NChar or Tds.NText or Tds.Xml or Tds.Json or Tds.Char or Tds.VarChar or Tds.BigChar or Tds.BigVarChar or Tds.Text =>
+            typeof(string),
+        Tds.Binary or Tds.VarBinary or Tds.BigBinary or Tds.BigVarBinary or Tds.Image or Tds.Udt => typeof(byte[]),
+        _ => typeof(object),
+    };
+
+    internal static string GetDataTypeName(SqlColumn column) => column.TypeId switch
+    {
+        Tds.Int1 => "tinyint",
+        Tds.Bit or Tds.BitN => "bit",
+        Tds.Int2 => "smallint",
+        Tds.Int4 => "int",
+        Tds.Int8 => "bigint",
+        Tds.IntN => column.TypeSize switch
+        {
+            1 => "tinyint",
+            2 => "smallint",
+            8 => "bigint",
+            _ => "int",
+        },
+        Tds.Float4 => "real",
+        Tds.Float8 => "float",
+        Tds.FloatN => column.TypeSize == 4 ? "real" : "float",
+        Tds.Decimal or Tds.DecimalN => "decimal",
+        Tds.Numeric or Tds.NumericN => "numeric",
+        Tds.Money => "money",
+        Tds.Money4 => "smallmoney",
+        Tds.MoneyN => column.TypeSize == 4 ? "smallmoney" : "money",
+        Tds.Guid => "uniqueidentifier",
+        Tds.Date => "date",
+        Tds.Time => "time",
+        Tds.DateTime2 => "datetime2",
+        Tds.DateTimeOffset => "datetimeoffset",
+        Tds.DateTime => "datetime",
+        Tds.DateTime4 => "smalldatetime",
+        Tds.DateTimeN => column.TypeSize == 4 ? "smalldatetime" : "datetime",
+        Tds.NVarChar => "nvarchar",
+        Tds.NChar => "nchar",
+        Tds.NText => "ntext",
+        Tds.Xml => "xml",
+        Tds.Json => "json",
+        Tds.Char or Tds.BigChar => "char",
+        Tds.VarChar or Tds.BigVarChar => "varchar",
+        Tds.Text => "text",
+        Tds.Binary or Tds.BigBinary => "binary",
+        Tds.VarBinary or Tds.BigVarBinary => "varbinary",
+        Tds.Image => "image",
+        Tds.Udt => "udt",
+        _ => column.TypeId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+    };
 }

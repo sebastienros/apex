@@ -59,9 +59,12 @@ public sealed class ProviderWireTests
         {
             await wire.LoginAsync(fail: false);
             await wire.ExpectQueryAsync();
-            await wire.WriteResultsAsync(provider == "PostgreSql"
-                ? [new("first", [1, 2])]
-                : [new("first", [1, 2]), new("second", [3])]);
+            await wire.WriteResultsAsync([new("first", [1, 2]), new("second", [3])]);
+            if (wire is PgAdapterWireSession postgres)
+            {
+                // Parameterless multi-statement text needs the simple query protocol.
+                Assert.IsTrue(postgres.SimpleQuery);
+            }
             await wire.ExpectQueryAsync();
             await wire.WriteResultsAsync([new("empty", [])]);
             await wire.ExpectQueryAsync();
@@ -73,7 +76,7 @@ public sealed class ProviderWireTests
         {
             await connection.OpenAsync(token);
             await using var command = connection.CreateCommand();
-            command.CommandText = provider == "PostgreSql" ? "SELECT value" : "SELECT value; SELECT other";
+            command.CommandText = "SELECT value; SELECT other";
             await using (var reader = await command.ExecuteReaderAsync(token))
             {
                 Assert.IsTrue(reader.HasRows);
@@ -83,15 +86,12 @@ public sealed class ProviderWireTests
                 Assert.AreEqual(1, reader.GetInt32(0));
 
                 // NextResult must discard the unread second row, not lose the next result's first row.
-                if (provider != "PostgreSql")
-                {
-                    Assert.IsTrue(await reader.NextResultAsync(token));
-                    Assert.AreEqual("second", reader.GetName(0));
-                    Assert.IsTrue(reader.HasRows);
-                    Assert.IsTrue(await reader.ReadAsync(token));
-                    Assert.AreEqual(3, reader.GetInt32(0));
-                    Assert.IsFalse(await reader.ReadAsync(token));
-                }
+                Assert.IsTrue(await reader.NextResultAsync(token));
+                Assert.AreEqual("second", reader.GetName(0));
+                Assert.IsTrue(reader.HasRows);
+                Assert.IsTrue(await reader.ReadAsync(token));
+                Assert.AreEqual(3, reader.GetInt32(0));
+                Assert.IsFalse(await reader.ReadAsync(token));
                 Assert.IsFalse(await reader.NextResultAsync(token));
             }
 

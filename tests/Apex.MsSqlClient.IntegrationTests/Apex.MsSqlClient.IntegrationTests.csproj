@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Apex.MsSqlClient\Apex.MsSqlClient.csproj" />
+    <ProjectReference Include="..\..\src\Apex.MsSqlClient.AdoNet\Apex.MsSqlClient.AdoNet.csproj" />
     <ProjectReference Include="..\Apex.SqlClient.SpecificationTests\Apex.SqlClient.SpecificationTests.csproj" />
   </ItemGroup>
 

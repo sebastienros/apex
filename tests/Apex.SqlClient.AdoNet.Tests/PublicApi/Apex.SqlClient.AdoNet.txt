@@ -81,7 +81,7 @@ class Apex.SqlClient.ApexDbConnection : System.Data.Common.DbConnection, System.
   Property: System.String DataSource
   Property: System.String Database
   Property: System.String ServerVersion
-class Apex.SqlClient.ApexDbDataReader : System.Data.Common.DbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+class Apex.SqlClient.ApexDbDataReader : System.Data.Common.DbDataReader, System.Collections.IEnumerable, System.Data.Common.IDbColumnSchemaGenerator, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
   Method: Boolean GetBoolean(Int32)
   Method: Boolean IsDBNull(Int32)
@@ -104,6 +104,8 @@ class Apex.SqlClient.ApexDbDataReader : System.Data.Common.DbDataReader, System.
   Method: Int64 GetInt64(Int32)
   Method: Single GetFloat(Int32)
   Method: System.Collections.IEnumerator GetEnumerator()
+  Method: System.Collections.ObjectModel.ReadOnlyCollection`1[System.Data.Common.DbColumn] GetColumnSchema()
+  Method: System.Data.DataTable GetSchemaTable()
   Method: System.DateTime GetDateTime(Int32)
   Method: System.Decimal GetDecimal(Int32)
   Method: System.Guid GetGuid(Int32)

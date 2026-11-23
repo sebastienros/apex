@@ -10,7 +10,7 @@ class Apex.MySqlClient.MySqlDbCommand : Apex.SqlClient.ApexDbCommand, System.Com
 class Apex.MySqlClient.MySqlDbConnection : Apex.SqlClient.ApexDbConnection, System.ComponentModel.IComponent, System.Data.IDbConnection, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor()
   Constructor: Void .ctor(System.String)
-class Apex.MySqlClient.MySqlDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
+class Apex.MySqlClient.MySqlDbDataReader : Apex.SqlClient.ApexDbDataReader, System.Collections.IEnumerable, System.Data.Common.IDbColumnSchemaGenerator, System.Data.IDataReader, System.Data.IDataRecord, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(Apex.SqlClient.ISqlRowReader, System.Data.CommandBehavior, System.Data.Common.DbConnection)
 class Apex.MySqlClient.MySqlDbDataSource : System.Data.Common.DbDataSource, System.IAsyncDisposable, System.IDisposable
   Constructor: Void .ctor(System.String)

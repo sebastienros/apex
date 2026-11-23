@@ -101,6 +101,12 @@ public sealed class PgDbDataReader : ApexDbDataReader
         CancellationTokenSource operationCancellation,
         Func<ValueTask> onClose)
         : base(reader, behavior, connection, operationCancellation, onClose) { }
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties)]
+    internal override Type GetColumnFieldType(SqlColumn column) => PgAdoColumnTypes.GetFieldType(column);
+    internal override string GetColumnDataTypeName(SqlColumn column) => PgAdoColumnTypes.GetDataTypeName(column);
 }
 
 /// <summary>ADO.NET transaction adapter for PostgreSQL.</summary>
@@ -181,9 +187,191 @@ public sealed class PgDbDataSource : DbDataSource
     }
 }
 
-internal static class PgAdoReaderFactory
+internal sealed class PgAdoReaderFactory : ApexResultReaderFactory
 {
-    internal static readonly IApexAdoReaderFactory Instance = new ApexResultReaderFactory("PostgreSQL");
+    internal static readonly PgAdoReaderFactory Instance = new();
+
+    private PgAdoReaderFactory() : base("PostgreSQL") { }
+
+    // A single statement that cannot return rows has the same outcome through the native ExecuteAsync
+    // as through a drained reader, without allocating result-boundary state. Multi-statement text keeps
+    // the reader so RecordsAffected sums every statement, and so does RETURNING (even a false match in a
+    // literal or identifier), whose rows ExecuteAsync would buffer instead of streaming past.
+    public override bool CanExecuteNonQuery(string sql) =>
+        IsNonQueryKeyword(Internal.PgSqlText.GetLeadingKeyword(sql)) &&
+        !sql.Contains("RETURNING", StringComparison.OrdinalIgnoreCase) &&
+        Internal.PgSqlText.IsSingleStatement(sql);
+
+    // The reader's RecordsAffected rule: only INSERT, UPDATE, DELETE and MERGE report a count.
+    public override int GetRecordsAffected(SqlCommandResult result) =>
+        PgConnection.ReportsRecordsAffected(result.CommandTag) ? checked((int)result.AffectedRows) : -1;
+
+    private static bool IsNonQueryKeyword(ReadOnlySpan<char> keyword) =>
+        keyword.Equals("INSERT", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("UPDATE", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("DELETE", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("MERGE", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("CREATE", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("ALTER", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("DROP", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("TRUNCATE", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("GRANT", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("REVOKE", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("COMMENT", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("SET", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("RESET", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("LOCK", StringComparison.OrdinalIgnoreCase) ||
+        keyword.Equals("DO", StringComparison.OrdinalIgnoreCase);
+}
+
+/// <summary>Maps PostgreSQL result columns to the CLR type and type name of the native object decoder.</summary>
+internal static class PgAdoColumnTypes
+{
+    private const System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes ReflectedMembers =
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicFields |
+        System.Diagnostics.CodeAnalysis.DynamicallyAccessedMemberTypes.PublicProperties;
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(ReflectedMembers)]
+    internal static Type GetFieldType(SqlColumn column)
+    {
+        var type = GetBuiltInType(column.TypeId);
+        if (type is not null) return type;
+        var element = Internal.PgTextCodec.GetArrayElementType(column.TypeId);
+        if (element != 0 && GetArrayType(element) is { } arrayType) return arrayType;
+
+        // Other types decode as their text in text format; in binary format they need a registered codec.
+        return column.Format == SqlDataFormat.Text ? typeof(string) : typeof(object);
+    }
+
+    internal static string GetDataTypeName(SqlColumn column)
+    {
+        var element = Internal.PgTextCodec.GetArrayElementType(column.TypeId);
+        if (element != 0 && GetTypeName(element) is { } elementName) return elementName + "[]";
+        return GetTypeName(column.TypeId) ??
+            column.TypeId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(ReflectedMembers)]
+    private static Type? GetBuiltInType(uint typeId) => typeId switch
+    {
+        16 => typeof(bool),
+        17 => typeof(byte[]),
+        18 or 19 or 25 or 1042 or 1043 => typeof(string),
+        20 => typeof(long),
+        21 => typeof(short),
+        23 => typeof(int),
+        700 => typeof(float),
+        701 => typeof(double),
+        790 => typeof(PgMoney),
+        1082 => typeof(DateOnly),
+        1083 => typeof(TimeOnly),
+        1114 => typeof(DateTime),
+        1184 => typeof(DateTimeOffset),
+        1186 => typeof(PgInterval),
+        1266 => typeof(PgTimeWithTimeZone),
+        1700 => typeof(PgNumeric),
+        2950 => typeof(Guid),
+        600 => typeof(PgPoint),
+        601 => typeof(PgLineSegment),
+        602 => typeof(PgPath),
+        603 => typeof(PgBox),
+        604 => typeof(PgPolygon),
+        628 => typeof(PgLine),
+        650 => typeof(PgCidr),
+        718 => typeof(PgCircle),
+        869 => typeof(PgInet),
+        774 or 829 => typeof(System.Net.NetworkInformation.PhysicalAddress),
+        1560 or 1562 => typeof(System.Collections.BitArray),
+        114 or 3802 => typeof(System.Text.Json.JsonElement),
+        _ => null,
+    };
+
+    [return: System.Diagnostics.CodeAnalysis.DynamicallyAccessedMembers(ReflectedMembers)]
+    private static Type? GetArrayType(uint elementTypeId) => elementTypeId switch
+    {
+        16 => typeof(bool?[]),
+        17 => typeof(byte[][]),
+        18 or 19 or 25 or 1043 => typeof(string[]),
+        20 => typeof(long?[]),
+        21 => typeof(short?[]),
+        23 => typeof(int?[]),
+        700 => typeof(float?[]),
+        701 => typeof(double?[]),
+        790 => typeof(PgMoney?[]),
+        1082 => typeof(DateOnly?[]),
+        1083 => typeof(TimeOnly?[]),
+        1114 => typeof(DateTime?[]),
+        1184 => typeof(DateTimeOffset?[]),
+        1186 => typeof(PgInterval?[]),
+        1266 => typeof(PgTimeWithTimeZone?[]),
+        1700 => typeof(PgNumeric?[]),
+        2950 => typeof(Guid?[]),
+        600 => typeof(PgPoint?[]),
+        601 => typeof(PgLineSegment?[]),
+        602 => typeof(PgPath[]),
+        603 => typeof(PgBox?[]),
+        604 => typeof(PgPolygon[]),
+        628 => typeof(PgLine?[]),
+        650 => typeof(PgCidr?[]),
+        718 => typeof(PgCircle?[]),
+        869 => typeof(PgInet?[]),
+        774 or 829 => typeof(System.Net.NetworkInformation.PhysicalAddress[]),
+        1560 or 1562 => typeof(System.Collections.BitArray[]),
+        114 or 3802 => typeof(System.Text.Json.JsonElement?[]),
+        _ => null,
+    };
+
+    private static string? GetTypeName(uint typeId) => typeId switch
+    {
+        16 => "boolean",
+        17 => "bytea",
+        18 => "\"char\"",
+        19 => "name",
+        20 => "bigint",
+        21 => "smallint",
+        23 => "integer",
+        25 => "text",
+        26 => "oid",
+        114 => "json",
+        142 => "xml",
+        600 => "point",
+        601 => "lseg",
+        602 => "path",
+        603 => "box",
+        604 => "polygon",
+        628 => "line",
+        650 => "cidr",
+        700 => "real",
+        701 => "double precision",
+        705 => "unknown",
+        718 => "circle",
+        774 => "macaddr8",
+        790 => "money",
+        829 => "macaddr",
+        869 => "inet",
+        1042 => "character",
+        1043 => "character varying",
+        1082 => "date",
+        1083 => "time without time zone",
+        1114 => "timestamp without time zone",
+        1184 => "timestamp with time zone",
+        1186 => "interval",
+        1266 => "time with time zone",
+        1560 => "bit",
+        1562 => "bit varying",
+        1700 => "numeric",
+        2950 => "uuid",
+        3614 => "tsvector",
+        3615 => "tsquery",
+        3802 => "jsonb",
+        3904 => "int4range",
+        3906 => "numrange",
+        3908 => "tsrange",
+        3910 => "tstzrange",
+        3912 => "daterange",
+        3926 => "int8range",
+        _ => null,
+    };
 }
 
 internal static class PgAdoErrors
