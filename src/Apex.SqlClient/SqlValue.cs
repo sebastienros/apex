@@ -126,13 +126,9 @@ public readonly struct SqlValue
     {
         var start = _payload.RangeStart;
         var length = _payload.RangeLength;
-        return _reference switch
-        {
-            byte[] array => new ReadOnlyMemory<byte>(array, start, length),
-            MemoryManager<byte> manager => manager.Memory.Slice(start, length),
-            ReadOnlyMemory<byte> boxed => boxed,
-            _ => ReadOnlyMemory<byte>.Empty,
-        };
+        return _reference is MemoryManager<byte> manager
+          ? manager.Memory.Slice(start, length)
+          : new ReadOnlyMemory<byte>((byte[]?)_reference, start, length);
     }
 
     public static implicit operator SqlValue(bool value) =>
@@ -167,7 +163,8 @@ public readonly struct SqlValue
       value is null ? Null : new(SqlValueKind.Bytes, reference: value);
 
     // Stores the memory's owner (a MemoryManager or an array) in the reference field and its
-    // range in the payload, so wrapping memory does not box it.
+    // range in the payload, so wrapping memory does not box it. Byte memory is always backed
+    // by one or the other; TryGetArray also succeeds, with an empty array, for empty memory.
     public static implicit operator SqlValue(ReadOnlyMemory<byte> value)
     {
         if (MemoryMarshal.TryGetMemoryManager(
@@ -182,15 +179,11 @@ public readonly struct SqlValue
               manager);
         }
 
-        if (MemoryMarshal.TryGetArray(value, out var segment))
-        {
-            return new(
-              SqlValueKind.ReadOnlyMemory,
-              SqlValuePayload.FromRange(segment.Offset, segment.Count),
-              segment.Array ?? Array.Empty<byte>());
-        }
-
-        return new(SqlValueKind.ReadOnlyMemory, reference: value);
+        _ = MemoryMarshal.TryGetArray(value, out var segment);
+        return new(
+          SqlValueKind.ReadOnlyMemory,
+          SqlValuePayload.FromRange(segment.Offset, segment.Count),
+          segment.Array);
     }
 
     public static implicit operator SqlValue(Guid value) =>

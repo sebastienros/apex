@@ -4,9 +4,9 @@ namespace Apex.SqlClient;
 /// <remarks>
 /// The pool validates these values when it is created and throws
 /// <see cref="ArgumentOutOfRangeException"/> for any value outside its documented range.
-/// Finite timer durations are limited to 4,294,967,294 milliseconds (about 49.7 days),
-/// the longest that <see cref="CancellationTokenSource.CancelAfter(TimeSpan)"/> and
-/// <see cref="TimeProvider.CreateTimer"/> accept.
+/// Finite <see cref="AcquisitionTimeout"/> and <see cref="CleanerPeriod"/> values must be
+/// between 1 millisecond and 4,294,967,294 milliseconds (about 49.7 days): the timers
+/// behind them work in whole milliseconds and accept nothing longer.
 /// </remarks>
 public sealed record SqlPoolOptions
 {
@@ -20,29 +20,31 @@ public sealed record SqlPoolOptions
     public int MaximumWaitQueueSize { get; init; } = -1;
 
     /// <summary>
-    /// How long a caller waits for a free connection. Must be greater than zero and at most
-    /// about 49.7 days, or <see cref="Timeout.InfiniteTimeSpan"/> to wait
+    /// How long a caller waits for a free connection. Must be between 1 ms and about
+    /// 49.7 days, or <see cref="Timeout.InfiniteTimeSpan"/> to wait
     /// until a connection is free or the caller cancels.
     /// </summary>
     public TimeSpan AcquisitionTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// How long an idle connection is kept before it is closed. Must be greater than zero, or
+    /// How long an idle connection is kept. An expired connection is closed by the next
+    /// cleanup or when it would next be acquired. Must be greater than zero, or
     /// <see cref="Timeout.InfiniteTimeSpan"/> to keep idle connections indefinitely.
     /// </summary>
     public TimeSpan IdleTimeout { get; init; } = Timeout.InfiniteTimeSpan;
 
     /// <summary>
-    /// How long a connection is used, counted from when it was opened, before it is closed
-    /// on its next return or cleanup. Must be greater than zero, or
+    /// How long a connection is used, counted from when it was opened. An expired connection
+    /// is closed when it is next returned or acquired, or by the next cleanup. Must be greater
+    /// than zero, or
     /// <see cref="Timeout.InfiniteTimeSpan"/> for no limit.
     /// </summary>
     public TimeSpan MaximumLifetime { get; init; } = Timeout.InfiniteTimeSpan;
 
     /// <summary>
     /// How often idle connections are checked against <see cref="IdleTimeout"/> and
-    /// <see cref="MaximumLifetime"/>. Must be greater than zero and at most
-    /// about 49.7 days; <see cref="TimeSpan.Zero"/> or
+    /// <see cref="MaximumLifetime"/>. Must be between 1 ms and about
+    /// 49.7 days; <see cref="TimeSpan.Zero"/> or
     /// <see cref="Timeout.InfiniteTimeSpan"/> disables periodic cleanup, and expired
     /// connections are then closed only when they are next acquired or returned.
     /// </summary>

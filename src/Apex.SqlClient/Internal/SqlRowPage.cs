@@ -91,7 +91,8 @@ internal sealed class SqlRowPageBuilder
 
 // Buffers a whole result. Rows are accumulated in pooled scratch buffers; each completed
 // page is copied once into an exact-size array that its rows alias for their lifetime, so
-// a small result allocates only what it keeps. Build fills the final row array directly.
+// a small result allocates only what it keeps. Each page keeps its own pooled range array
+// (at most MaximumPageRows entries) until Build fills the final row array directly.
 internal sealed class SqlRowPageCollectionBuilder
 {
     private const int MaximumPageRows = 256;
@@ -105,9 +106,8 @@ internal sealed class SqlRowPageCollectionBuilder
     private readonly ISqlRowDecoder _decoder;
     private byte[]? _scratch;
     private SqlRowPageBuilder.RowRange[]? _ranges;
-    private SqlRowPage? _firstPage;
-    private int _firstPageEnd;
-    private List<(SqlRowPage Page, int EndRow)>? _additionalPages;
+    private CompletedPage _firstPage;
+    private List<CompletedPage>? _additionalPages;
     private SqlRow[]? _built;
     private int _count;
     private int _pageStart;
@@ -128,8 +128,8 @@ internal sealed class SqlRowPageCollectionBuilder
         if (row.Length >= DedicatedPageBytes)
         {
             FlushPage();
-            EnsureRanges()[_count++] = new SqlRowPageBuilder.RowRange(0, row.Length);
-            AddPage(new SqlRowPage(row.ToArray(), _decoder));
+            AddPage(new CompletedPage(new SqlRowPage(row.ToArray(), _decoder), null, 1));
+            _count++;
             _pageStart = _count;
             return;
         }
@@ -144,7 +144,8 @@ internal sealed class SqlRowPageCollectionBuilder
         var scratch = EnsureScratch(row.Length);
         row.CopyTo(scratch.AsSpan(_pageLength));
         var ranges = EnsureRanges();
-        ranges[_count++] = new SqlRowPageBuilder.RowRange(_pageLength, row.Length);
+        ranges[_count - _pageStart] = new SqlRowPageBuilder.RowRange(_pageLength, row.Length);
+        _count++;
         _pageLength += row.Length;
     }
 
@@ -163,39 +164,44 @@ internal sealed class SqlRowPageCollectionBuilder
         }
 
         var ordinals = SqlColumnOrdinalMapCache.GetOrAdd(columns);
-        var ranges = _ranges!;
         var rows = new SqlRow[_count];
-        var index = FillPage(rows, columns, ordinals, ranges, _firstPage!, 0, _firstPageEnd);
+        var index = FillPage(rows, columns, ordinals, _firstPage, 0);
         if (_additionalPages is not null)
         {
-            foreach (var (page, endRow) in _additionalPages)
+            foreach (var page in _additionalPages)
             {
-                index = FillPage(rows, columns, ordinals, ranges, page, index, endRow);
+                index = FillPage(rows, columns, ordinals, page, index);
             }
         }
 
         ReturnScratch();
         _additionalPages = null;
-        _firstPage = null;
+        _firstPage = default;
         return _built = rows;
     }
 
+    // Creates the page's rows and returns its range array to the pool.
     private static int FillPage(
         SqlRow[] rows,
         IReadOnlyList<SqlColumn> columns,
         SqlColumnOrdinalMap ordinals,
-        SqlRowPageBuilder.RowRange[] ranges,
-        SqlRowPage page,
-        int start,
-        int end)
+        CompletedPage page,
+        int index)
     {
-        for (var i = start; i < end; i++)
+        if (page.Ranges is not { } ranges)
         {
-            var range = ranges[i];
-            rows[i] = new SqlRow(columns, ordinals, page, range.Offset, range.Length);
+            rows[index] = new SqlRow(columns, ordinals, page.Page, 0, page.Page.Data.Length);
+            return index + 1;
         }
 
-        return end;
+        for (var i = 0; i < page.RowCount; i++)
+        {
+            var range = ranges[i];
+            rows[index + i] = new SqlRow(columns, ordinals, page.Page, range.Offset, range.Length);
+        }
+
+        ArrayPool<SqlRowPageBuilder.RowRange>.Shared.Return(ranges);
+        return index + page.RowCount;
     }
 
     private void FlushPage()
@@ -205,22 +211,24 @@ internal sealed class SqlRowPageCollectionBuilder
             return;
         }
 
-        AddPage(new SqlRowPage(_scratch.AsSpan(0, _pageLength).ToArray(), _decoder));
+        AddPage(new CompletedPage(
+            new SqlRowPage(_scratch.AsSpan(0, _pageLength).ToArray(), _decoder),
+            _ranges,
+            _count - _pageStart));
+        _ranges = null;
         _pageStart = _count;
         _pageLength = 0;
     }
 
-    // Registers a completed page that ends at the current row count.
-    private void AddPage(SqlRowPage page)
+    private void AddPage(CompletedPage page)
     {
-        if (_firstPage is null)
+        if (_firstPage.Page is null)
         {
             _firstPage = page;
-            _firstPageEnd = _count;
         }
         else
         {
-            (_additionalPages ??= []).Add((page, _count));
+            (_additionalPages ??= []).Add(page);
         }
     }
 
@@ -244,19 +252,21 @@ internal sealed class SqlRowPageCollectionBuilder
         return _scratch = grown;
     }
 
+    // Ranges for the current page only, indexed from the page's first row.
     private SqlRowPageBuilder.RowRange[] EnsureRanges()
     {
+        var pageCount = _count - _pageStart;
         var ranges = _ranges;
-        if (ranges is not null && _count < ranges.Length)
+        if (ranges is not null && pageCount < ranges.Length)
         {
             return ranges;
         }
 
         var grown = ArrayPool<SqlRowPageBuilder.RowRange>.Shared.Rent(
-          ranges is null ? InitialRowCapacity : checked(ranges.Length * 2));
+          ranges is null ? InitialRowCapacity : Math.Min(MaximumPageRows, ranges.Length * 2));
         if (ranges is not null)
         {
-            ranges.AsSpan(0, _count).CopyTo(grown);
+            ranges.AsSpan(0, pageCount).CopyTo(grown);
             ArrayPool<SqlRowPageBuilder.RowRange>.Shared.Return(ranges);
         }
 
@@ -277,6 +287,12 @@ internal sealed class SqlRowPageCollectionBuilder
             ArrayPool<SqlRowPageBuilder.RowRange>.Shared.Return(ranges);
         }
     }
+
+    // A completed page; Ranges is null for a dedicated page holding one whole row.
+    private readonly record struct CompletedPage(
+        SqlRowPage Page,
+        SqlRowPageBuilder.RowRange[]? Ranges,
+        int RowCount);
 }
 
 internal sealed class SqlRowPageBatch

@@ -12,7 +12,10 @@ internal delegate bool SqlConnectionReusePredicate<in TConnection>(TConnection c
 internal sealed class SqlConnectionPool<TConnection> : ISqlPool
     where TConnection : class, ISqlConnection
 {
-    // The longest finite duration CancellationTokenSource.CancelAfter and timers accept.
+    // The finite range CancellationTokenSource.CancelAfter and timers honor: they truncate
+    // to whole milliseconds (a sub-millisecond period would make the cleaner fire once) and
+    // reject anything above uint.MaxValue - 1 milliseconds.
+    private static readonly TimeSpan MinimumTimerDuration = TimeSpan.FromMilliseconds(1);
     private static readonly TimeSpan MaximumTimerDuration =
         TimeSpan.FromMilliseconds(uint.MaxValue - 1);
     private readonly object _idleGate = new();
@@ -48,9 +51,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             options.IdleTimeout != Timeout.InfiniteTimeSpan ||
             options.MaximumLifetime != Timeout.InfiniteTimeSpan;
         _slots = new SemaphoreSlim(options.MaximumSize, options.MaximumSize);
-        if (options.CleanerPeriod > TimeSpan.Zero &&
-            (options.IdleTimeout != Timeout.InfiniteTimeSpan ||
-             options.MaximumLifetime != Timeout.InfiniteTimeSpan))
+        if (options.CleanerPeriod > TimeSpan.Zero && _tracksExpiration)
         {
             _cleaner = _timeProvider.CreateTimer(
                 static state => ((SqlConnectionPool<TConnection>)state!).ScheduleClean(),
@@ -62,12 +63,17 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
 
     public int Size => Volatile.Read(ref _size);
 
-    public async ValueTask<ISqlConnection> GetConnectionAsync(
+    public ValueTask<ISqlConnection> GetConnectionAsync(
         CancellationToken cancellationToken = default)
     {
-        var pooled = await RentAsync(cancellationToken).ConfigureAwait(false);
-        return new Lease(this, pooled);
+        var rent = RentAsync(cancellationToken);
+        return rent.IsCompletedSuccessfully
+            ? new ValueTask<ISqlConnection>(new Lease(this, rent.Result))
+            : AwaitLeaseAsync(rent);
     }
+
+    private async ValueTask<ISqlConnection> AwaitLeaseAsync(ValueTask<PooledConnection> rent) =>
+        new Lease(this, await rent.ConfigureAwait(false));
 
     // Takes a slot and a physical connection. The caller owns both until it passes the
     // connection to ReturnAsync, which releases the slot.
@@ -314,18 +320,32 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             throw new SqlClientException("The SQL pool wait queue is full.");
         }
 
+        CancellationTokenSource? timeout = null;
         try
         {
-            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken,
-                _disposeCancellation.Token);
-            if (_options.AcquisitionTimeout != Timeout.InfiniteTimeSpan)
+            CancellationToken waitToken;
+            if (_options.AcquisitionTimeout == Timeout.InfiniteTimeSpan &&
+                !cancellationToken.CanBeCanceled)
             {
-                timeout.CancelAfter(_options.AcquisitionTimeout);
+                // Only disposal can end the wait, so there is nothing to link.
+                waitToken = _disposeCancellation.Token;
             }
+            else
+            {
+                timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    _disposeCancellation.Token);
+                if (_options.AcquisitionTimeout != Timeout.InfiniteTimeSpan)
+                {
+                    timeout.CancelAfter(_options.AcquisitionTimeout);
+                }
+
+                waitToken = timeout.Token;
+            }
+
             try
             {
-                await _slots.WaitAsync(timeout.Token).ConfigureAwait(false);
+                await _slots.WaitAsync(waitToken).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_disposeCancellation.IsCancellationRequested)
             {
@@ -339,6 +359,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         }
         finally
         {
+            timeout?.Dispose();
             Interlocked.Decrement(ref _waiters);
         }
     }
@@ -450,13 +471,12 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         }
 
         if (options.AcquisitionTimeout != Timeout.InfiniteTimeSpan &&
-            (options.AcquisitionTimeout <= TimeSpan.Zero ||
-             options.AcquisitionTimeout > MaximumTimerDuration))
+            !IsTimerDuration(options.AcquisitionTimeout))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(options),
                 options.AcquisitionTimeout,
-                "AcquisitionTimeout must be greater than zero and at most 4,294,967,294 ms, " +
+                "AcquisitionTimeout must be between 1 ms and 4,294,967,294 ms, " +
                 "or Timeout.InfiniteTimeSpan.");
         }
 
@@ -467,16 +487,19 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
             nameof(SqlPoolOptions.MaximumLifetime));
 
         if (options.CleanerPeriod != Timeout.InfiniteTimeSpan &&
-            (options.CleanerPeriod < TimeSpan.Zero ||
-             options.CleanerPeriod > MaximumTimerDuration))
+            options.CleanerPeriod != TimeSpan.Zero &&
+            !IsTimerDuration(options.CleanerPeriod))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(options),
                 options.CleanerPeriod,
                 "CleanerPeriod must be zero or Timeout.InfiniteTimeSpan to disable cleanup, " +
-                "or greater than zero and at most 4,294,967,294 ms.");
+                "or between 1 ms and 4,294,967,294 ms.");
         }
     }
+
+    private static bool IsTimerDuration(TimeSpan value) =>
+        value >= MinimumTimerDuration && value <= MaximumTimerDuration;
 
     private static void ValidateExpiration(SqlPoolOptions options, TimeSpan value, string name)
     {

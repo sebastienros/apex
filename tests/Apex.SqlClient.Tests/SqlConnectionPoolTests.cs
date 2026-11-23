@@ -214,6 +214,8 @@ public sealed class SqlConnectionPoolTests
         [new SqlPoolOptions { MaximumLifetime = TimeSpan.FromSeconds(-5) }],
         [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromSeconds(-5) }],
         [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromMilliseconds(uint.MaxValue) }],
+        [new SqlPoolOptions { AcquisitionTimeout = TimeSpan.FromTicks(5_000) }],
+        [new SqlPoolOptions { CleanerPeriod = TimeSpan.FromTicks(5_000) }],
     ];
 
     [TestMethod]
