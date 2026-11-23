@@ -14,32 +14,86 @@ jobs:
     env:
       DOTNET_NOLOGO: true
       DOTNET_CLI_TELEMETRY_OPTOUT: 1
-      TEST_PROJECTS: >-
-        tests/Apex.SqlClient.Tests/Apex.SqlClient.Tests.csproj
-        tests/Apex.SqlClient.AdoNet.Tests/Apex.SqlClient.AdoNet.Tests.csproj
-        tests/Apex.PgClient.Tests/Apex.PgClient.Tests.csproj
-        tests/Apex.MySqlClient.Tests/Apex.MySqlClient.Tests.csproj
-        tests/Apex.MsSqlClient.Tests/Apex.MsSqlClient.Tests.csproj
-        tests/Apex.SqlClient.AzureIdentity.Tests/Apex.SqlClient.AzureIdentity.Tests.csproj
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-dotnet@v6
         with:
           global-json-file: global.json
+      # The driver test projects are listed once, in .github/test-projects.json, which pr.yml also reads.
+      - name: Read the test project list
+        run: echo "TEST_PROJECTS=$(jq -r 'join(" ")' .github/test-projects.json)" >> "$GITHUB_ENV"
+      # Same key as the PR Checks matrix: this job restores every test project, so the cache it
+      # saves on main is complete for the Linux PR jobs and the database job.
+      - name: Cache NuGet packages
+        uses: actions/cache@v6
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
       # Restore and build once, then run the already-built tests. Each step has its own
       # budget: compiling the drivers for both TFMs dominates the job, while the tests
       # themselves finish in seconds, so the Test step can stay tight enough to flag a hang.
+      # --locked-mode fails the restore when a packages.lock.json is out of date.
       - name: Restore
         timeout-minutes: 5
-        run: for project in $TEST_PROJECTS; do dotnet restore "$project"; done
+        run: for project in $TEST_PROJECTS; do dotnet restore "$project" --locked-mode; done
       - name: Build
         timeout-minutes: 5
         run: for project in $TEST_PROJECTS; do dotnet build "$project" --configuration Release --no-restore; done
+      # The hang timeout is an inactivity timer, reset by every test update, so a hang in the
+      # last project still dumps at ~22 s of earlier tests + 60 s, inside the 2 minutes.
       - name: Test
         timeout-minutes: 2
         run: |
           status=0
           for project in $TEST_PROJECTS; do
-            dotnet test --project "$project" --configuration Release --no-build || status=1
+            dotnet test --project "$project" --configuration Release --no-build \
+              --results-directory "${{ github.workspace }}/TestResults" \
+              --hangdump --hangdump-timeout 60s --hangdump-type Mini || status=1
           done
           exit $status
+      - name: Upload test results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-results-build
+          path: TestResults/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # PR runs can read caches saved on main, but only Linux jobs run on main. This saves the
+  # Windows and macOS caches that the PR Checks matrix restores, so a PR's first run is warm too.
+  # It does nothing when the cache for the current lock files already exists.
+  nuget-cache:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      DOTNET_NOLOGO: true
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+    steps:
+      - uses: actions/checkout@v7
+      - name: Use the local disk for the NuGet cache
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value "NUGET_PACKAGES=${{ runner.temp }}\nuget-packages"
+      - name: Cache NuGet packages
+        id: nuget-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.NUGET_PACKAGES || '~/.nuget/packages' }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/packages.lock.json') }}
+          lookup-only: true
+      - uses: actions/setup-dotnet@v6
+        if: steps.nuget-cache.outputs.cache-hit != 'true'
+        with:
+          global-json-file: global.json
+      - name: Restore
+        if: steps.nuget-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          for project in $(jq -r '.[]' .github/test-projects.json); do
+            dotnet restore "$project" --locked-mode
+          done
