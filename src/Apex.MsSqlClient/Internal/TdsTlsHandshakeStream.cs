@@ -49,6 +49,11 @@ internal sealed class TdsTlsHandshakeStream : Stream
 
     public override int Read(Span<byte> buffer)
     {
+        if (buffer.IsEmpty)
+        {
+            return 0;
+        }
+
         if (TryCopyBuffered(buffer, out var copied))
         {
             return copied;
@@ -68,6 +73,11 @@ internal sealed class TdsTlsHandshakeStream : Stream
         Memory<byte> buffer,
         CancellationToken cancellationToken = default)
     {
+        if (buffer.IsEmpty)
+        {
+            return 0;
+        }
+
         if (TryCopyBuffered(buffer.Span, out var copied))
         {
             return copied;
@@ -153,18 +163,32 @@ internal sealed class TdsTlsHandshakeStream : Stream
 
     private void ReadFramedPayload()
     {
-        _inner.ReadExactly(_header);
-        SetPayload(_header);
-        _inner.ReadExactly(_readPayload.AsSpan(0, _readLength));
+        do
+        {
+            _inner.ReadExactly(_header);
+            SetPayload(_header);
+            if (_readLength > 0)
+            {
+                _inner.ReadExactly(_readPayload.AsSpan(0, _readLength));
+            }
+        }
+        while (_readLength == 0);
     }
 
     private async ValueTask ReadFramedPayloadAsync(CancellationToken cancellationToken)
     {
-        await _inner.ReadExactlyAsync(_header, cancellationToken).ConfigureAwait(false);
-        SetPayload(_header);
-        await _inner.ReadExactlyAsync(
-          _readPayload.AsMemory(0, _readLength),
-          cancellationToken).ConfigureAwait(false);
+        do
+        {
+            await _inner.ReadExactlyAsync(_header, cancellationToken).ConfigureAwait(false);
+            SetPayload(_header);
+            if (_readLength > 0)
+            {
+                await _inner.ReadExactlyAsync(
+                  _readPayload.AsMemory(0, _readLength),
+                  cancellationToken).ConfigureAwait(false);
+            }
+        }
+        while (_readLength == 0);
     }
 
     private void SetPayload(ReadOnlySpan<byte> header)

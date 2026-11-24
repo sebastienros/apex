@@ -59,7 +59,7 @@ public sealed record MsSqlConnectOptions : SqlConnectOptions
 
         MsSqlConnectOptions options = new()
         {
-            Host = uri.Host,
+            Host = uri.DnsSafeHost,
             Port = uri.IsDefaultPort ? 1433 : uri.Port,
             Database = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/')),
         };
@@ -184,10 +184,16 @@ public sealed record MsSqlConnectOptions : SqlConnectOptions
         var separator = server.LastIndexOf(',');
         if (separator < 0)
         {
-            return (server, null);
+            var hostOnly = UnwrapBrackets(server.Trim());
+            if (hostOnly.Length == 0)
+            {
+                throw new FormatException("SQL Server host cannot be empty.");
+            }
+
+            return (hostOnly, null);
         }
 
-        var host = server[..separator].Trim();
+        var host = UnwrapBrackets(server[..separator].Trim());
         var port = server[(separator + 1)..].Trim();
         if (host.Length == 0)
         {
@@ -196,6 +202,11 @@ public sealed record MsSqlConnectOptions : SqlConnectOptions
 
         return (host, ParsePort(port));
     }
+
+    private static string UnwrapBrackets(string host) =>
+      host.Length >= 2 && host[0] == '[' && host[^1] == ']'
+        ? host[1..^1]
+        : host;
 
     private static int ParsePort(string value) =>
       int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var port) &&

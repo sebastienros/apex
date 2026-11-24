@@ -16,11 +16,13 @@ internal static class MsSqlConnectionStringParser
                 break;
             }
 
-            var equals = connectionString.IndexOf('=', position);
-            if (equals < 0)
+            var separator = connectionString.AsSpan(position).IndexOfAny('=', ';');
+            if (separator < 0 || connectionString[position + separator] != '=')
             {
                 throw new FormatException("SQL Server connection options must use key=value syntax.");
             }
+
+            var equals = position + separator;
 
             var key = connectionString[position..equals].Trim();
             if (key.Length == 0)

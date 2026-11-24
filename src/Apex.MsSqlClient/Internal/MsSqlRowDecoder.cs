@@ -989,11 +989,10 @@ internal sealed class MsSqlRowDecoder : ISqlRowDecoder
         return document.RootElement.Clone();
     }
 
-        private static bool IsUtf16LittleEndian(ReadOnlySpan<byte> value) =>
-            value.Length >= 4 &&
-            value.Length % 2 == 0 &&
-            value[1] == 0 &&
-            value[3] == 0;
+    private static bool IsUtf16LittleEndian(ReadOnlySpan<byte> value) =>
+        value.Length >= 2 &&
+        (value.Length & 1) == 0 &&
+        value[1] == 0;
 
     private static bool IsStringType(byte type) =>
       type is

@@ -238,7 +238,8 @@ internal sealed class TdsTokenReader
                 TransactionDescriptor: ReadTransactionDescriptor(ref reader)),
             TdsEnvironmentChange.CommitTransaction or
             TdsEnvironmentChange.RollbackTransaction or
-            TdsEnvironmentChange.DefectDtc =>
+            TdsEnvironmentChange.DefectDtc or
+            TdsEnvironmentChange.TransactionEnded =>
               new TdsEnvironmentChangeInfo(TransactionDescriptor: 0),
             TdsEnvironmentChange.Routing =>
               new TdsEnvironmentChangeInfo(Routing: ReadRouting(ref reader)),

@@ -76,6 +76,7 @@ internal static class TdsEnvironmentChange
     internal const byte RollbackTransaction = 10;
     internal const byte EnlistDtc = 11;
     internal const byte DefectDtc = 12;
+    internal const byte TransactionEnded = 17;
     internal const byte Routing = 20;
 }
 

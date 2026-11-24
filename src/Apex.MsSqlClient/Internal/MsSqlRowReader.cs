@@ -14,8 +14,9 @@ internal sealed class MsSqlResultReader :
         MsSqlConnection connection,
         string sql,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
-        : base(connection, sql, parameters, cancellationToken, preserveResultBoundaries: true)
+        CancellationToken cancellationToken,
+        string[]? parameterNames = null)
+        : base(connection, sql, parameters, cancellationToken, preserveResultBoundaries: true, parameterNames)
     {
     }
 
@@ -23,8 +24,9 @@ internal sealed class MsSqlResultReader :
         MsSqlConnection connection,
         MsSqlPreparedStatement statement,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
-        : base(connection, statement, parameters, cancellationToken, preserveResultBoundaries: true)
+        CancellationToken cancellationToken,
+        string[]? parameterNames = null)
+        : base(connection, statement, parameters, cancellationToken, preserveResultBoundaries: true, parameterNames)
     {
     }
 
@@ -72,8 +74,9 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         string sql,
         SqlParameters parameters,
         CancellationToken cancellationToken,
-        bool preserveResultBoundaries = false)
-      : this(connection, sql, statement: null, parameters, cancellationToken, preserveResultBoundaries)
+        bool preserveResultBoundaries = false,
+        string[]? parameterNames = null)
+      : this(connection, sql, statement: null, parameters, cancellationToken, preserveResultBoundaries, parameterNames)
     {
     }
 
@@ -82,8 +85,9 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         MsSqlPreparedStatement statement,
         SqlParameters parameters,
         CancellationToken cancellationToken,
-        bool preserveResultBoundaries = false)
-      : this(connection, statement.Sql, statement, parameters, cancellationToken, preserveResultBoundaries)
+        bool preserveResultBoundaries = false,
+        string[]? parameterNames = null)
+      : this(connection, statement.Sql, statement, parameters, cancellationToken, preserveResultBoundaries, parameterNames)
     {
     }
 
@@ -93,7 +97,8 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         MsSqlPreparedStatement? statement,
         SqlParameters parameters,
         CancellationToken cancellationToken,
-        bool preserveResultBoundaries)
+        bool preserveResultBoundaries,
+        string[]? parameterNames)
     {
         _connection = connection;
         _statement = statement;
@@ -113,17 +118,19 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                   await connection.WriteRequestAsync(
                 sql,
                 parameters,
-                CancellationToken.None).ConfigureAwait(false);
+                CancellationToken.None,
+                parameterNames).ConfigureAwait(false);
               }
               else
               {
                   _preparesHandle = await connection.WritePreparedRequestAsync(
                 statement,
                 parameters,
-                CancellationToken.None).ConfigureAwait(false);
+                CancellationToken.None,
+                parameterNames).ConfigureAwait(false);
               }
           },
-          _ => PumpAsync(),
+          receiveToken => PumpAsync(receiveToken),
           barrier: true,
           cancellationToken).AsTask();
         _ = ObserveOperationAsync();
@@ -279,6 +286,7 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     {
         if (_stopped ||
             _canceled ||
+            _attention?.IsCancellationRequested == true ||
             _tdsColumns.Length == 0 ||
             _results is { HasPendingTransition: true })
         {
@@ -539,25 +547,48 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         page.Add(_current.WrittenSpan);
     }
 
-    private async ValueTask<bool> PumpAsync()
+    private async ValueTask<bool> PumpAsync(CancellationToken shutdownToken)
     {
         List<MsSqlInfo> errors = [];
         var final = false;
+        var drainingError = false;
         var attention =
-          _connection.BeginAttention(_operationCancellationToken);
+          _connection.BeginAttention(_operationCancellationToken, AbortForShutdown);
+        bool cancelBeforeAttention;
+        CancellationToken cancelToken;
         lock (_gate)
         {
             _attention = attention;
-            if (_cancelBeforeAttention)
-            {
-                attention.Cancel(_cancellationToken);
-            }
+            cancelBeforeAttention = _cancelBeforeAttention;
+            cancelToken = _cancellationToken;
         }
+
+        if (cancelBeforeAttention)
+        {
+            attention.Cancel(cancelToken);
+        }
+
+        using var shutdownRegistration = shutdownToken.CanBeCanceled
+          ? shutdownToken.Register(
+            static state =>
+            {
+                var (reader, activeAttention) = ((MsSqlRowReader, MsSqlConnection.AttentionState))state!;
+                if (reader._connection.Scheduler.IsStopped || reader._connection.IsDisposed)
+                {
+                    activeAttention.AbortRead();
+                }
+            },
+            (this, attention))
+          : default;
 
         try
         {
             while (true)
             {
+                if (_connection.Scheduler.IsStopped || _connection.IsDisposed)
+                {
+                    throw new OperationCanceledException(shutdownToken);
+                }
                 var messageType = await _connection.Reader.BeginMessageAsync(
                   attention.ReadCancellationToken).ConfigureAwait(false);
                 if (messageType != TdsMessageType.TabularResult)
@@ -578,12 +609,16 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             var shape = await tokens.ReadColumnMetadataAsync(
                               _connection.ResultShapes).ConfigureAwait(false);
                             _tdsColumns = shape.Columns;
-                            _columns = shape.SqlColumns;
-                            _ordinals = shape.Ordinals;
-                            _currentResultIndex = _resultCount;
-                            _hasCurrentResult = true;
-                            _resultSetGeneration++;
-                            ResultStarted();
+                            if (!drainingError && !attention.IsCancellationRequested)
+                            {
+                                _columns = shape.SqlColumns;
+                                _ordinals = shape.Ordinals;
+                                _currentResultIndex = _resultCount;
+                                _hasCurrentResult = true;
+                                _resultSetGeneration++;
+                                ResultStarted();
+                            }
+
                             break;
                         case TdsTokenType.Row:
                         case TdsTokenType.NbcRow:
@@ -598,10 +633,14 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                               nullCompressed: token == TdsTokenType.NbcRow,
                               _current).ConfigureAwait(false);
                             var retained = false;
+                            var attentionRequested = attention.IsCancellationRequested;
                             lock (_gate)
                             {
                                 // A pending NextResultAsync skips the rest of this result.
-                                if (!_stopped && _results is not { SkipsRows: true })
+                                if (!_stopped &&
+                                    !drainingError &&
+                                    !attentionRequested &&
+                                    _results is not { SkipsRows: true })
                                 {
                                     _hasCurrent = true;
                                     _currentDelivered = _results?.PublishRow() ?? false;
@@ -612,7 +651,26 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             if (retained)
                             {
                                 SignalRead(result: true, error: null);
-                                await _advance.WaitAsync().ConfigureAwait(false);
+                                attention.SetConsumerParked(true);
+                                try
+                                {
+                                    if (_connection.Scheduler.IsStopped || _connection.IsDisposed)
+                                    {
+                                        throw new OperationCanceledException(shutdownToken);
+                                    }
+
+                                    await _advance.WaitAsync().ConfigureAwait(false);
+                                }
+                                finally
+                                {
+                                    attention.SetConsumerParked(false);
+                                }
+
+                                if (_connection.Scheduler.IsStopped || _connection.IsDisposed)
+                                {
+                                    throw new OperationCanceledException(shutdownToken);
+                                }
+
                                 DisposeCurrent();
                             }
 
@@ -622,6 +680,11 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                         case TdsTokenType.DoneInProc:
                             var done = await tokens.ReadDoneAsync().ConfigureAwait(false);
                             final |= (done.Status & TdsDoneStatus.More) == 0;
+                            if ((done.Status & TdsDoneStatus.Error) != 0)
+                            {
+                                drainingError = true;
+                            }
+
                             var hadCurrentResult = _hasCurrentResult;
                             var hasCountResult = (done.Status & TdsDoneStatus.Count) != 0;
                             // Like SqlClient, count every DONE_COUNT except those reported for SELECT
@@ -647,11 +710,13 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                             }
 
                             _tdsColumns = Array.Empty<TdsColumn>();
-                            // A failed statement must not surface as an empty result: that would park the
-                            // pump at the boundary and defer the server error until NextResult or dispose.
+                            // A failed statement must not surface as an empty result or complete a
+                            // started result without error: either would park the pump at the boundary
+                            // and defer the server error until NextResult or dispose.
+                            var suppressingResults = drainingError || attention.IsCancellationRequested;
                             var publishSyntheticResult = _results is not null &&
-                                hasSyntheticResult &&
-                                (done.Status & TdsDoneStatus.Error) == 0;
+                                !suppressingResults &&
+                                hasSyntheticResult;
                             if (publishSyntheticResult)
                             {
                                 _columns = Array.Empty<SqlColumn>();
@@ -664,9 +729,27 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
                                 throw new OperationCanceledException(attention.CancellationToken);
                             }
 
-                            if (_results is not null && (hadCurrentResult || publishSyntheticResult))
+                            if (_results is not null && !suppressingResults && (hadCurrentResult || publishSyntheticResult))
                             {
-                                await ResultCompletedAsync().ConfigureAwait(false);
+                                attention.SetConsumerParked(true);
+                                try
+                                {
+                                    if (_connection.Scheduler.IsStopped || _connection.IsDisposed)
+                                    {
+                                        throw new OperationCanceledException(shutdownToken);
+                                    }
+
+                                    await ResultCompletedAsync().ConfigureAwait(false);
+                                }
+                                finally
+                                {
+                                    attention.SetConsumerParked(false);
+                                }
+
+                                if (_connection.Scheduler.IsStopped || _connection.IsDisposed)
+                                {
+                                    throw new OperationCanceledException(shutdownToken);
+                                }
                             }
 
                             break;
@@ -724,12 +807,13 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
         }
         finally
         {
-            _connection.EndAttention(attention);
-            attention.Dispose();
             lock (_gate)
             {
                 _attention = null;
             }
+
+            _connection.EndAttention(attention);
+            attention.Dispose();
         }
     }
 
@@ -748,6 +832,8 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
     private void Cancel()
     {
         bool advance;
+        MsSqlConnection.AttentionState? attention;
+        CancellationToken cancellationToken;
         lock (_gate)
         {
             if (_completed || _canceled)
@@ -760,18 +846,33 @@ internal class MsSqlRowReader : ISqlRowReader, IValueTaskSource<bool>
             _cancellationToken = _readCancellationToken.IsCancellationRequested
               ? _readCancellationToken
               : _operationCancellationToken;
+            cancellationToken = _cancellationToken;
             advance = !_hasCurrent || !_currentDelivered;
-            if (_attention is not null)
-            {
-                _attention.Cancel(_cancellationToken);
-            }
-            else
+            attention = _attention;
+            if (attention is null)
             {
                 _cancelBeforeAttention = true;
             }
         }
 
+        attention?.Cancel(cancellationToken);
         if (advance) _advance.Set();
+        _results?.Advance.Set();
+    }
+
+    private void AbortForShutdown()
+    {
+        lock (_gate)
+        {
+            if (_completed)
+            {
+                return;
+            }
+
+            _stopped = true;
+        }
+
+        _advance.Set();
         _results?.Advance.Set();
     }
 
