@@ -697,7 +697,9 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
         while (true)
         {
-            using var message = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            using var message = await _reader.ReadAsync(
+                cancellationToken,
+                PgWireReader.MaximumPreAuthMessageLength).ConfigureAwait(false);
             switch (message.Type)
             {
                 case (byte)'R':
@@ -2257,6 +2259,14 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
             supportsScram |= mechanism == "SCRAM-SHA-256";
             supportsScramPlus |= mechanism == "SCRAM-SHA-256-PLUS";
+        }
+
+        if (!IsSecure &&
+            supportsScramPlus &&
+            _options.ChannelBinding != PgChannelBinding.Disable)
+        {
+            throw new AuthenticationException(
+              "The PostgreSQL server offered SCRAM-SHA-256-PLUS authentication over a non-SSL connection.");
         }
 
         if (_options.ChannelBinding != PgChannelBinding.Disable &&

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -5,6 +6,7 @@ namespace Apex.PgClient.Internal;
 
 internal sealed class PgScramClient
 {
+    internal const int MaximumIterations = 1_000_000;
     private static readonly Encoding s_utf8 = new UTF8Encoding(false, true);
     private readonly string _password;
     private readonly string _clientNonce;
@@ -42,7 +44,13 @@ internal sealed class PgScramClient
         }
 
         var salt = Convert.FromBase64String(GetRequired(fields, 's'));
-        if (!int.TryParse(GetRequired(fields, 'i'), out var iterations) || iterations <= 0)
+        if (!int.TryParse(
+                GetRequired(fields, 'i'),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var iterations) ||
+            iterations <= 0 ||
+            iterations > MaximumIterations)
         {
             throw new InvalidDataException("The PostgreSQL SCRAM iteration count is invalid.");
         }
@@ -113,7 +121,10 @@ internal sealed class PgScramClient
                 throw new InvalidDataException("The PostgreSQL SCRAM message is malformed.");
             }
 
-            fields.Add(field[0], field[2..]);
+            if (!fields.TryAdd(field[0], field[2..]))
+            {
+                throw new InvalidDataException("The PostgreSQL SCRAM message contains a duplicate attribute.");
+            }
         }
 
         return fields;

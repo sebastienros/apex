@@ -134,6 +134,13 @@ internal sealed class MySqlPayloadWriter
 
     internal void WriteNullTerminatedString(string value)
     {
+        if (value.Contains('\0', StringComparison.Ordinal))
+        {
+            throw new ArgumentException(
+              "MySQL null-terminated wire strings cannot contain embedded NUL characters.",
+              nameof(value));
+        }
+
         WriteUtf8(value);
         WriteByte(0);
     }

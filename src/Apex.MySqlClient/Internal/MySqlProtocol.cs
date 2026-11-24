@@ -11,6 +11,9 @@ internal static class MySqlProtocol
     /// <summary>The largest logical payload the driver reassembles from split frames.</summary>
     internal const int MaximumPayloadLength = 256 * 1024 * 1024;
 
+    /// <summary>The largest payload accepted before authentication completes.</summary>
+    internal const int MaximumPreAuthPayloadLength = 1024 * 1024;
+
     internal const int NonceLength = 20;
 
     internal const byte OkHeader = 0x00;

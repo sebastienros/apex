@@ -34,8 +34,9 @@ internal static class MySqlConnectionStringParser
 
             if (position == input.Length)
             {
-                throw new FormatException(
-                  $"MySQL connection-string key '{input[keyStart..].Trim().ToString()}' has no value.");
+                // Do not echo the trailing text: an unquoted semicolon inside a password splits
+                // the secret across entries and leaves the remainder here.
+                throw new FormatException("MySQL connection-string entry is missing '='.");
             }
 
             var key = input[keyStart..position].Trim().ToString();

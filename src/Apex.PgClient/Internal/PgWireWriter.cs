@@ -77,13 +77,15 @@ internal sealed class PgWireWriter
         CancellationToken cancellationToken,
         bool flush = true)
     {
+        PgBufferWriterExtensions.ThrowIfContainsNull(sql);
         var byteCount = s_utf8.GetByteCount(sql);
-        var totalLength = 1 + sizeof(int) + byteCount + 1;
+        var messageLength = checked(sizeof(int) + byteCount + 1);
+        var totalLength = checked(1 + messageLength);
         var message = _writer.GetSpan(totalLength);
         message[0] = (byte)'Q';
         BinaryPrimitives.WriteInt32BigEndian(
           message[1..],
-          sizeof(int) + byteCount + 1);
+          messageLength);
         var written = s_utf8.GetBytes(sql, message[5..]);
         message[5 + written] = 0;
         _writer.Advance(totalLength);
@@ -481,10 +483,10 @@ internal sealed class PgWireWriter
         var byteCount = text.Length <= 1024
           ? s_utf8.GetMaxByteCount(text.Length)
           : s_utf8.GetByteCount(text);
-        var destination = _writer.GetSpan(sizeof(int) + byteCount);
+        var destination = _writer.GetSpan(checked(sizeof(int) + byteCount));
         var written = s_utf8.GetBytes(text, destination[sizeof(int)..]);
         BinaryPrimitives.WriteInt32BigEndian(destination, written);
-        _writer.Advance(sizeof(int) + written);
+        _writer.Advance(checked(sizeof(int) + written));
     }
 
     private void WriteBindDescribeExecute(
@@ -599,19 +601,22 @@ internal sealed class PgWireWriter
 
     private void WriteParseUnnamed(string sql)
     {
+        PgBufferWriterExtensions.ThrowIfContainsNull(sql);
         var sqlLength = s_utf8.GetByteCount(sql);
-        var payloadLength = 1 + sqlLength + 1 + sizeof(short);
-        var message = _writer.GetSpan(5 + payloadLength);
+        var payloadLength = checked(1 + sqlLength + 1 + sizeof(short));
+        var totalLength = checked(5 + payloadLength);
+        var messageLength = checked(payloadLength + sizeof(int));
+        var message = _writer.GetSpan(totalLength);
         message[0] = (byte)'P';
         BinaryPrimitives.WriteInt32BigEndian(
           message[1..],
-          payloadLength + sizeof(int));
+          messageLength);
         var position = 5;
         message[position++] = 0;
         position += s_utf8.GetBytes(sql, message[position..]);
         message[position++] = 0;
         BinaryPrimitives.WriteInt16BigEndian(message[position..], 0);
-        _writer.Advance(5 + payloadLength);
+        _writer.Advance(totalLength);
     }
 
     private void WriteBindDescribeExecuteNoParameters(
@@ -673,8 +678,17 @@ internal static class PgBufferWriterExtensions
 
     public static void WriteCString(this IBufferWriter<byte> writer, string value)
     {
+        ThrowIfContainsNull(value);
         writer.WriteUtf8(value);
         writer.WriteByte(0);
+    }
+
+    internal static void ThrowIfContainsNull(string value)
+    {
+        if (value.Contains('\0', StringComparison.Ordinal))
+        {
+            throw new ArgumentException("PostgreSQL protocol strings cannot contain NUL characters.", nameof(value));
+        }
     }
 
     public static void WriteUtf8(this IBufferWriter<byte> writer, string value)

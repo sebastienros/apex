@@ -24,6 +24,7 @@ internal readonly struct PgWireMessage : IDisposable
 internal sealed class PgWireReader
 {
     private const int MaximumMessageLength = 64 * 1024 * 1024;
+    internal const int MaximumPreAuthMessageLength = 1024 * 1024;
     private const int InitialBufferLength = 32 * 1024;
 
     // A buffer grown past this for one large message goes back to the pool at the next read, once
@@ -42,20 +43,24 @@ internal sealed class PgWireReader
 
     internal int BufferLength => _buffer?.Length ?? 0;
 
-    public ValueTask<PgWireMessage> ReadAsync(CancellationToken cancellationToken)
+    public ValueTask<PgWireMessage> ReadAsync(
+        CancellationToken cancellationToken,
+        int maximumMessageLength = MaximumMessageLength)
     {
         // A message that is already received is sliced out without the asynchronous path, which
         // TryPeek leaves every other case to (a partial or invalid message, a buffer to shrink).
-        if (TryPeek(out var message, out var totalLength))
+        if (TryPeek(out var message, out var totalLength, maximumMessageLength))
         {
             Consume(totalLength);
             return new ValueTask<PgWireMessage>(message);
         }
 
-        return ReadSlowAsync(cancellationToken);
+        return ReadSlowAsync(cancellationToken, maximumMessageLength);
     }
 
-    private async ValueTask<PgWireMessage> ReadSlowAsync(CancellationToken cancellationToken)
+    private async ValueTask<PgWireMessage> ReadSlowAsync(
+        CancellationToken cancellationToken,
+        int maximumMessageLength)
     {
         // The previous message's payload is only valid until this call, so the buffer it points
         // into can be released here.
@@ -73,10 +78,10 @@ internal sealed class PgWireReader
             throw new InvalidDataException($"Invalid PostgreSQL message length {length}.");
         }
 
-        if (length > MaximumMessageLength)
+        if (length > maximumMessageLength)
         {
             throw new InvalidDataException(
-              $"PostgreSQL message length {length} exceeds {MaximumMessageLength} bytes.");
+              $"PostgreSQL message length {length} exceeds {maximumMessageLength} bytes.");
         }
 
         var totalLength = checked(1 + length);
@@ -102,7 +107,10 @@ internal sealed class PgWireReader
     /// next read. Returns false whenever <see cref="ReadSlowAsync"/> would have more to do than slice
     /// the buffer (a partial or invalid message, or a grown buffer to shrink).
     /// </summary>
-    internal bool TryPeek(out PgWireMessage message, out int totalLength)
+    internal bool TryPeek(
+        out PgWireMessage message,
+        out int totalLength,
+        int maximumMessageLength = MaximumMessageLength)
     {
         message = default;
         totalLength = 0;
@@ -119,7 +127,7 @@ internal sealed class PgWireReader
         }
 
         var length = BinaryPrimitives.ReadInt32BigEndian(buffer.AsSpan(_start + 1, sizeof(int)));
-        if (length < 4 || length > available - 1)
+        if (length < 4 || length > maximumMessageLength || length > available - 1)
         {
             return false;
         }

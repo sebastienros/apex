@@ -252,14 +252,21 @@ internal sealed class MsSqlAdoReaderFactory(MsSqlDbParameterCollection parameter
 
             var trimmed = raw.Trim();
             var normalized = trimmed[0] == '@' ? trimmed : string.Concat("@", trimmed);
-            if (normalized.Length == 1 || normalized.Length > byte.MaxValue)
+            if (normalized.Length == 1 || normalized.Length > 128)
             {
                 throw new ArgumentException($"Invalid SQL Server parameter name '{raw}'.");
             }
 
-            for (var c = 1; c < normalized.Length; c++)
+            var first = normalized[1];
+            if (!(char.IsLetter(first) || first is '_' or '@' or '#' or '$'))
             {
-                if (char.IsWhiteSpace(normalized[c]) || normalized[c] == ',')
+                throw new ArgumentException($"Invalid SQL Server parameter name '{raw}'.");
+            }
+
+            for (var c = 2; c < normalized.Length; c++)
+            {
+                var ch = normalized[c];
+                if (!(char.IsLetterOrDigit(ch) || ch is '_' or '@' or '#' or '$'))
                 {
                     throw new ArgumentException($"Invalid SQL Server parameter name '{raw}'.");
                 }

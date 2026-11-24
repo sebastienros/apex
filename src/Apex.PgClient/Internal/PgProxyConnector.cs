@@ -59,12 +59,26 @@ internal static class PgProxyConnector
           Path.Combine(options.Host, $".s.PGSQL.{options.Port}"))
         : new DnsEndPoint(options.Host, options.Port);
 
+    internal static void ValidateHttpConnectHost(string host)
+    {
+        foreach (var ch in host)
+        {
+            if (char.IsControl(ch) || char.IsWhiteSpace(ch))
+            {
+                throw new ArgumentException(
+                    "PostgreSQL HTTP CONNECT target host cannot contain control or whitespace characters.",
+                    nameof(host));
+            }
+        }
+    }
+
     private static async ValueTask ConnectHttpAsync(
         Stream stream,
         PgConnectOptions options,
         PgProxyOptions proxy,
         CancellationToken cancellationToken)
     {
+        ValidateHttpConnectHost(options.Host);
         var authority = IPAddress.TryParse(options.Host, out var httpAddress) &&
                            httpAddress.AddressFamily == AddressFamily.InterNetworkV6
           ? $"[{httpAddress}]:{options.Port}"

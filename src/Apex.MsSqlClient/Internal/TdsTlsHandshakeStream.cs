@@ -161,8 +161,11 @@ internal sealed class TdsTlsHandshakeStream : Stream
         return true;
     }
 
+    private const int MaxConsecutiveEmptyPackets = 8;
+
     private void ReadFramedPayload()
     {
+        var emptyPackets = 0;
         do
         {
             _inner.ReadExactly(_header);
@@ -171,12 +174,18 @@ internal sealed class TdsTlsHandshakeStream : Stream
             {
                 _inner.ReadExactly(_readPayload.AsSpan(0, _readLength));
             }
+            else if (++emptyPackets > MaxConsecutiveEmptyPackets)
+            {
+                throw new InvalidDataException(
+                  "SQL Server sent too many consecutive empty encapsulated TLS TDS packets.");
+            }
         }
         while (_readLength == 0);
     }
 
     private async ValueTask ReadFramedPayloadAsync(CancellationToken cancellationToken)
     {
+        var emptyPackets = 0;
         do
         {
             await _inner.ReadExactlyAsync(_header, cancellationToken).ConfigureAwait(false);
@@ -186,6 +195,11 @@ internal sealed class TdsTlsHandshakeStream : Stream
                 await _inner.ReadExactlyAsync(
                   _readPayload.AsMemory(0, _readLength),
                   cancellationToken).ConfigureAwait(false);
+            }
+            else if (++emptyPackets > MaxConsecutiveEmptyPackets)
+            {
+                throw new InvalidDataException(
+                  "SQL Server sent too many consecutive empty encapsulated TLS TDS packets.");
             }
         }
         while (_readLength == 0);
