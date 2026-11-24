@@ -93,7 +93,7 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
                     return pooled;
                 }
 
-                await DisposeConnectionAsync(pooled.Connection).ConfigureAwait(false);
+                await DisposeConnectionQuietlyAsync(pooled.Connection).ConfigureAwait(false);
             }
 
             using CancellationTokenSource factoryCancellation =
@@ -399,20 +399,20 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         var now = GetExpirationNow();
         pooled.LastUsed = now;
         var returned = false;
-        if (_disposed == 0 && IsReusable(pooled, now))
-        {
-            lock (_idleGate)
-            {
-                if (_disposed == 0)
-                {
-                    _idle.Push(pooled);
-                    returned = true;
-                }
-            }
-        }
-
         try
         {
+            if (_disposed == 0 && IsReusable(pooled, now))
+            {
+                lock (_idleGate)
+                {
+                    if (_disposed == 0)
+                    {
+                        _idle.Push(pooled);
+                        returned = true;
+                    }
+                }
+            }
+
             if (!returned)
             {
                 await DisposeConnectionAsync(pooled.Connection).ConfigureAwait(false);
@@ -447,6 +447,18 @@ internal sealed class SqlConnectionPool<TConnection> : ISqlPool
         finally
         {
             Interlocked.Decrement(ref _size);
+        }
+    }
+
+    private async ValueTask DisposeConnectionQuietlyAsync(TConnection connection)
+    {
+        try
+        {
+            await DisposeConnectionAsync(connection).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Evicting a stale idle connection must not fail an unrelated caller's acquisition.
         }
     }
 

@@ -104,6 +104,10 @@ internal sealed class AzureTokenAuthenticationProvider
         {
             using var document = JsonDocument.Parse(payload);
             var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
             var managedIdentityResource = ReadStringClaim(root, "xms_mirid");
             if (managedIdentityResource is not null)
             {

@@ -13,6 +13,47 @@ namespace Apex.SqlClient.Tests;
 public sealed class LowLevelTlsStreamTests
 {
     [TestMethod]
+    public async Task AuthenticateAsClientDoesNotMutateCallerAuthenticationOptions()
+    {
+        using var certificate = CreateCertificate();
+        using TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        using CancellationTokenSource serverStop = new(TimeSpan.FromSeconds(30));
+
+        var senders = new List<object?>();
+        RemoteCertificateValidationCallback callback = (sender, _, _, _) =>
+        {
+            senders.Add(sender);
+            return true;
+        };
+        var options = new SslClientAuthenticationOptions
+        {
+            TargetHost = "localhost",
+            EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+            RemoteCertificateValidationCallback = callback,
+        };
+
+        for (var i = 0; i < 2; i++)
+        {
+            var server = RunServerAsync(listener, certificate, serverStop.Token);
+            using TcpClient client = new();
+            await client.ConnectAsync(IPAddress.Loopback, port);
+            await using var tls = await LowLevelTlsStream.AuthenticateAsClientAsync(
+                client.GetStream(),
+                options,
+                CancellationToken.None);
+            Assert.AreSame(callback, options.RemoteCertificateValidationCallback);
+            Assert.AreSame(tls, senders[^1]);
+            client.Close();
+            await server.WaitAsync(TimeSpan.FromSeconds(10));
+        }
+
+        Assert.HasCount(2, senders);
+        Assert.AreNotSame(senders[0], senders[1]);
+    }
+
+    [TestMethod]
     public async Task DisposeDuringPendingReadKeepsBuffersUntilTheReadUnwinds()
     {
         using var certificate = CreateCertificate();

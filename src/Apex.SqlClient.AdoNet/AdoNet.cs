@@ -107,12 +107,18 @@ public abstract class ApexDbParameterCollection : DbParameterCollection
         _parameters.FindIndex(x => string.Equals(x.ParameterName, parameterName, StringComparison.OrdinalIgnoreCase));
     public override void Insert(int index, object value)
     {
-        _parameters.Insert(index, (DbParameter)value);
+        ArgumentNullException.ThrowIfNull(value);
+        if (value is not DbParameter parameter)
+        {
+            throw new ArgumentException("Only DbParameter instances can be added.", nameof(value));
+        }
+
+        _parameters.Insert(index, parameter);
         Changed();
     }
     public override void Remove(object value)
     {
-        if (_parameters.Remove((DbParameter)value)) Changed();
+        if (value is DbParameter parameter && _parameters.Remove(parameter)) Changed();
     }
     public override void RemoveAt(int index)
     {
@@ -122,11 +128,13 @@ public abstract class ApexDbParameterCollection : DbParameterCollection
     public override void RemoveAt(string parameterName) => RemoveAt(IndexOf(parameterName));
     protected override void SetParameter(int index, DbParameter value)
     {
+        ArgumentNullException.ThrowIfNull(value);
         _parameters[index] = value;
         Changed();
     }
     protected override void SetParameter(string parameterName, DbParameter value)
     {
+        ArgumentNullException.ThrowIfNull(value);
         var index = IndexOf(parameterName);
         if (index < 0) _parameters.Add(value); else _parameters[index] = value;
         Changed();
@@ -665,6 +673,7 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
     private ApexOperationCancellation? _cancellation;
     private bool _closed;
     private bool _returnedSingleRow;
+    private bool _pastSingleRow;
     private IReadOnlyList<SqlColumn> _columns;
     private bool _hasRowsInResult;
     private bool _prefetchedRow;
@@ -709,6 +718,11 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
 #pragma warning disable CA2201 // DbDataReader's GetOrdinal contract requires IndexOutOfRangeException.
     public override int GetOrdinal(string name)
     {
+        ArgumentNullException.ThrowIfNull(name);
+        for (var i = 0; i < _columns.Count; i++)
+        {
+            if (string.Equals(_columns[i].Name, name, StringComparison.Ordinal)) return i;
+        }
         for (var i = 0; i < _columns.Count; i++)
         {
             if (string.Equals(_columns[i].Name, name, StringComparison.OrdinalIgnoreCase)) return i;
@@ -761,33 +775,75 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
         var columns = GetColumnSchema();
         return columns.Count == 0 ? null : ApexSchemaTable.Create(columns);
     }
-    public override bool GetBoolean(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetBoolean(ordinal), TranslateException);
+    private void EnsureCurrentRow()
+    {
+        if (_closed) throw new InvalidOperationException("The reader is closed.");
+        if (_prefetchedRow || _pastSingleRow) throw new InvalidOperationException("No current row is available.");
+    }
+
+    public override bool GetBoolean(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetBoolean(ordinal), TranslateException);
+    }
     public override byte GetByte(int ordinal) => GetFieldValue<byte>(ordinal);
     public override char GetChar(int ordinal) => GetFieldValue<char>(ordinal);
-    public override DateTime GetDateTime(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetDateTime(ordinal), TranslateException);
-    public override decimal GetDecimal(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetDecimal(ordinal), TranslateException);
-    public override double GetDouble(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetDouble(ordinal), TranslateException);
-    public override float GetFloat(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetFloat(ordinal), TranslateException);
-    public override Guid GetGuid(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetGuid(ordinal), TranslateException);
-    public override short GetInt16(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetInt16(ordinal), TranslateException);
-    public override int GetInt32(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetInt32(ordinal), TranslateException);
-    public override long GetInt64(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetInt64(ordinal), TranslateException);
-    public override string GetString(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.GetString(ordinal), TranslateException);
-    public override bool IsDBNull(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.IsNull(ordinal), TranslateException);
+    public override DateTime GetDateTime(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetDateTime(ordinal), TranslateException);
+    }
+    public override decimal GetDecimal(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetDecimal(ordinal), TranslateException);
+    }
+    public override double GetDouble(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetDouble(ordinal), TranslateException);
+    }
+    public override float GetFloat(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetFloat(ordinal), TranslateException);
+    }
+    public override Guid GetGuid(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetGuid(ordinal), TranslateException);
+    }
+    public override short GetInt16(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetInt16(ordinal), TranslateException);
+    }
+    public override int GetInt32(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetInt32(ordinal), TranslateException);
+    }
+    public override long GetInt64(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetInt64(ordinal), TranslateException);
+    }
+    public override string GetString(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.GetString(ordinal), TranslateException);
+    }
+    public override bool IsDBNull(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.IsNull(ordinal), TranslateException);
+    }
     public override object GetValue(int ordinal) => GetFieldValue<object>(ordinal) ?? DBNull.Value;
-    public override T GetFieldValue<T>(int ordinal) =>
-        ApexExceptionBoundary.Invoke(() => _reader.Get<T>(ordinal), TranslateException);
+    public override T GetFieldValue<T>(int ordinal)
+    {
+        EnsureCurrentRow();
+        return ApexExceptionBoundary.Invoke(() => _reader.Get<T>(ordinal), TranslateException);
+    }
     public override int GetValues(object[] values)
     {
         var count = Math.Min(values.Length, FieldCount);
@@ -820,11 +876,17 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
     public override Task<bool> ReadAsync(CancellationToken cancellationToken)
     {
         if (_closed) throw new InvalidOperationException("The reader is closed.");
-        if (_returnedSingleRow && (_behavior & CommandBehavior.SingleRow) != 0) return Task.FromResult(false);
+        if (_returnedSingleRow && (_behavior & CommandBehavior.SingleRow) != 0)
+        {
+            _pastSingleRow = true;
+            ClearValueCaches();
+            return Task.FromResult(false);
+        }
         if (_prefetchedRow)
         {
             _prefetchedRow = false;
             _returnedSingleRow = true;
+            ClearValueCaches();
             return Task.FromResult(true);
         }
 
@@ -842,7 +904,7 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
                 _hasRowsInResult = true;
             }
             _returnedSingleRow |= read;
-            if (read) ClearValueCaches();
+            ClearValueCaches();
             return read;
         }
         catch (Exception exception) when (TranslateTimeout(exception, cancellationToken) is { } timeout)
@@ -859,10 +921,11 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
 
     private async Task<bool> NextResultCoreAsync(CancellationToken cancellationToken)
     {
-        if ((_behavior & CommandBehavior.SingleResult) != 0) return false;
         if (_closed) throw new InvalidOperationException("The reader is closed.");
-        if (_reader is not ISqlMultiResultReader multiResultReader)
+        if ((_behavior & CommandBehavior.SingleResult) != 0 ||
+            _reader is not ISqlMultiResultReader multiResultReader)
         {
+            ClearResultState();
             return false;
         }
 
@@ -872,20 +935,23 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
             await DrainCurrentResultAsync(cancellationToken).ConfigureAwait(false);
             if (!await multiResultReader.NextResultAsync(cancellationToken).ConfigureAwait(false))
             {
+                ClearResultState();
                 return false;
             }
 
-            _columns = _reader.Columns;
             _returnedSingleRow = false;
+            _pastSingleRow = false;
             if (_reader is ISqlResultBoundaryReader bounded)
             {
                 _hasRowsInResult = await bounded.InitializeAsync(cancellationToken).ConfigureAwait(false);
+                _columns = _reader.Columns;
                 _prefetchedRow = _hasRowsInResult;
             }
             else
             {
                 _prefetchedRow = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
                 _hasRowsInResult = _prefetchedRow;
+                _columns = _reader.Columns;
             }
             ClearValueCaches();
             return true;
@@ -900,6 +966,15 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
         }
     }
 
+    private void ClearResultState()
+    {
+        _columns = [];
+        _hasRowsInResult = false;
+        _prefetchedRow = false;
+        _pastSingleRow = false;
+        ClearValueCaches();
+    }
+
     private async ValueTask DrainCurrentResultAsync(CancellationToken cancellationToken)
     {
         if (_prefetchedRow)
@@ -911,10 +986,38 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
         {
         }
     }
-    public override Task<bool> IsDBNullAsync(int ordinal, CancellationToken cancellationToken) =>
-        Task.FromResult(IsDBNull(ordinal));
-    public override Task<T> GetFieldValueAsync<T>(int ordinal, CancellationToken cancellationToken) =>
-        Task.FromResult(GetFieldValue<T>(ordinal));
+    public override Task<bool> IsDBNullAsync(int ordinal, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromCanceled<bool>(cancellationToken);
+        }
+
+        try
+        {
+            return Task.FromResult(IsDBNull(ordinal));
+        }
+        catch (Exception exception)
+        {
+            return Task.FromException<bool>(exception);
+        }
+    }
+    public override Task<T> GetFieldValueAsync<T>(int ordinal, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromCanceled<T>(cancellationToken);
+        }
+
+        try
+        {
+            return Task.FromResult(GetFieldValue<T>(ordinal));
+        }
+        catch (Exception exception)
+        {
+            return Task.FromException<T>(exception);
+        }
+    }
     public override void Close() => CloseAsync().GetAwaiter().GetResult();
     public override Task CloseAsync() =>
         ApexExceptionBoundary.RunAsync(CloseCoreAsync, TranslateException);
@@ -922,6 +1025,9 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
     {
         if (_closed) return;
         _closed = true;
+        _prefetchedRow = false;
+        _pastSingleRow = false;
+        ClearValueCaches();
         try
         {
             await _reader.DisposeAsync().ConfigureAwait(false);
@@ -965,6 +1071,7 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
         _reader = reader;
         _columns = reader.Columns;
         _returnedSingleRow = false;
+        _pastSingleRow = false;
         _hasRowsInResult = false;
         _prefetchedRow = false;
         ClearValueCaches();
@@ -977,6 +1084,7 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
     {
         try
         {
+            _pastSingleRow = false;
             if (_reader is ISqlResultBoundaryReader bounded)
             {
                 _hasRowsInResult = await bounded.InitializeAsync(cancellationToken).ConfigureAwait(false);
@@ -1012,12 +1120,14 @@ public class ApexDbDataReader : DbDataReader, IDbColumnSchemaGenerator
 
     private byte[] GetCachedBytes(int ordinal)
     {
+        EnsureCurrentRow();
         EnsureValueCacheCapacity();
         return _bytes![ordinal] ??= ApexExceptionBoundary.Invoke(() => _reader.GetBytes(ordinal), TranslateException);
     }
 
     private string GetCachedChars(int ordinal)
     {
+        EnsureCurrentRow();
         EnsureValueCacheCapacity();
         return _chars![ordinal] ??= GetString(ordinal);
     }
@@ -1158,7 +1268,7 @@ public class ApexDbTransaction : DbTransaction
 public abstract class ApexDbConnection : DbConnection
 {
     private ISqlConnection? _connection;
-    private ConnectionState _state = ConnectionState.Closed;
+    private int _state = (int)ConnectionState.Closed;
     private string _connectionString;
     private string _database;
     private string _dataSource;
@@ -1188,7 +1298,7 @@ public abstract class ApexDbConnection : DbConnection
         get => _connectionString;
         set
         {
-            if (_state != ConnectionState.Closed)
+            if (State != ConnectionState.Closed)
             {
                 throw new InvalidOperationException("ConnectionString cannot be changed while the connection is open.");
             }
@@ -1206,7 +1316,7 @@ public abstract class ApexDbConnection : DbConnection
     public override string DataSource => _dataSource;
     public override string ServerVersion => _connection?.DatabaseMetadata.FullVersion ?? string.Empty;
     public override int ConnectionTimeout => _connectionTimeout;
-    public override ConnectionState State => _state;
+    public override ConnectionState State => (ConnectionState)Volatile.Read(ref _state);
     protected ISqlConnection NativeConnection =>
         _connection ?? throw new InvalidOperationException("The connection is not open.");
     private List<ApexDbCommand>? _preparedCommands;
@@ -1235,13 +1345,16 @@ public abstract class ApexDbConnection : DbConnection
     protected void AttachOpenConnection(ISqlConnection connection)
     {
         ArgumentNullException.ThrowIfNull(connection);
-        if (_connection is not null) throw new InvalidOperationException("The connection is already open.");
+        if (Interlocked.CompareExchange(ref _state, (int)ConnectionState.Open, (int)ConnectionState.Closed) != (int)ConnectionState.Closed)
+        {
+            throw new InvalidOperationException("The connection is already open.");
+        }
+
         _connection = connection;
-        _state = ConnectionState.Open;
     }
     internal async ValueTask<bool> OpenForCommandAsync(CancellationToken cancellationToken)
     {
-        if (_state == ConnectionState.Open) return false;
+        if (State == ConnectionState.Open) return false;
         if (!_autoOpenForCommands)
         {
             throw new InvalidOperationException("The connection must be open before executing a command.");
@@ -1260,22 +1373,27 @@ public abstract class ApexDbConnection : DbConnection
 
     private async Task OpenConnectionAsync(CancellationToken cancellationToken)
     {
-        if (_state == ConnectionState.Open) return;
-        var previous = _state;
-        _state = ConnectionState.Connecting;
-        OnStateChange(new StateChangeEventArgs(previous, _state));
+        var previous = (ConnectionState)Interlocked.CompareExchange(
+            ref _state,
+            (int)ConnectionState.Connecting,
+            (int)ConnectionState.Closed);
+        if (previous == ConnectionState.Open) return;
+        if (previous != ConnectionState.Closed)
+        {
+            throw new InvalidOperationException("The connection is already opening.");
+        }
+
+        OnStateChange(new StateChangeEventArgs(previous, ConnectionState.Connecting));
         try
         {
             _connection = await OpenCoreAsync(cancellationToken).ConfigureAwait(false);
-            previous = _state;
-            _state = ConnectionState.Open;
-            OnStateChange(new StateChangeEventArgs(previous, _state));
+            Volatile.Write(ref _state, (int)ConnectionState.Open);
+            OnStateChange(new StateChangeEventArgs(ConnectionState.Connecting, ConnectionState.Open));
         }
         catch
         {
-            previous = _state;
-            _state = ConnectionState.Closed;
-            OnStateChange(new StateChangeEventArgs(previous, _state));
+            Volatile.Write(ref _state, (int)ConnectionState.Closed);
+            OnStateChange(new StateChangeEventArgs(ConnectionState.Connecting, ConnectionState.Closed));
             throw;
         }
     }
@@ -1290,9 +1408,8 @@ public abstract class ApexDbConnection : DbConnection
         _preparedCommands = null;
         var connection = _connection;
         _connection = null;
-        var previous = _state;
-        _state = ConnectionState.Closed;
-        OnStateChange(new StateChangeEventArgs(previous, _state));
+        var previous = (ConnectionState)Interlocked.Exchange(ref _state, (int)ConnectionState.Closed);
+        OnStateChange(new StateChangeEventArgs(previous, ConnectionState.Closed));
         try
         {
             await connection.DisposeAsync().ConfigureAwait(false);
@@ -1521,9 +1638,9 @@ internal sealed class ApexDbBatchDataReader : DbDataReader, IDbColumnSchemaGener
     }
 
     public override int Depth => _reader.Depth;
-    public override int FieldCount => _reader.FieldCount;
-    public override bool HasRows => _reader.HasRows;
-    public override bool IsClosed => _closed || _reader.IsClosed;
+    public override int FieldCount => _closed || _currentReleased ? 0 : _reader.FieldCount;
+    public override bool HasRows => !_closed && !_currentReleased && _reader.HasRows;
+    public override bool IsClosed => _closed;
     public override int RecordsAffected =>
         _currentReleased
             ? _recordsAffected
@@ -1560,7 +1677,12 @@ internal sealed class ApexDbBatchDataReader : DbDataReader, IDbColumnSchemaGener
     public override IEnumerator GetEnumerator() => throw ApexDbCommand.AsyncOnly();
     public override bool Read() => throw ApexDbCommand.AsyncOnly();
     public override bool NextResult() => throw ApexDbCommand.AsyncOnly();
-    public override Task<bool> ReadAsync(CancellationToken cancellationToken) => _reader.ReadAsync(cancellationToken);
+    public override Task<bool> ReadAsync(CancellationToken cancellationToken)
+    {
+        if (_closed) throw new InvalidOperationException("The reader is closed.");
+        if (_currentReleased) return Task.FromResult(false);
+        return _reader.ReadAsync(cancellationToken);
+    }
     public override Task<bool> IsDBNullAsync(int ordinal, CancellationToken cancellationToken) =>
         _reader.IsDBNullAsync(ordinal, cancellationToken);
     public override Task<T> GetFieldValueAsync<T>(int ordinal, CancellationToken cancellationToken) =>
@@ -1568,12 +1690,13 @@ internal sealed class ApexDbBatchDataReader : DbDataReader, IDbColumnSchemaGener
 
     public override async Task<bool> NextResultAsync(CancellationToken cancellationToken)
     {
-        if (_closed) return false;
+        if (_closed) throw new InvalidOperationException("The reader is closed.");
         if ((_behavior & CommandBehavior.SingleResult) != 0)
         {
             await DrainRemainingAsync(cancellationToken).ConfigureAwait(false);
             return false;
         }
+        if (_currentReleased) return false;
 
         if (await _reader.NextResultAsync(cancellationToken).ConfigureAwait(false)) return true;
         if (_index + 1 >= _commandCount)
@@ -1641,19 +1764,24 @@ internal sealed class ApexDbBatchDataReader : DbDataReader, IDbColumnSchemaGener
     private async ValueTask DrainRemainingAsync(CancellationToken cancellationToken)
     {
         if (_allCommandsDrained) return;
-        await ReleaseCurrentAsync(drain: true, cancellationToken).ConfigureAwait(false);
-        while (_index + 1 < _commandCount)
+        try
         {
-            _index++;
-            var next = await _create(_index, cancellationToken).ConfigureAwait(false);
-            _batchCommand = next.BatchCommand;
-            _command = next.Command;
-            _reader = next.Reader;
-            _currentReleased = false;
             await ReleaseCurrentAsync(drain: true, cancellationToken).ConfigureAwait(false);
+            while (_index + 1 < _commandCount)
+            {
+                _index++;
+                var next = await _create(_index, cancellationToken).ConfigureAwait(false);
+                _batchCommand = next.BatchCommand;
+                _command = next.Command;
+                _reader = next.Reader;
+                _currentReleased = false;
+                await ReleaseCurrentAsync(drain: true, cancellationToken).ConfigureAwait(false);
+            }
         }
-
-        _allCommandsDrained = true;
+        finally
+        {
+            _allCommandsDrained = true;
+        }
     }
 
     private async ValueTask ReleaseCurrentAsync(bool drain, CancellationToken cancellationToken)
@@ -1775,13 +1903,16 @@ public abstract class ApexDbBatch : DbBatch
         ValidateConfiguration();
         await DisposePreparedCommandsAsync().ConfigureAwait(false);
         var prepared = new List<ApexDbCommand>(_commands.Count);
+        _activeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
             foreach (ApexDbBatchCommand command in _commands)
             {
                 var dbCommand = CreateCommand(command);
+                dbCommand.CommandTimeout = Timeout;
                 prepared.Add(dbCommand);
-                await dbCommand.PrepareAsync(cancellationToken).ConfigureAwait(false);
+                Volatile.Write(ref _executingCommand, dbCommand);
+                await dbCommand.PrepareAsync(_activeCancellation.Token).ConfigureAwait(false);
             }
             _preparedCommands = prepared;
             _preparedState = PreparedBatchState.Capture(_commands, _connection!, _transaction);
@@ -1793,6 +1924,12 @@ public abstract class ApexDbBatch : DbBatch
                 await command.DisposeAsync().ConfigureAwait(false);
             }
             throw;
+        }
+        finally
+        {
+            Volatile.Write(ref _executingCommand, null);
+            _activeCancellation.Dispose();
+            _activeCancellation = null;
         }
     }
     public override int ExecuteNonQuery() => throw ApexDbCommand.AsyncOnly();
@@ -1951,7 +2088,7 @@ public abstract class ApexDbBatch : DbBatch
                     }
                     catch
                     {
-                        await command.DisposeAsync().ConfigureAwait(false);
+                        await ReleaseExecutionCommandAsync(command).ConfigureAwait(false);
                         throw;
                     }
                 },
@@ -2206,7 +2343,8 @@ internal static class ApexDbTypeConverter
             case DbType.Binary:
                 switch (value)
                 {
-                    case byte[] or ReadOnlyMemory<byte>:
+                    case byte[] when value.GetType() == typeof(byte[]):
+                    case ReadOnlyMemory<byte>:
                         return SqlValue.From(value);
                     case Memory<byte> memory:
                         return (ReadOnlyMemory<byte>)memory;

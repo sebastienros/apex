@@ -138,6 +138,33 @@ public sealed class AzureIdentityExtensionsTests
     private static string Base64UrlEncode(byte[] bytes) =>
         Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
+    [TestMethod]
+    public async Task NonObjectJwtPayloadFallsBackToManagementToken()
+    {
+        var nonObjectToken = new AccessToken(
+            $"{Base64UrlEncode("{\"alg\":\"none\"}"u8.ToArray())}.{Base64UrlEncode("null"u8.ToArray())}.sig",
+            DateTimeOffset.UtcNow.AddHours(1));
+        var managementToken = CreateToken("management", "upn", "fallback@contoso.com");
+        var credential = new RecordingCredential(nonObjectToken, managementToken);
+        var options = new PgConnectOptions().UseAzureIdentity(credential);
+
+        var resolved = await options.AuthenticationProvider!(CancellationToken.None);
+
+        Assert.AreEqual("fallback@contoso.com", resolved.Username);
+        Assert.HasCount(2, credential.Requests);
+    }
+
+    [TestMethod]
+    public void EmptyOrWhitespaceUsernameThrowsForInferredProviders()
+    {
+        var credential = new RecordingCredential(CreateToken("database", "upn", "user@contoso.com"));
+
+        Assert.ThrowsExactly<ArgumentException>(() =>
+            new PgConnectOptions().UseAzureIdentity(credential, new AzureIdentityOptions { Username = "" }));
+        Assert.ThrowsExactly<ArgumentException>(() =>
+            new MySqlConnectOptions().UseAzureIdentity(credential, new AzureIdentityOptions { Username = "   " }));
+    }
+
     private sealed class RecordingCredential(params AccessToken[] tokens) : TokenCredential
     {
         private readonly Queue<AccessToken> _tokens = new(tokens);

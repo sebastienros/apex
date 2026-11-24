@@ -276,6 +276,30 @@ internal sealed class SqlRowPageCollectionBuilder
         return _ranges = grown;
     }
 
+    /// <summary>Returns all pooled scratch and range buffers if <see cref="Build(IReadOnlyList{SqlColumn})"/> was not reached.</summary>
+    internal void Release()
+    {
+        ReturnScratch();
+        if (_firstPage.Ranges is { } firstRanges)
+        {
+            ArrayPool<SqlRowPageBuilder.RowRange>.Shared.Return(firstRanges);
+        }
+
+        _firstPage = default;
+        if (_additionalPages is { } additionalPages)
+        {
+            foreach (var page in additionalPages)
+            {
+                if (page.Ranges is { } ranges)
+                {
+                    ArrayPool<SqlRowPageBuilder.RowRange>.Shared.Return(ranges);
+                }
+            }
+
+            _additionalPages = null;
+        }
+    }
+
     private void ReturnScratch()
     {
         if (_scratch is { } scratch)
