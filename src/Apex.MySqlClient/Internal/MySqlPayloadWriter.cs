@@ -140,8 +140,7 @@ internal sealed class MySqlPayloadWriter
 
     internal void Release()
     {
-        var buffer = _buffer;
-        _buffer = [];
+        var buffer = Interlocked.Exchange(ref _buffer, []);
         _length = 0;
         if (buffer.Length != 0)
         {

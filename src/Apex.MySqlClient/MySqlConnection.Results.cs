@@ -317,17 +317,66 @@ public sealed partial class MySqlConnection
             HandleCompletionPacket(packet.Span);
         }
 
-        if (!_options.AllowLoadLocalInfile)
+        if (!_options.AllowLoadLocalInfile || fileError is not null)
         {
-            throw new NotSupportedException(
-              "The MySQL server requested LOCAL INFILE, but AllowLoadLocalInfile is disabled.");
-        }
+            if ((_status & MySqlServerStatus.MoreResultsExist) != 0)
+            {
+                await DrainRemainingResultsAsync(cancellationToken).ConfigureAwait(false);
+            }
 
-        if (fileError is not null)
-        {
-            ExceptionDispatchInfo.Capture(fileError).Throw();
+            if (!_options.AllowLoadLocalInfile)
+            {
+                throw new NotSupportedException(
+                  "The MySQL server requested LOCAL INFILE, but AllowLoadLocalInfile is disabled.");
+            }
+
+            if (fileError is IOException)
+            {
+                throw new LocalInfileFileException(fileError);
+            }
+
+            ExceptionDispatchInfo.Capture(fileError!).Throw();
         }
     }
+
+    private async ValueTask DrainRemainingResultsAsync(CancellationToken cancellationToken)
+    {
+        while ((_status & MySqlServerStatus.MoreResultsExist) != 0)
+        {
+            int columnCount;
+            using (var packet = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                var header = ReadResultHeader(packet.Span);
+                if (header.IsCompletion)
+                {
+                    continue;
+                }
+
+                if (header.IsLocalInfile)
+                {
+                    _writer.WritePacket((byte)(packet.Sequence + 1), ReadOnlySpan<byte>.Empty);
+                    await _writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+                    using var completion = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                    HandleCompletionPacket(completion.Span);
+                    continue;
+                }
+
+                columnCount = header.ColumnCount;
+            }
+
+            _ = await ReadColumnDefinitionsAsync(columnCount, binary: false, cancellationToken).ConfigureAwait(false);
+            while (true)
+            {
+                using var packet = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                if (TryCompleteResultSet(packet.Span))
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    private sealed class LocalInfileFileException(Exception inner) : Exception(inner.Message, inner);
 
     private static bool IsLocalInfileFileError(Exception exception) =>
       exception is IOException or

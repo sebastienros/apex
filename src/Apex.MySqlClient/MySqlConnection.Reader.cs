@@ -171,10 +171,36 @@ public sealed partial class MySqlConnection
             Task<bool> wait,
             CancellationToken cancellationToken)
         {
-            using var registration = cancellationToken.CanBeCanceled
-                ? cancellationToken.Register(_cancelAction)
-                : default;
-            return await wait.ConfigureAwait(false);
+            if (cancellationToken.CanBeCanceled)
+            {
+                lock (_gate)
+                {
+                    _readCancellationToken = cancellationToken;
+                }
+            }
+
+            try
+            {
+                using var registration = cancellationToken.CanBeCanceled
+                    ? cancellationToken.Register(_cancelAction)
+                    : default;
+                var result = await wait.ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                return result;
+            }
+            finally
+            {
+                if (cancellationToken.CanBeCanceled)
+                {
+                    lock (_gate)
+                    {
+                        if (_readCancellationToken == cancellationToken)
+                        {
+                            _readCancellationToken = default;
+                        }
+                    }
+                }
+            }
         }
 
         internal MySqlRowDecoder Decoder =>
@@ -482,6 +508,10 @@ public sealed partial class MySqlConnection
             catch (OperationCanceledException)
             {
             }
+            catch (LocalInfileFileException wrapper)
+            {
+                ExceptionDispatchInfo.Capture(wrapper.InnerException!).Throw();
+            }
             finally
             {
                 _operationCancellation.Dispose();
@@ -553,6 +583,11 @@ public sealed partial class MySqlConnection
                 _statement is { IsCached: true } statement)
             {
                 _connection.RemoveCachedStatement(statement.Sql, statement);
+                if (failure is MySqlException { ErrorNumber: 1615 } && _connection.IsUsable)
+                {
+                    _connection.WriteStatementClose(statement);
+                    await _connection._writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+                }
             }
 
             // From here on Cancel() no longer starts a KILL QUERY, and the one it may already have
@@ -728,6 +763,11 @@ public sealed partial class MySqlConnection
 
         private void Complete(Exception? error)
         {
+            if (error is LocalInfileFileException localInfile)
+            {
+                error = localInfile.InnerException;
+            }
+
             lock (_gate)
             {
                 if (_completed)

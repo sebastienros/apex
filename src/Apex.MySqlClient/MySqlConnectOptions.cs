@@ -142,7 +142,7 @@ public sealed record MySqlConnectOptions : SqlConnectOptions
 
         MySqlConnectOptions options = new()
         {
-            Host = uri.Host.Length == 0 ? new MySqlConnectOptions().Host : uri.Host,
+            Host = uri.DnsSafeHost.Length == 0 ? new MySqlConnectOptions().Host : uri.DnsSafeHost,
             Port = uri.IsDefaultPort ? 3306 : uri.Port,
             Database = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/')),
         };

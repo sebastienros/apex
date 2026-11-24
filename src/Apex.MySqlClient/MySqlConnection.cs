@@ -34,7 +34,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     private MySqlServerVersion _serverVersion = new("unknown", 0, 0, 0, false);
     private uint _connectionId;
     private int _broken;
-    private bool _disposed;
+    private int _disposed;
 
     private MySqlConnection(
         MySqlConnectOptions options,
@@ -98,8 +98,10 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     /// <summary>Gets the MySQL metadata of the columns of the most recent result set.</summary>
     public IReadOnlyList<MySqlColumnMetadata> LastColumns => _lastColumns;
 
+    private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
     internal bool IsUsable =>
-      !_disposed && !_scheduler.IsStopped && Volatile.Read(ref _broken) == 0 && _socket.Connected;
+      !IsDisposed && !_scheduler.IsStopped && Volatile.Read(ref _broken) == 0 && _socket.Connected;
 
     internal bool IsReadyForPool =>
       IsUsable &&
@@ -176,7 +178,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fetchSize);
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (parameters.Count == 0)
         {
             await foreach (var row in StreamTextRowsAsync(
@@ -205,7 +207,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
         string sql,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         var statement = await PrepareCoreAsync(sql, cancellationToken).ConfigureAwait(false);
         return new MySqlPreparedStatement(this, statement);
@@ -217,7 +219,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
         SqlParameters parameters = default,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         return parameters.Count == 0
           ? ValueTask.FromResult<ISqlRowReader>(CreateTextReader(sql, cancellationToken))
@@ -228,7 +230,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     public async ValueTask<ISqlTransaction> BeginTransactionAsync(
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (InTransaction)
         {
             throw new InvalidOperationException("A transaction is already active.");
@@ -243,7 +245,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     /// <param name="cancellationToken">Cancels the command before it is submitted.</param>
     public async ValueTask PingAsync(CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         await _scheduler.ExecuteAsync(
           async token =>
           {
@@ -266,7 +268,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     /// <param name="cancellationToken">Cancels the command before it is submitted.</param>
     public async ValueTask ResetAsync(CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         await _scheduler.ExecuteAsync(
           async token =>
           {
@@ -298,12 +300,11 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
 
-        _disposed = true;
         try
         {
             if (Volatile.Read(ref _broken) == 0)
@@ -344,6 +345,7 @@ public sealed partial class MySqlConnection : ISqlConnection, ISqlResultReaderCo
         EndOfStreamException or
         AuthenticationException or
         ObjectDisposedException or
+        DecoderFallbackException or
         MySqlConnectionAbortedException ||
       exception is MySqlException { IsFatal: true };
 

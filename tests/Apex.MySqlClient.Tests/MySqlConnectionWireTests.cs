@@ -1343,7 +1343,7 @@ public sealed partial class MySqlConnectionWireTests
             return response.Slice(position, length).ToArray();
         }
 
-        private async Task WritePacketAsync(byte[] payload)
+        internal async Task WritePacketAsync(byte[] payload)
         {
             var frame = new byte[payload.Length + MySqlProtocol.PacketHeaderLength];
             MySqlPacketReader.WriteHeader(frame, payload.Length, _sequence++);
