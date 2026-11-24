@@ -517,7 +517,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
         var metadata =
           EnsureTimeType(ordinal, column, typeof(TimeOnly?));
         var value = GetField(row.Span, ordinal, out var isNull);
-        return isNull ? null : ReadTimeOnly(value, metadata);
+        return isNull || IsNullZeroDate(value, ordinal) ? null : ReadTimeOnly(value, metadata);
     }
 
     public DateTime DecodeDateTime(
@@ -1690,7 +1690,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
           MySqlType.Double => _binary
           ? BitConverter.Int64BitsToDouble(ReadBinaryInt64(value))
           : MySqlValueCodec.ParseDouble(value),
-          MySqlType.Decimal or MySqlType.NewDecimal => (double)MySqlValueCodec.ParseDecimal(value),
+          MySqlType.Decimal or MySqlType.NewDecimal => MySqlValueCodec.ParseDouble(value),
           _ => metadata.IsUnsigned ? ReadUInt64(value, metadata) : ReadInt64(value, metadata),
       };
 
@@ -1768,7 +1768,7 @@ internal sealed class MySqlRowDecoder : ISqlRowDecoder
             return new Guid(value, bigEndian: true);
         }
 
-        Span<char> characters = stackalloc char[36];
+        Span<char> characters = stackalloc char[38];
         if (value.Length is 32 or 36 or 38)
         {
             var length = 0;

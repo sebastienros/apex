@@ -51,6 +51,31 @@ public sealed class MySqlDbConnection : ApexDbConnection
     protected override DbBatch CreateDbBatch() => new MySqlDbBatch { Connection = this };
     protected override DbTransaction CreateTransaction(ISqlTransaction transaction, IsolationLevel isolationLevel) =>
         new MySqlDbTransaction(transaction, this, isolationLevel);
+    protected override async ValueTask<DbTransaction> BeginDbTransactionAsync(
+        IsolationLevel isolationLevel,
+        CancellationToken cancellationToken = default)
+    {
+        if (isolationLevel == IsolationLevel.Unspecified)
+        {
+            return await base.BeginDbTransactionAsync(isolationLevel, cancellationToken).ConfigureAwait(false);
+        }
+
+        var sql = isolationLevel switch
+        {
+            IsolationLevel.ReadUncommitted => "SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED",
+            IsolationLevel.ReadCommitted => "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+            IsolationLevel.RepeatableRead => "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+            IsolationLevel.Serializable => "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+            _ => throw new NotSupportedException($"Isolation level '{isolationLevel}' is not supported."),
+        };
+
+        var transaction = await ApexExceptionBoundary.RunValueAsync(async () =>
+        {
+            await NativeConnection.ExecuteAsync(sql, cancellationToken).ConfigureAwait(false);
+            return await NativeConnection.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        }, TranslateException).ConfigureAwait(false);
+        return CreateTransaction(transaction, isolationLevel);
+    }
     internal ISqlConnection GetConnectionForCommand() => NativeConnection;
 }
 

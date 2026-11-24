@@ -22,7 +22,7 @@ public sealed partial class MySqlConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         var operation = MySqlOperationName.Get(sql);
         using var activity = SqlClientDiagnostics.StartQuery(
           "mysql",
@@ -56,6 +56,13 @@ public sealed partial class MySqlConnection
               barrier: true,
               cancellationToken).ConfigureAwait(false);
         }
+        catch (LocalInfileFileException wrapper)
+        {
+            error = wrapper.InnerException!;
+            activity?.SetStatus(ActivityStatusCode.Error, error.Message);
+            ExceptionDispatchInfo.Capture(error).Throw();
+            throw;
+        }
         catch (Exception exception)
         {
             error = exception;
@@ -81,6 +88,7 @@ public sealed partial class MySqlConnection
         var statement = await GetOrPrepareAsync(sql).ConfigureAwait(false);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 return await ExecuteStatementDirectAsync(statement, parameters, cancellationToken)
@@ -92,7 +100,14 @@ public sealed partial class MySqlConnection
               exception.ErrorNumber is 1243 or 1615)
             {
                 RemoveCachedStatement(sql, statement);
+                if (IsUsable)
+                {
+                    WriteStatementClose(statement);
+                    await FlushWriterAsync().ConfigureAwait(false);
+                }
+
                 statement = await GetOrPrepareAsync(sql).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
                 return await ExecuteStatementDirectAsync(statement, parameters, cancellationToken)
                   .ConfigureAwait(false);
             }
@@ -141,7 +156,7 @@ public sealed partial class MySqlConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         var operation = statement.Operation;
         using var activity = SqlClientDiagnostics.StartQuery(
             "mysql",
@@ -167,6 +182,13 @@ public sealed partial class MySqlConnection
                 cancellationToken,
                 flushBatch: true).ConfigureAwait(false);
         }
+        catch (LocalInfileFileException wrapper)
+        {
+            error = wrapper.InnerException!;
+            activity?.SetStatus(ActivityStatusCode.Error, error.Message);
+            ExceptionDispatchInfo.Capture(error).Throw();
+            throw;
+        }
         catch (Exception exception)
         {
             error = exception;
@@ -190,7 +212,7 @@ public sealed partial class MySqlConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         var operation = statement.Operation;
         using var activity = SqlClientDiagnostics.StartQuery(
             "mysql",
@@ -219,6 +241,13 @@ public sealed partial class MySqlConnection
                 barrier: cancellationToken.CanBeCanceled || _options.AllowLoadLocalInfile,
                 cancellationToken,
                 flushBatch: true).ConfigureAwait(false);
+        }
+        catch (LocalInfileFileException wrapper)
+        {
+            error = wrapper.InnerException!;
+            activity?.SetStatus(ActivityStatusCode.Error, error.Message);
+            ExceptionDispatchInfo.Capture(error).Throw();
+            throw;
         }
         catch (Exception exception)
         {
@@ -253,7 +282,7 @@ public sealed partial class MySqlConnection
         string sql,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         await _scheduler.ExecuteAsync(
           async token =>
           {
@@ -288,7 +317,7 @@ public sealed partial class MySqlConnection
 
     internal async ValueTask CloseStatementAsync(MySqlStatement statement)
     {
-        if (_disposed || statement.IsCached || !IsUsable)
+        if (IsDisposed || statement.IsCached || !IsUsable)
         {
             return;
         }
@@ -318,7 +347,7 @@ public sealed partial class MySqlConnection
         bool ownsStatement,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         return await MySqlCursor.CreateAsync(
           CreatePreparedReader(statement, parameters, ownsStatement, cancellationToken),
           fetchSize,
@@ -348,7 +377,7 @@ public sealed partial class MySqlConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         return ValueTask.FromResult<ISqlRowReader>(CreatePreparedReader(
           statement,
           parameters,
@@ -361,7 +390,7 @@ public sealed partial class MySqlConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         return parameters.Count == 0
           ? ValueTask.FromResult<ISqlRowReader>(
@@ -384,7 +413,7 @@ public sealed partial class MySqlConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         return ValueTask.FromResult<ISqlRowReader>(CreatePreparedReader(
           statement,
           parameters,
