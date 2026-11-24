@@ -101,20 +101,28 @@ internal sealed class TdsPacketReader
     /// Reads a whole message. A buffered reader returns memory it owns, which stays valid only
     /// until the next read; an exact reader returns a new array.
     /// </summary>
-    internal async ValueTask<TdsMessage> ReadMessageAsync(CancellationToken cancellationToken)
+    internal async ValueTask<TdsMessage> ReadMessageAsync(
+        CancellationToken cancellationToken,
+        int maxMessageBytes = int.MaxValue)
     {
         var type = await BeginMessageAsync(cancellationToken).ConfigureAwait(false);
         if (!_buffered)
         {
             return new TdsMessage(
               type,
-              await ReadOwnedPayloadAsync(cancellationToken).ConfigureAwait(false));
+              await ReadOwnedPayloadAsync(maxMessageBytes, cancellationToken).ConfigureAwait(false));
         }
 
         // Most responses fit one packet: hand out the received bytes without copying them.
         if (_packetEndsMessage && _packetPayloadRemaining <= _buffer.Length)
         {
             var length = _packetPayloadRemaining;
+            if (length > maxMessageBytes)
+            {
+                throw new InvalidDataException(
+                  $"TDS message length {length} exceeds the maximum allowed {maxMessageBytes} bytes.");
+            }
+
             if (_end - _start < length)
             {
                 await FillAsync(length, cancellationToken).ConfigureAwait(false);
@@ -135,6 +143,12 @@ internal sealed class TdsPacketReader
             }
 
             var length = _packetPayloadRemaining;
+            if (length > maxMessageBytes - written)
+            {
+                throw new InvalidDataException(
+                  $"TDS message length exceeds the maximum allowed {maxMessageBytes} bytes.");
+            }
+
             EnsureMessageCapacity(checked(written + length), written);
             await ReadPayloadExactlyAsync(
               _messageBuffer.AsMemory(written, length),
@@ -235,6 +249,7 @@ internal sealed class TdsPacketReader
     }
 
     private async ValueTask<ReadOnlyMemory<byte>> ReadOwnedPayloadAsync(
+        int maxMessageBytes,
         CancellationToken cancellationToken)
     {
         ArrayBufferWriter<byte> payload = new();
@@ -247,6 +262,12 @@ internal sealed class TdsPacketReader
             }
 
             var payloadLength = _packetPayloadRemaining;
+            if (payloadLength > maxMessageBytes - payload.WrittenCount)
+            {
+                throw new InvalidDataException(
+                  $"TDS message length exceeds the maximum allowed {maxMessageBytes} bytes.");
+            }
+
             await ReadPayloadExactlyAsync(
               payload.GetMemory(payloadLength)[..payloadLength],
               cancellationToken).ConfigureAwait(false);

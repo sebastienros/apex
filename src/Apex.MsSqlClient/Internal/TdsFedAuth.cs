@@ -6,7 +6,19 @@ namespace Apex.MsSqlClient.Internal;
 internal readonly record struct TdsFedAuthLogin(
     string AccessToken,
     bool EchoFederatedAuthenticationRequired,
-    ReadOnlyMemory<byte> Nonce);
+    ReadOnlyMemory<byte> Nonce)
+{
+    private bool PrintMembers(StringBuilder builder)
+    {
+        builder.Append("AccessToken = ");
+        builder.Append(string.IsNullOrEmpty(AccessToken) ? string.Empty : "***");
+        builder.Append(", EchoFederatedAuthenticationRequired = ");
+        builder.Append(EchoFederatedAuthenticationRequired);
+        builder.Append(", Nonce = ");
+        builder.Append(Nonce);
+        return true;
+    }
+}
 
 internal readonly record struct TdsFedAuthInfo(string StsUrl, string ServicePrincipalName);
 
@@ -20,9 +32,10 @@ internal static class TdsFedAuth
     {
         var token = EncodeToken(login.AccessToken);
         var nonce = login.Nonce.Span;
-        ArrayBufferWriter<byte> writer = new(token.Length + nonce.Length + 10);
+        var featureDataLength = checked(1 + sizeof(int) + token.Length + nonce.Length);
+        ArrayBufferWriter<byte> writer = new(checked(1 + sizeof(int) + featureDataLength));
         writer.WriteByte(TdsFeatureId.FedAuth);
-        writer.WriteInt32LittleEndian(checked(1 + sizeof(int) + token.Length + nonce.Length));
+        writer.WriteInt32LittleEndian(featureDataLength);
         writer.WriteByte(
           (byte)((TdsFedAuthLibrary.SecurityToken << 1) |
             (login.EchoFederatedAuthenticationRequired ? 1 : 0)));
@@ -36,8 +49,9 @@ internal static class TdsFedAuth
     {
         var token = EncodeToken(login.AccessToken);
         var nonce = login.Nonce.Span;
-        ArrayBufferWriter<byte> writer = new(token.Length + nonce.Length + 8);
-        writer.WriteInt32LittleEndian(checked(sizeof(int) + token.Length + nonce.Length));
+        var totalLength = checked(sizeof(int) + token.Length + nonce.Length);
+        ArrayBufferWriter<byte> writer = new(checked(sizeof(int) + totalLength));
+        writer.WriteInt32LittleEndian(totalLength);
         writer.WriteInt32LittleEndian(token.Length);
         writer.Write(token);
         writer.Write(nonce);

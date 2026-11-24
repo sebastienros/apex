@@ -167,6 +167,14 @@ public sealed class MySqlConnectOptionsTests
     }
 
     [TestMethod]
+    public void MissingEqualsDoesNotEchoSecretFragment()
+    {
+        var error = Assert.ThrowsExactly<FormatException>(
+          () => MySqlConnectOptions.Parse("Server=db;Password=part1;hunter2"));
+        Assert.IsFalse(error.Message.Contains("hunter2", StringComparison.Ordinal));
+    }
+
+    [TestMethod]
     public void RejectsMalformedConnectionString()
     {
         Assert.ThrowsExactly<FormatException>(() => MySqlConnectOptions.Parse("port=invalid"));

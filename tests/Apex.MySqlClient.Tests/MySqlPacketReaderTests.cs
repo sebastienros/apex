@@ -247,6 +247,44 @@ public sealed class MySqlPacketReaderTests
         await reader.CompleteAsync();
     }
 
+    [TestMethod]
+    public async Task ReadFromStreamRejectsPayloadExceedingMaxLength()
+    {
+        (var client, var server) = CreateConnectedStreams();
+        await using (client)
+        await using (server)
+        {
+            // Advertise a payload 1 byte larger than the pre-auth limit without sending the body.
+            var header = new byte[4];
+            MySqlPacketReader.WriteHeader(header, MySqlProtocol.MaximumPreAuthPayloadLength + 1, 0);
+            await client.WriteAsync(header);
+
+            await Assert.ThrowsExactlyAsync<InvalidDataException>(
+              () => MySqlPacketReader.ReadFromStreamAsync(
+                server,
+                CancellationToken.None,
+                MySqlProtocol.MaximumPreAuthPayloadLength).AsTask());
+        }
+    }
+
+    [TestMethod]
+    public async Task ReadAsyncRejectsPayloadExceedingMaxLength()
+    {
+        Pipe pipe = new();
+        MySqlPacketReader reader = new(pipe.Reader);
+        var header = new byte[4];
+        MySqlPacketReader.WriteHeader(header, MySqlProtocol.MaximumPreAuthPayloadLength + 1, 0);
+        await pipe.Writer.WriteAsync(header);
+
+        await Assert.ThrowsExactlyAsync<InvalidDataException>(
+          () => reader.ReadAsync(
+            CancellationToken.None,
+            MySqlProtocol.MaximumPreAuthPayloadLength).AsTask());
+
+        await pipe.Writer.CompleteAsync();
+        await reader.CompleteAsync();
+    }
+
     private static byte[] CreatePattern(int length, byte seed)
     {
         var result = new byte[length];

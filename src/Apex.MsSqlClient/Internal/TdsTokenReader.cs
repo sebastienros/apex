@@ -371,27 +371,31 @@ internal sealed class TdsTokenReader
     private static MsSqlRoutingInfo ReadRouting(ref TdsPayloadReader reader)
     {
         int length = reader.ReadUInt16LittleEndian();
-        var start = reader.Position;
         if (length < 5)
         {
             throw new InvalidDataException("SQL Server routing data is too short.");
         }
 
-        var protocol = reader.ReadByte();
+        TdsPayloadReader routing = new(reader.ReadSpan(length));
+        var protocol = routing.ReadByte();
         if (protocol != 0)
         {
             throw new NotSupportedException(
               $"SQL Server routing protocol {protocol} is not TCP/IP.");
         }
 
-        int port = reader.ReadUInt16LittleEndian();
+        int port = routing.ReadUInt16LittleEndian();
         if (port == 0)
         {
             throw new InvalidDataException("SQL Server routing port cannot be zero.");
         }
 
-        var host = reader.ReadUsVarChar();
-        reader.Position = checked(start + length);
+        var host = routing.ReadUsVarChar();
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            throw new InvalidDataException("SQL Server routing host cannot be empty.");
+        }
+
         return new MsSqlRoutingInfo(host, port);
     }
 

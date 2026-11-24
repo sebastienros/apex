@@ -370,9 +370,9 @@ internal static class TdsRequestWriter
             var nameAndSpace = parameterNames is not null
               ? parameterNames[i].Length + 1
               : 3 + CountDigits(i + 1);
-            length += nameAndSpace + (value.Kind == SqlValueKind.Decimal
+            length = checked(length + nameAndSpace + (value.Kind == SqlValueKind.Decimal
               ? DecimalDefinitionPrefix.Length + CountDigits(GetDecimalScale(value.GetRequired<decimal>())) + 1
-              : GetDefinition(value).Length);
+              : GetDefinition(value).Length));
         }
 
         return length;

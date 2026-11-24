@@ -150,6 +150,22 @@ public sealed class MySqlPayloadWriterTests
     }
 
     [TestMethod]
+    public void WriteNullTerminatedStringRejectsEmbeddedNul()
+    {
+        MySqlPayloadWriter writer = new();
+        try
+        {
+            Assert.ThrowsExactly<ArgumentException>(
+              () => writer.WriteNullTerminatedString("root\0smuggled"));
+            Assert.AreEqual(0, writer.Length);
+        }
+        finally
+        {
+            writer.Release();
+        }
+    }
+
+    [TestMethod]
     public void GrowsBufferBeyondInitialCapacity()
     {
         MySqlPayloadWriter writer = new(capacity: 4);

@@ -889,7 +889,8 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
           TdsPreLogin.Encode(requestedLevel, requestFederatedAuthentication),
           cancellationToken).ConfigureAwait(false);
         var response =
-          await reader.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
+          await reader.ReadMessageAsync(cancellationToken, maxMessageBytes: 64 * 1024)
+            .ConfigureAwait(false);
         if (response.Type != TdsMessageType.TabularResult)
         {
             throw new InvalidDataException(
@@ -911,13 +912,17 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         var transport = handshakeStream ?? stream;
         var validation =
           options.CertificateValidationCallback ??
-          (options.TrustServerCertificate ? static (_, _, _, _) => true : null);
+          (options.TrustServerCertificate && options.EncryptionMode != MsSqlEncryptionMode.Strict
+            ? static (_, _, _, _) => true
+            : null);
         var certificates = options.ClientCertificates.Count == 0
           ? null
           : new X509CertificateCollection(options.ClientCertificates.ToArray());
         SslClientAuthenticationOptions authentication = new()
         {
-            TargetHost = options.TlsHostName ?? options.Host,
+            TargetHost = string.IsNullOrWhiteSpace(options.TlsHostName)
+              ? options.Host
+              : options.TlsHostName.Trim(),
             EnabledSslProtocols = SslProtocols.None,
             CertificateRevocationCheckMode = options.CertificateRevocationCheckMode,
             ClientCertificates = certificates,
@@ -998,7 +1003,8 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         while (!final)
         {
             var message =
-              await _reader.ReadMessageAsync(cancellationToken).ConfigureAwait(false);
+              await _reader.ReadMessageAsync(cancellationToken, maxMessageBytes: 1024 * 1024)
+                .ConfigureAwait(false);
             if (message.Type != TdsMessageType.TabularResult)
             {
                 throw new InvalidDataException(

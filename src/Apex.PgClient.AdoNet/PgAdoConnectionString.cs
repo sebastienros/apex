@@ -50,7 +50,7 @@ internal static class PgAdoConnectionString
 
             if (position == input.Length || input[position] != '=')
             {
-                throw new FormatException($"PostgreSQL connection-string key '{key}' has no value.");
+                throw new FormatException("PostgreSQL connection-string key has no value.");
             }
 
             position++;

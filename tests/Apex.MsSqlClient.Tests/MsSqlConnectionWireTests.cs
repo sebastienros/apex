@@ -252,7 +252,7 @@ public sealed partial class MsSqlConnectionWireTests
             TestOptions(port) with
             {
               EncryptionMode = MsSqlEncryptionMode.Strict,
-              TrustServerCertificate = true,
+              CertificateValidationCallback = static (_, _, _, _) => true,
             });
 
           Assert.IsTrue(connection.IsSecure);
@@ -264,6 +264,37 @@ public sealed partial class MsSqlConnectionWireTests
         finally
         {
           listener.Stop();
+        }
+      }
+
+      [TestMethod]
+      public async Task StrictEncryptionIgnoresTrustServerCertificate()
+      {
+        using var certificate = CreateCertificate();
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+        var server = RunStrictTlsQueryServerAsync(listener, certificate);
+        try
+        {
+          await Assert.ThrowsExactlyAsync<AuthenticationException>(async () =>
+            await MsSqlClient.ConnectAsync(
+              TestOptions(port) with
+              {
+                EncryptionMode = MsSqlEncryptionMode.Strict,
+                TrustServerCertificate = true,
+              }));
+        }
+        finally
+        {
+          listener.Stop();
+          try
+          {
+            await server;
+          }
+          catch
+          {
+          }
         }
       }
 
@@ -282,7 +313,7 @@ public sealed partial class MsSqlConnectionWireTests
             TestOptions(port) with
             {
               EncryptionMode = MsSqlEncryptionMode.Strict,
-              TrustServerCertificate = true,
+              CertificateValidationCallback = static (_, _, _, _) => true,
               UseExperimentalLowLevelTls = true,
             });
 

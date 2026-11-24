@@ -62,7 +62,10 @@ public sealed partial class MySqlConnection
             stream = new NetworkStream(socket, ownsSocket: false);
             MySqlHandshake handshake;
             using (var packet =
-              await MySqlPacketReader.ReadFromStreamAsync(stream, timeout.Token).ConfigureAwait(false))
+              await MySqlPacketReader.ReadFromStreamAsync(
+                stream,
+                timeout.Token,
+                MySqlProtocol.MaximumPreAuthPayloadLength).ConfigureAwait(false))
             {
                 if (MySqlPackets.IsError(packet.Span))
                 {
@@ -291,7 +294,9 @@ public sealed partial class MySqlConnection
 
             while (true)
             {
-                using var packet = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+                using var packet = await _reader.ReadAsync(
+                  cancellationToken,
+                  MySqlProtocol.MaximumPreAuthPayloadLength).ConfigureAwait(false);
                 state = ProcessAuthenticationPacket(packet.Span, packet.Sequence, password, state);
                 if (state.Completed)
                 {

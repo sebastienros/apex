@@ -63,30 +63,40 @@ internal sealed class MySqlPacketReader
     {
     }
 
-    internal ValueTask<MySqlPacket> ReadAsync(CancellationToken cancellationToken)
+    internal ValueTask<MySqlPacket> ReadAsync(
+        CancellationToken cancellationToken,
+        int maxPayloadLength = MySqlProtocol.MaximumPayloadLength)
     {
         // A single frame that is already received is sliced out without the asynchronous path,
         // which TryPeek leaves every other case to (a partial frame, a split packet, a frame larger
         // than the buffer).
         if (TryPeek(out var packet, out var totalLength))
         {
+            if (packet.Length > maxPayloadLength)
+            {
+                throw new InvalidDataException(
+                  $"MySQL payload exceeds {maxPayloadLength} bytes.");
+            }
+
             Consume(totalLength);
             return new ValueTask<MySqlPacket>(packet);
         }
 
-        return ReadSlowAsync(cancellationToken);
+        return ReadSlowAsync(cancellationToken, maxPayloadLength);
     }
 
-    private async ValueTask<MySqlPacket> ReadSlowAsync(CancellationToken cancellationToken)
+    private async ValueTask<MySqlPacket> ReadSlowAsync(
+        CancellationToken cancellationToken,
+        int maxPayloadLength)
     {
-        var first = await ReadFrameAsync(cancellationToken).ConfigureAwait(false);
+        var first = await ReadFrameAsync(cancellationToken, maxPayloadLength).ConfigureAwait(false);
         if (first.Length < MySqlProtocol.MaximumFramePayloadLength)
         {
             return first;
         }
 
         var accumulated = ArrayPool<byte>.Shared.Rent(
-          Math.Min(MySqlProtocol.MaximumPayloadLength, first.Length * 2));
+          Math.Min(maxPayloadLength, first.Length * 2));
         try
         {
             first.Span.CopyTo(accumulated);
@@ -95,7 +105,9 @@ internal sealed class MySqlPacketReader
             first.Dispose();
             while (true)
             {
-                using var next = await ReadFrameAsync(cancellationToken).ConfigureAwait(false);
+                using var next = await ReadFrameAsync(
+                    cancellationToken,
+                    maxPayloadLength - length).ConfigureAwait(false);
                 if (next.Sequence != expectedSequence)
                 {
                     throw new InvalidDataException(
@@ -104,17 +116,17 @@ internal sealed class MySqlPacketReader
                 }
 
                 expectedSequence++;
-                if (next.Length > MySqlProtocol.MaximumPayloadLength - length)
+                if (next.Length > maxPayloadLength - length)
                 {
                     throw new InvalidDataException(
-                      $"MySQL payload exceeds {MySqlProtocol.MaximumPayloadLength} bytes.");
+                      $"MySQL payload exceeds {maxPayloadLength} bytes.");
                 }
 
                 if (length + next.Length > accumulated.Length)
                 {
                     var grown = ArrayPool<byte>.Shared.Rent(
                       Math.Max(length + next.Length, Math.Min(
-                        MySqlProtocol.MaximumPayloadLength,
+                        maxPayloadLength,
                         accumulated.Length * 2)));
                     accumulated.AsSpan(0, length).CopyTo(grown);
                     ArrayPool<byte>.Shared.Return(accumulated);
@@ -206,12 +218,19 @@ internal sealed class MySqlPacketReader
     /// <summary>Reads one packet directly from a stream, without buffering beyond its payload.</summary>
     internal static async ValueTask<MySqlPacket> ReadFromStreamAsync(
         Stream stream,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int maxPayloadLength = MySqlProtocol.MaximumPayloadLength)
     {
         var header = new byte[MySqlProtocol.PacketHeaderLength];
         await stream.ReadExactlyAsync(header, cancellationToken).ConfigureAwait(false);
         var length = header[0] | (header[1] << 8) | (header[2] << 16);
         var sequence = header[3];
+        if (length > maxPayloadLength)
+        {
+            throw new InvalidDataException(
+              $"MySQL payload exceeds {maxPayloadLength} bytes.");
+        }
+
         if (length == 0)
         {
             return new MySqlPacket(ReadOnlyMemory<byte>.Empty, null, sequence);
@@ -232,7 +251,9 @@ internal sealed class MySqlPacketReader
         return new MySqlPacket(payload.AsMemory(0, length), payload, sequence);
     }
 
-    private async ValueTask<MySqlPacket> ReadFrameAsync(CancellationToken cancellationToken)
+    private async ValueTask<MySqlPacket> ReadFrameAsync(
+        CancellationToken cancellationToken,
+        int maxPayloadLength)
     {
         await EnsureBufferedAsync(
             MySqlProtocol.PacketHeaderLength,
@@ -242,6 +263,12 @@ internal sealed class MySqlPacketReader
             buffer.AsSpan(_start, MySqlProtocol.PacketHeaderLength));
         var length = (int)(header & 0x00FF_FFFF);
         var sequence = (byte)(header >> 24);
+        if (length > maxPayloadLength)
+        {
+            throw new InvalidDataException(
+              $"MySQL payload exceeds {maxPayloadLength} bytes.");
+        }
+
         var totalLength = MySqlProtocol.PacketHeaderLength + length;
 
         if (totalLength > buffer.Length)
