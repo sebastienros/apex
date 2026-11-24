@@ -20,7 +20,7 @@ internal static class PgAdoConnectionString
 
     internal static string ToNative(string connectionString)
     {
-        if (IsUri(connectionString) || !connectionString.Contains(';', StringComparison.Ordinal))
+        if (IsUri(connectionString) || !IsAdoStyle(connectionString))
         {
             return connectionString;
         }
@@ -84,6 +84,58 @@ internal static class PgAdoConnectionString
     private static bool IsUri(string connectionString) =>
         connectionString.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
         connectionString.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsAdoStyle(string connectionString)
+    {
+        var input = connectionString.AsSpan();
+        var inSingleQuote = false;
+        var inDoubleQuote = false;
+        var sawDoubleQuotedValue = false;
+        for (var i = 0; i < input.Length; i++)
+        {
+            var current = input[i];
+            if (inSingleQuote)
+            {
+                if (current == '\\' && i + 1 < input.Length)
+                {
+                    i++;
+                }
+                else if (current == '\'')
+                {
+                    inSingleQuote = false;
+                }
+            }
+            else if (inDoubleQuote)
+            {
+                if (current == '"')
+                {
+                    if (i + 1 < input.Length && input[i + 1] == '"')
+                    {
+                        i++;
+                    }
+                    else
+                    {
+                        inDoubleQuote = false;
+                    }
+                }
+            }
+            else if (current == ';')
+            {
+                return true;
+            }
+            else if (current == '\'')
+            {
+                inSingleQuote = true;
+            }
+            else if (current == '"')
+            {
+                inDoubleQuote = true;
+                sawDoubleQuotedValue = true;
+            }
+        }
+
+        return sawDoubleQuotedValue;
+    }
 
     // ADO.NET quoting: the value is wrapped in ' or ", and the quote character is doubled to
     // include it literally. Backslashes have no special meaning.

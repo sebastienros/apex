@@ -291,7 +291,7 @@ internal static class PgAdoColumnTypes
     {
         16 => typeof(bool?[]),
         17 => typeof(byte[][]),
-        18 or 19 or 25 or 1043 => typeof(string[]),
+        18 or 19 or 25 or 1042 or 1043 => typeof(string[]),
         20 => typeof(long?[]),
         21 => typeof(short?[]),
         23 => typeof(int?[]),

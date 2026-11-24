@@ -69,6 +69,13 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
             return null;
         }
 
+        if (_typeRegistry.HasCodecs &&
+            column.Format == SqlDataFormat.Binary &&
+            _typeRegistry.TryDecode(column.TypeId, field.Value, out var registered))
+        {
+            return registered;
+        }
+
         if (CanDecodeAsString(column))
         {
             return _strings.GetString(field.Value.Span);
@@ -1690,8 +1697,25 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         out T value)
     {
         var field = GetField(row, ordinal);
-        if (field.IsNull ||
-            !_typeRegistry.TryDecode(column.TypeId, field.Value, out var registeredValue))
+        if (field.IsNull)
+        {
+            var targetType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
+            if (!_typeRegistry.CanDecode(column.TypeId, targetType))
+            {
+                value = default!;
+                return false;
+            }
+
+            if (default(T) is not null)
+            {
+                throw new InvalidCastException($"Column {ordinal} contains NULL.");
+            }
+
+            value = default!;
+            return true;
+        }
+
+        if (!_typeRegistry.TryDecode(column.TypeId, field.Value, out var registeredValue))
         {
             value = default!;
             return false;
@@ -1954,14 +1978,14 @@ internal sealed class PgRowDecoder : ISqlRowDecoder
         602 or 603 or 604 or 628 or 650 or 700 or 701 or 718 or 774 or
         790 or 829 or 869 or 1082 or 1083 or 1114 or 1184 or 1186 or
         1266 or 1560 or 1562 or 1700 or 2278 or 2950 or 3802 or
-        1000 or 1001 or 1002 or 1003 or 1005 or 1007 or 1009 or 1015 or
+        1000 or 1001 or 1002 or 1003 or 1005 or 1007 or 1009 or 1014 or 1015 or
         1016 or 1017 or 1018 or 1019 or 1020 or 1021 or 1022 or 1027 or
         1040 or 1041 or 1115 or 1182 or 1183 or 1185 or 1187 or 1231 or 1270 or
         199 or 629 or 651 or 719 or 775 or 791 or 1561 or 1563 or 2951 or 3807);
 
     private static bool IsArrayType(uint typeId) =>
       typeId is
-        1000 or 1001 or 1002 or 1003 or 1005 or 1007 or 1009 or 1015 or
+        1000 or 1001 or 1002 or 1003 or 1005 or 1007 or 1009 or 1014 or 1015 or
         1016 or 1017 or 1018 or 1019 or 1020 or 1021 or 1022 or 1027 or
         1040 or 1041 or 1115 or 1182 or 1183 or 1185 or 1187 or 1231 or 1270 or
         199 or 629 or 651 or 719 or 775 or 791 or 1561 or 1563 or 2951 or 3807;

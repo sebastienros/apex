@@ -29,8 +29,10 @@ internal static class PgArrayParser
 
         List<string?> values = [];
         var position = 0;
+        var expectingElement = false;
         while (position < input.Length)
         {
+            expectingElement = false;
             if (input[position] == '{')
             {
                 throw new NotSupportedException("Multidimensional PostgreSQL arrays are not supported yet.");
@@ -79,6 +81,11 @@ internal static class PgArrayParser
             }
 
             var parsed = item.ToString();
+            if (!quoted && parsed.Length == 0)
+            {
+                throw new FormatException("PostgreSQL array contains an empty unquoted value.");
+            }
+
             values.Add(!quoted && parsed == "NULL" ? null : parsed);
             if (position < input.Length)
             {
@@ -86,7 +93,14 @@ internal static class PgArrayParser
                 {
                     throw new FormatException("PostgreSQL array values must be comma-separated.");
                 }
+
+                expectingElement = true;
             }
+        }
+
+        if (expectingElement)
+        {
+            throw new FormatException("PostgreSQL array has a trailing delimiter.");
         }
 
         return values.ToArray();

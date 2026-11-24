@@ -58,4 +58,15 @@ public sealed class PgAdoConnectionStringTests
         Assert.AreEqual("db.example", connection.DataSource);
         Assert.AreEqual("app", connection.Database);
     }
+
+    [TestMethod]
+    public void LibpqSingleQuotedSemicolonAndSingleEntryDoubleQuotedAdoStringsParseCleanly()
+    {
+        using PgDbConnection libpq = new("host=localhost password='a;b' dbname=app");
+        Assert.AreEqual("localhost", libpq.DataSource);
+        Assert.AreEqual("app", libpq.Database);
+
+        using PgDbConnection singleDoubleQuoted = new("Host=\"my host\"");
+        Assert.AreEqual("my host", singleDoubleQuoted.DataSource);
+    }
 }

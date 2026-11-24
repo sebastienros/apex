@@ -93,9 +93,24 @@ public sealed class PgTransaction : ISqlTransaction
 
     public async ValueTask DisposeAsync()
     {
-        if (!IsCompleted)
+        if (IsCompleted)
+        {
+            return;
+        }
+
+        if (!_connection.IsUsable)
+        {
+            IsCompleted = true;
+            return;
+        }
+
+        try
         {
             await RollbackAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (PgConnection.IsFatalConnectionError(exception))
+        {
+            IsCompleted = true;
         }
     }
 

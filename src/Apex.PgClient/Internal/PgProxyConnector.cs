@@ -67,7 +67,7 @@ internal static class PgProxyConnector
     {
         var authority = IPAddress.TryParse(options.Host, out var httpAddress) &&
                            httpAddress.AddressFamily == AddressFamily.InterNetworkV6
-          ? $"[{options.Host}]:{options.Port}"
+          ? $"[{httpAddress}]:{options.Port}"
           : $"{options.Host}:{options.Port}";
         var request = new StringBuilder()
           .Append("CONNECT ").Append(authority)
@@ -87,6 +87,7 @@ internal static class PgProxyConnector
 
         var response = new byte[16 * 1024];
         var length = 0;
+        var headersComplete = false;
         while (length < response.Length)
         {
             var read = await stream.ReadAsync(response.AsMemory(length, 1), cancellationToken)
@@ -103,8 +104,14 @@ internal static class PgProxyConnector
                 response[length - 2] == '\r' &&
                 response[length - 1] == '\n')
             {
+                headersComplete = true;
                 break;
             }
+        }
+
+        if (!headersComplete)
+        {
+            throw new InvalidDataException("HTTP proxy CONNECT response headers exceed 16 KB.");
         }
 
         var statusLine = s_utf8.GetString(response, 0, length).Split("\r\n", 2)[0];
