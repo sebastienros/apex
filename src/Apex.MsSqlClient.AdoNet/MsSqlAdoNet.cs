@@ -58,12 +58,14 @@ public sealed class MsSqlDbConnection : ApexDbConnection
 public sealed class MsSqlDbCommand : ApexDbCommand
 {
     internal override DbException TranslateException(SqlClientException exception) => MsSqlAdoErrors.Translate(exception);
-    public MsSqlDbCommand() : base(new MsSqlDbParameterCollection(), MsSqlAdoReaderFactory.Instance) { }
+    public MsSqlDbCommand() : this(new MsSqlDbParameterCollection()) { }
     public MsSqlDbCommand(MsSqlDbConnection connection)
-        : base(new MsSqlDbParameterCollection(), MsSqlAdoReaderFactory.Instance)
+        : this(new MsSqlDbParameterCollection())
     {
         Connection = connection;
     }
+    private MsSqlDbCommand(MsSqlDbParameterCollection parameters)
+        : base(parameters, new MsSqlAdoReaderFactory(parameters)) { }
     protected override ApexDbParameter CreateParameterCore() => new MsSqlDbParameter();
     protected override ISqlConnection GetConnection()
     {
@@ -183,9 +185,91 @@ public sealed class MsSqlDbDataSource : DbDataSource
     }
 }
 
-internal static class MsSqlAdoReaderFactory
+internal sealed class MsSqlAdoReaderFactory(MsSqlDbParameterCollection parameters) : IApexAdoReaderFactory
 {
-    internal static readonly IApexAdoReaderFactory Instance = new ApexResultReaderFactory("SQL Server");
+    private static readonly ApexResultReaderFactory s_fallback = new("SQL Server");
+    private readonly MsSqlDbParameterCollection _parameters = parameters;
+
+    public bool CanExecuteNonQuery(string sql) => false;
+
+    public int GetRecordsAffected(SqlCommandResult result) => checked((int)result.AffectedRows);
+
+    public ValueTask<ISqlRowReader> ExecuteReaderAsync(
+        ISqlConnection connection,
+        string sql,
+        SqlParameters parameters,
+        ISqlPreparedStatement? preparedStatement,
+        CancellationToken cancellationToken)
+    {
+        var parameterNames = ExtractParameterNames(parameters.Count);
+        if (parameterNames is not null)
+        {
+            if (preparedStatement is MsSqlPreparedStatement prepared)
+            {
+                return prepared.ExecuteResultReaderAsync(parameters, parameterNames, cancellationToken);
+            }
+
+            if (preparedStatement is null && connection is MsSqlConnection msSql)
+            {
+                return msSql.ExecuteResultReaderAsync(sql, parameters, parameterNames, cancellationToken);
+            }
+        }
+
+        return s_fallback.ExecuteReaderAsync(connection, sql, parameters, preparedStatement, cancellationToken);
+    }
+
+    private string[]? ExtractParameterNames(int count)
+    {
+        if (count == 0)
+        {
+            return null;
+        }
+
+        var hasNamed = false;
+        for (var i = 0; i < count; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(_parameters[i].ParameterName))
+            {
+                hasNamed = true;
+                break;
+            }
+        }
+
+        if (!hasNamed)
+        {
+            return null;
+        }
+
+        var names = new string[count];
+        for (var i = 0; i < count; i++)
+        {
+            var raw = _parameters[i].ParameterName;
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                names[i] = $"@P{i + 1}";
+                continue;
+            }
+
+            var trimmed = raw.Trim();
+            var normalized = trimmed[0] == '@' ? trimmed : string.Concat("@", trimmed);
+            if (normalized.Length == 1 || normalized.Length > byte.MaxValue)
+            {
+                throw new ArgumentException($"Invalid SQL Server parameter name '{raw}'.");
+            }
+
+            for (var c = 1; c < normalized.Length; c++)
+            {
+                if (char.IsWhiteSpace(normalized[c]) || normalized[c] == ',')
+                {
+                    throw new ArgumentException($"Invalid SQL Server parameter name '{raw}'.");
+                }
+            }
+
+            names[i] = normalized;
+        }
+
+        return names;
+    }
 }
 
 internal static class MsSqlAdoErrors

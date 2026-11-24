@@ -45,7 +45,10 @@ internal static class TdsLogin7
 
         var login = new byte[loginLength];
         BinaryPrimitives.WriteInt32LittleEndian(login, login.Length);
-        BinaryPrimitives.WriteUInt32BigEndian(login.AsSpan(4), 0x04000074);
+        var tdsVersion = options.EncryptionMode == MsSqlEncryptionMode.Strict
+          ? 0x08000000u
+          : 0x74000004u;
+        BinaryPrimitives.WriteUInt32LittleEndian(login.AsSpan(4), tdsVersion);
         BinaryPrimitives.WriteInt32LittleEndian(login.AsSpan(8), options.PacketSize);
         BinaryPrimitives.WriteInt32LittleEndian(login.AsSpan(16), Environment.ProcessId);
         // OptionFlags1: fUseDB | fDatabase | fSetLang. fUseDB makes the server send an ENVCHANGE

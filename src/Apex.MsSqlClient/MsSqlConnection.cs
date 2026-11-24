@@ -41,7 +41,9 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     private string _database;
     private long _transactionDescriptor;
     private bool _broken;
-    private bool _disposed;
+    private int _disposed;
+
+    internal bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     private MsSqlConnection(
         MsSqlConnectOptions options,
@@ -70,7 +72,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
           inFlightLimit: 1,
           queueCapacity: 64,
           IsFatalConnectionError,
-          abortTransport: socket.Dispose);
+          abortTransport: AbortTransport);
         _database = options.Database;
         IsSecure = secure;
         if (preLoginVersion is not null)
@@ -90,7 +92,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     public DatabaseMetadata DatabaseMetadata => _databaseMetadata;
 
     internal bool IsUsable =>
-      !_disposed && !_broken && !_scheduler.IsStopped && _socket.Connected;
+      !IsDisposed && !_broken && !_scheduler.IsStopped && _socket.Connected;
 
     internal bool IsReadyForPool => IsUsable && _transactionDescriptor == 0;
 
@@ -200,7 +202,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         int fetchSize = 50,
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(fetchSize);
         await foreach (var row in StreamRowsAsync(
@@ -281,7 +283,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         string sql,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult<ISqlPreparedStatement>(
@@ -293,7 +295,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters = default,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         return ValueTask.FromResult<ISqlRowReader>(
           new MsSqlRowReader(this, sql, parameters, cancellationToken));
@@ -302,16 +304,24 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
         string sql,
         SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteResultReaderAsync(sql, parameters, parameterNames: null, cancellationToken);
+
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+        string sql,
+        SqlParameters parameters,
+        string[]? parameterNames,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         return ValueTask.FromResult<ISqlRowReader>(
           new MsSqlResultReader(
             this,
             sql,
             parameters,
-            cancellationToken));
+            cancellationToken,
+            parameterNames));
     }
 
     ValueTask<ISqlRowReader> ISqlResultReaderConnection.ExecuteResultReaderAsync(
@@ -323,7 +333,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     public async ValueTask<ISqlTransaction> BeginTransactionAsync(
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (Interlocked.Read(ref _transactionDescriptor) != 0)
         {
             throw new InvalidOperationException("A transaction is already active.");
@@ -345,26 +355,26 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     public async ValueTask CancelRequestAsync(
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         AttentionState attention;
         lock (_attentionGate)
         {
             attention = _activeAttention ??
               throw new InvalidOperationException("There is no active SQL Server command to cancel.");
-            attention.Cancel(cancellationToken);
         }
 
+        attention.Cancel(cancellationToken);
         await attention.GetSendTask().ConfigureAwait(false);
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
 
-        _disposed = true;
+        AbortParkedAttention();
         try
         {
             await _scheduler.CloseAsync(static _ => ValueTask.CompletedTask).ConfigureAwait(false);
@@ -374,6 +384,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         }
         finally
         {
+            AbortActiveAttention();
             await _scheduler.DisposeAsync().ConfigureAwait(false);
             _rowDecoder.DisableCache();
             _writer.Dispose();
@@ -392,7 +403,8 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     internal ValueTask WriteRequestAsync(
         string sql,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string[]? parameterNames = null)
     {
         var payload = BeginRequest();
         byte messageType;
@@ -410,7 +422,8 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
               payload,
               sql,
               parameters,
-              Interlocked.Read(ref _transactionDescriptor));
+              Interlocked.Read(ref _transactionDescriptor),
+              parameterNames);
             messageType = TdsMessageType.Rpc;
         }
 
@@ -420,13 +433,15 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     internal async ValueTask<bool> WritePreparedRequestAsync(
         MsSqlPreparedStatement statement,
         SqlParameters parameters,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string[]? parameterNames = null)
     {
         var payload = BeginRequest();
         var preparesHandle = statement.WriteRequest(
           payload,
           parameters,
-          Interlocked.Read(ref _transactionDescriptor));
+          Interlocked.Read(ref _transactionDescriptor),
+          parameterNames);
         await SendRequestAsync(TdsMessageType.Rpc, cancellationToken).ConfigureAwait(false);
         return preparesHandle;
     }
@@ -436,7 +451,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         var operation = statement.Operation;
         using var activity = SqlClientDiagnostics.StartQuery(
           "sqlserver",
@@ -458,8 +473,9 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
               parameters,
               CancellationToken.None).ConfigureAwait(false);
               },
-              _ => ReceiveQueryAsync(
+              receiveToken => ReceiveQueryAsync(
                 cancellationToken,
+                receiveToken,
                 preparesHandle ? statement : null),
               barrier: true,
               cancellationToken).ConfigureAwait(false);
@@ -482,7 +498,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
 
     internal async ValueTask ClosePreparedAsync(MsSqlPreparedStatement statement)
     {
-        if (_disposed)
+        if (IsDisposed)
         {
             statement.MarkUnprepared(statement.GetHandleForClose());
             return;
@@ -512,7 +528,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
               receiveToken.ThrowIfCancellationRequested();
               if (sent)
               {
-                  await ReceiveQueryAsync(CancellationToken.None).ConfigureAwait(false);
+                  await ReceiveQueryAsync(CancellationToken.None, receiveToken).ConfigureAwait(false);
                   statement.MarkUnprepared(handle);
               }
 
@@ -639,9 +655,11 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         }
     }
 
-    internal AttentionState BeginAttention(CancellationToken cancellationToken)
+    internal AttentionState BeginAttention(
+        CancellationToken cancellationToken,
+        Action? onAbort = null)
     {
-        AttentionState attention = new(this, cancellationToken, _options.ConnectTimeout);
+        AttentionState attention = new(this, cancellationToken, _options.ConnectTimeout, onAbort);
         lock (_attentionGate)
         {
             if (_activeAttention is not null)
@@ -668,6 +686,34 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         }
     }
 
+    private void AbortParkedAttention()
+    {
+        AttentionState? attention;
+        lock (_attentionGate)
+        {
+            attention = _activeAttention;
+        }
+
+        attention?.AbortIfConsumerParked();
+    }
+
+    private void AbortActiveAttention()
+    {
+        AttentionState? attention;
+        lock (_attentionGate)
+        {
+            attention = _activeAttention;
+        }
+
+        attention?.AbortRead();
+    }
+
+    private void AbortTransport()
+    {
+        AbortActiveAttention();
+        _socket.Dispose();
+    }
+
     internal void MarkBroken()
     {
         _broken = true;
@@ -684,11 +730,12 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
             DualMode = true,
             NoDelay = true,
         };
+        Stream? stream = null;
         try
         {
             await socket.ConnectAsync(options.Host, options.Port, cancellationToken)
               .ConfigureAwait(false);
-            Stream stream = new NetworkStream(socket, ownsSocket: false);
+            stream = new NetworkStream(socket, ownsSocket: false);
             var secure = false;
             if (options.EncryptionMode == MsSqlEncryptionMode.Strict)
             {
@@ -752,6 +799,11 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         }
         catch
         {
+            if (stream is not null)
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+
             socket.Dispose();
             throw;
         }
@@ -883,7 +935,16 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
                 transport,
                 authentication,
                 cancellationToken).ConfigureAwait(false);
-            ValidateStrictTlsAlpn(tls.NegotiatedApplicationProtocol, options);
+            try
+            {
+                ValidateStrictTlsAlpn(tls.NegotiatedApplicationProtocol, options);
+            }
+            catch
+            {
+                await tls.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
+
             handshakeStream?.SwitchToRaw();
             return tls;
 #else
@@ -893,9 +954,17 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         }
 
         SslStream ssl = new(transport, leaveInnerStreamOpen: false);
-        await ssl.AuthenticateAsClientAsync(authentication, cancellationToken)
-          .ConfigureAwait(false);
-        ValidateStrictTlsAlpn(ssl.NegotiatedApplicationProtocol, options);
+        try
+        {
+            await ssl.AuthenticateAsClientAsync(authentication, cancellationToken)
+              .ConfigureAwait(false);
+            ValidateStrictTlsAlpn(ssl.NegotiatedApplicationProtocol, options);
+        }
+        catch
+        {
+            await ssl.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
 
         handshakeStream?.SwitchToRaw();
         return ssl;
@@ -1065,7 +1134,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         var operation = GetOperation(sql);
         using var activity = SqlClientDiagnostics.StartQuery(
           "sqlserver",
@@ -1084,7 +1153,7 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
                   await WriteRequestAsync(sql, parameters, CancellationToken.None)
               .ConfigureAwait(false);
               },
-              _ => ReceiveQueryAsync(cancellationToken),
+              receiveToken => ReceiveQueryAsync(cancellationToken, receiveToken),
               barrier: true,
               cancellationToken).ConfigureAwait(false);
         }
@@ -1106,9 +1175,22 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
 
     private async ValueTask<SqlRowSet> ReceiveQueryAsync(
         CancellationToken cancellationToken,
+        CancellationToken shutdownToken = default,
         MsSqlPreparedStatement? preparingStatement = null)
     {
         using var attention = BeginAttention(cancellationToken);
+        using var shutdownRegistration = shutdownToken.CanBeCanceled
+          ? shutdownToken.Register(
+            static state =>
+            {
+                var (connection, activeAttention) = ((MsSqlConnection, AttentionState))state!;
+                if (connection.Scheduler.IsStopped || connection.IsDisposed)
+                {
+                    activeAttention.AbortRead();
+                }
+            },
+            (this, attention))
+          : default;
         var parser = _queryParser;
         parser.Reset();
         var tokens = _queryTokens;
@@ -1273,7 +1355,11 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
     internal static void ValidateOptions(MsSqlConnectOptions options)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(options.Host);
-        ArgumentException.ThrowIfNullOrWhiteSpace(options.Username);
+        if (options.AuthenticationProvider is null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(options.Username);
+        }
+
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ApplicationName);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ClientInterfaceName);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(options.Port);
@@ -1333,20 +1419,26 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         private readonly CancellationTokenRegistration _registration;
         private readonly CancellationTokenSource _drainCancellation = new();
         private readonly TimeSpan _drainTimeout;
+        private readonly Action? _onAbort;
         private Task? _sendTask;
         private CancellationToken _cancellationToken;
         private bool _acknowledged;
         private bool _cancellationRequested;
         private bool _commandCompleted;
+        private bool _consumerParked;
+        private bool _drainTimerArmed;
+        private bool _disposed;
 
         internal AttentionState(
             MsSqlConnection connection,
             CancellationToken cancellationToken,
-            TimeSpan drainTimeout)
+            TimeSpan drainTimeout,
+            Action? onAbort = null)
         {
             _connection = connection;
             _cancellationToken = cancellationToken;
             _drainTimeout = drainTimeout;
+            _onAbort = onAbort;
             _registration = cancellationToken.CanBeCanceled
               ? cancellationToken.Register(
                 static state => ((AttentionState)state!).CancelFromRegistration(),
@@ -1392,20 +1484,85 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
 
         internal void Cancel(CancellationToken cancellationToken)
         {
+            TaskCompletionSource? sendCompletion;
             lock (_gate)
             {
-                if (_cancellationRequested || _commandCompleted)
+                if (_cancellationRequested || _commandCompleted || _disposed)
                 {
                     return;
                 }
 
                 _cancellationRequested = true;
                 _cancellationToken = cancellationToken;
-                _sendTask = _connection.SendAttentionSafeAsync();
-                if (_drainTimeout > TimeSpan.Zero)
+                sendCompletion = new TaskCompletionSource(
+                  TaskCreationOptions.RunContinuationsAsynchronously);
+                _sendTask = sendCompletion.Task;
+                if (!_consumerParked && !_drainTimerArmed && _drainTimeout > TimeSpan.Zero)
                 {
+                    _drainTimerArmed = true;
                     _drainCancellation.CancelAfter(_drainTimeout);
                 }
+            }
+
+            _ = SendAndCompleteAsync(sendCompletion);
+        }
+
+        internal void SetConsumerParked(bool parked)
+        {
+            lock (_gate)
+            {
+                _consumerParked = parked;
+                if (!parked &&
+                    _cancellationRequested &&
+                    !_acknowledged &&
+                    !_commandCompleted &&
+                    !_disposed &&
+                    !_drainTimerArmed &&
+                    _drainTimeout > TimeSpan.Zero)
+                {
+                    _drainTimerArmed = true;
+                    _drainCancellation.CancelAfter(_drainTimeout);
+                }
+            }
+        }
+
+        internal void AbortIfConsumerParked()
+        {
+            var abort = false;
+            lock (_gate)
+            {
+                if (_disposed || _commandCompleted || !_consumerParked)
+                {
+                    return;
+                }
+
+                _drainCancellation.Cancel();
+                abort = true;
+            }
+
+            if (abort)
+            {
+                _onAbort?.Invoke();
+            }
+        }
+
+        internal void AbortRead()
+        {
+            var abort = false;
+            lock (_gate)
+            {
+                if (_disposed || _commandCompleted)
+                {
+                    return;
+                }
+
+                _drainCancellation.Cancel();
+                abort = true;
+            }
+
+            if (abort)
+            {
+                _onAbort?.Invoke();
             }
         }
 
@@ -1442,7 +1599,29 @@ public sealed class MsSqlConnection : ISqlConnection, ISqlResultReaderConnection
         public void Dispose()
         {
             _registration.Dispose();
-            _drainCancellation.Dispose();
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                _drainCancellation.Dispose();
+            }
+        }
+
+        private async Task SendAndCompleteAsync(TaskCompletionSource completion)
+        {
+            try
+            {
+                await _connection.SendAttentionSafeAsync().ConfigureAwait(false);
+                completion.TrySetResult();
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetException(exception);
+            }
         }
 
         private void CancelFromRegistration() => Cancel(_cancellationToken);

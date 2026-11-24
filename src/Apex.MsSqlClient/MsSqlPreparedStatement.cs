@@ -137,6 +137,12 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
 
     internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
         SqlParameters parameters,
+        CancellationToken cancellationToken) =>
+        ExecuteResultReaderAsync(parameters, parameterNames: null, cancellationToken);
+
+    internal ValueTask<ISqlRowReader> ExecuteResultReaderAsync(
+        SqlParameters parameters,
+        string[]? parameterNames,
         CancellationToken cancellationToken)
     {
         lock (_gate)
@@ -148,7 +154,8 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
                 _connection,
                 this,
                 parameters,
-                cancellationToken));
+                cancellationToken,
+                parameterNames));
         }
     }
 
@@ -199,37 +206,50 @@ internal sealed class MsSqlPreparedStatement : ISqlPreparedStatement, ISqlResult
     internal bool WriteRequest(
         IBufferWriter<byte> payload,
         SqlParameters parameters,
-        long transactionDescriptor)
+        long transactionDescriptor,
+        string[]? parameterNames = null)
     {
         lock (_gate)
         {
             if (_handle > 0)
             {
                 // The handle is bound to the declarations it was prepared with (decimal scale,
-                // string/binary length class, type). Values that need different declarations
-                // run unprepared instead of being rounded, truncated, or overflowed. A different
-                // parameter count still goes to sp_execute so the server rejects it, because
-                // sp_executesql would silently accept unused parameters.
+                // string/binary length class, type, parameter names). Values that need different
+                // declarations run unprepared instead of being rounded, truncated, or overflowed.
+                // A different parameter count still goes to sp_execute so the server rejects it,
+                // because sp_executesql would silently accept unused parameters.
                 if (parameters.Count != _handleParameterCount ||
-                    TdsRequestWriter.DefinitionsMatch(_handleDefinitions!, parameters))
+                    TdsRequestWriter.DefinitionsMatch(_handleDefinitions!, parameters, parameterNames))
                 {
-                    TdsRequestWriter.WriteExecute(payload, _handle, parameters, transactionDescriptor);
+                    TdsRequestWriter.WriteExecute(
+                      payload,
+                      _handle,
+                      parameters,
+                      transactionDescriptor,
+                      parameterNames,
+                      _handleDefinitions);
                 }
                 else
                 {
-                    TdsRequestWriter.WriteExecuteSql(payload, Sql, parameters, transactionDescriptor);
+                    TdsRequestWriter.WriteExecuteSql(
+                      payload,
+                      Sql,
+                      parameters,
+                      transactionDescriptor,
+                      parameterNames);
                 }
 
                 return false;
             }
 
-            var definitions = TdsRequestWriter.BuildDefinitions(parameters);
+            var definitions = TdsRequestWriter.BuildDefinitions(parameters, parameterNames);
             TdsRequestWriter.WritePrepareExecute(
               payload,
               Sql,
               definitions,
               parameters,
-              transactionDescriptor);
+              transactionDescriptor,
+              parameterNames);
             _preparingDefinitions = definitions;
             _preparingParameterCount = parameters.Count;
             _preparing = true;
