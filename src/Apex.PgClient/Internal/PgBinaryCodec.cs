@@ -54,7 +54,7 @@ internal static class PgBinaryCodec
             114 => DecodeJson(memory),
             3802 => DecodeJsonb(memory),
             18 or 19 or 25 or 1042 or 1043 => DecodeString(value),
-            1000 or 1001 or 1002 or 1003 or 1005 or 1007 or 1009 or 1015 or
+            1000 or 1001 or 1002 or 1003 or 1005 or 1007 or 1009 or 1014 or 1015 or
             1016 or 1017 or 1018 or 1019 or 1020 or 1021 or 1022 or 1027 or
             1041 or 1115 or 1182 or 1183 or 1185 or 1187 or 1231 or 1270 or
             199 or 629 or 651 or 719 or 775 or 791 or 1040 or 1561 or 1563 or 2951 or 3807 =>
@@ -246,7 +246,7 @@ internal static class PgBinaryCodec
     }
 
     internal static TimeOnly DecodeTimeOnly(ReadOnlySpan<byte> value) =>
-      TimeOnly.FromTimeSpan(TimeSpan.FromTicks(ReadInt64(value) * 10));
+      TimeOnly.FromTimeSpan(TimeSpan.FromTicks(checked(ReadInt64(value) * 10)));
 
     internal static DateTime DecodeDateTime(ReadOnlySpan<byte> value)
     {
@@ -255,7 +255,7 @@ internal static class PgBinaryCodec
         {
             long.MaxValue => DateTime.MaxValue,
             long.MinValue => DateTime.MinValue,
-            _ => s_pgTimestampEpoch.AddTicks(microseconds * 10),
+            _ => s_pgTimestampEpoch.AddTicks(checked(microseconds * 10)),
         };
     }
 
@@ -266,7 +266,7 @@ internal static class PgBinaryCodec
         {
             long.MaxValue => DateTimeOffset.MaxValue,
             long.MinValue => DateTimeOffset.MinValue,
-            _ => s_pgTimestampWithTimeZoneEpoch.AddTicks(microseconds * 10),
+            _ => s_pgTimestampWithTimeZoneEpoch.AddTicks(checked(microseconds * 10)),
         };
     }
 
@@ -315,7 +315,7 @@ internal static class PgBinaryCodec
     {
         Ensure(value, 0, 12);
         TimeOnly time =
-          TimeOnly.FromTimeSpan(TimeSpan.FromTicks(ReadInt64(value) * 10));
+          TimeOnly.FromTimeSpan(TimeSpan.FromTicks(checked(ReadInt64(value) * 10)));
         TimeSpan offset = TimeSpan.FromSeconds(-ReadInt32(value[8..]));
         return new PgTimeWithTimeZone(time, offset);
     }
@@ -548,7 +548,7 @@ internal static class PgBinaryCodec
       {
           16 => DecodeArray<bool?>(arrayTypeId, value),
           17 => DecodeArray<byte[]?>(arrayTypeId, value),
-          18 or 19 or 25 or 1043 => DecodeArray<string?>(arrayTypeId, value),
+          18 or 19 or 25 or 1042 or 1043 => DecodeArray<string?>(arrayTypeId, value),
           20 => DecodeArray<long?>(arrayTypeId, value),
           21 => DecodeArray<short?>(arrayTypeId, value),
           23 => DecodeArray<int?>(arrayTypeId, value),
@@ -587,7 +587,7 @@ internal static class PgBinaryCodec
         {
             16 => ConvertValue<TElement, bool>(DecodeBoolean(value), elementType),
             17 => ConvertReference<TElement, byte[]>(DecodeBytes(value), elementType),
-            18 or 19 or 25 or 1043 =>
+            18 or 19 or 25 or 1042 or 1043 =>
               ConvertText<TElement>(DecodeString(value), elementType),
             20 => ConvertValue<TElement, long>(DecodeInt64(value), elementType),
             21 => ConvertInt16<TElement>(DecodeInt16(value), elementType),
@@ -601,7 +601,9 @@ internal static class PgBinaryCodec
             1184 => ConvertValue<TElement, DateTimeOffset>(DecodeDateTimeOffset(value), elementType),
             1186 => ConvertInterval<TElement>(DecodeInterval(value), elementType),
             1266 => ConvertValue<TElement, PgTimeWithTimeZone>(DecodeTimeWithTimeZone(value), elementType),
-            1700 => ConvertNumeric<TElement>(DecodeNumeric(value), elementType),
+            1700 => typeof(TElement) == typeof(decimal) || typeof(TElement) == typeof(decimal?)
+              ? ConvertValue<TElement, decimal>(DecodeDecimal(value), elementType)
+              : ConvertNumeric<TElement>(DecodeNumeric(value), elementType),
             2950 => ConvertValue<TElement, Guid>(DecodeGuid(value), elementType),
             600 => ConvertValue<TElement, PgPoint>(DecodePoint(value), elementType),
             601 => ConvertValue<TElement, PgLineSegment>(DecodeLineSegment(value), elementType),

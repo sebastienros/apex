@@ -29,7 +29,11 @@ internal static class PgEnumParser
         where T : struct, Enum
     {
         var normalized = value.Replace("-", string.Empty, StringComparison.Ordinal);
-        return Enum.TryParse(normalized, ignoreCase: true, out T result)
+        return normalized.Length > 0 &&
+               !char.IsAsciiDigit(normalized[0]) &&
+               normalized[0] is not ('+' or '-') &&
+               Enum.TryParse(normalized, ignoreCase: true, out T result) &&
+               Enum.IsDefined(result)
             ? result
             : throw new ArgumentException($"Unknown {typeof(T).Name} value '{value}'.", nameof(value));
     }

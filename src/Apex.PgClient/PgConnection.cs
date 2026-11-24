@@ -30,7 +30,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
     private readonly BoundedOrderedCommandScheduler _scheduler;
     private readonly object _statementCacheGate = new();
     private readonly LruCache<string, string>? _statementCache;
-    private bool _disposed;
+    private int _disposed;
     private int _processId;
     private int _secretKey;
     private int _statementSequence;
@@ -90,7 +90,9 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
     public PgTypeRegistry TypeRegistry => _typeRegistry;
 
-    internal bool IsUsable => !_disposed && !_scheduler.IsStopped && _socket.Connected;
+    private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
+    internal bool IsUsable => !IsDisposed && !_scheduler.IsStopped && _socket.Connected;
 
     internal bool IsReadyForPool =>
         IsUsable && _transactionStatus == (byte)'I' && Volatile.Read(ref _copyActive) == 0;
@@ -126,9 +128,11 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         }
 
         var socket = CreateSocket(options);
+        Stream? stream = null;
+        PgConnection? connection = null;
         try
         {
-            Stream stream = await PgProxyConnector.ConnectAsync(socket, options, timeout.Token)
+            stream = await PgProxyConnector.ConnectAsync(socket, options, timeout.Token)
               .ConfigureAwait(false);
             var secure = false;
             byte[]? channelBindingData = null;
@@ -163,7 +167,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                 }
             }
 
-            PgConnection connection = new(
+            connection = new PgConnection(
                 options,
                 socket,
                 stream,
@@ -179,6 +183,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
               IsSslRequired(exception))
             {
                 await connection.DisposeAsync().ConfigureAwait(false);
+                connection = null;
                 return await ConnectAsync(
                   options with { SslMode = PgSslMode.Require },
                   cancellationToken).ConfigureAwait(false);
@@ -188,6 +193,15 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         }
         catch
         {
+            if (connection is not null)
+            {
+                await connection.DisposeAsync().ConfigureAwait(false);
+            }
+            else if (stream is not null)
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+
             socket.Dispose();
             throw;
         }
@@ -249,7 +263,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         PgBatch batch,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentNullException.ThrowIfNull(batch);
         ThrowIfCopyActive();
         if (batch.Count == 0)
@@ -300,7 +314,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         string copySql,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(copySql);
         if (Volatile.Read(ref _copyActive) != 0)
         {
@@ -340,7 +354,13 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         {
             if (ownsCopy)
             {
-                _socket.Dispose();
+                // A PgException from ReadCopyInResponseAsync is only thrown after ReadyForQuery,
+                // so the protocol is cleanly synchronized and the connection stays reusable.
+                if (exception is not PgException || IsFatalConnectionError(exception))
+                {
+                    _socket.Dispose();
+                }
+
                 Volatile.Write(ref _copyActive, 0);
             }
             activity?.SetStatus(
@@ -398,7 +418,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         string sql,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ThrowIfCopyActive();
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         if (_options.UseLayer7Proxy && _transactionStatus != (byte)'T')
@@ -436,7 +456,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters = default,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ThrowIfCopyActive();
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         return ValueTask.FromResult<ISqlRowReader>(
@@ -453,7 +473,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ThrowIfCopyActive();
         ArgumentException.ThrowIfNullOrWhiteSpace(sql);
         // The extended protocol accepts one statement, so parameterless multi-statement text uses the
@@ -486,7 +506,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         PgTransactionOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ThrowIfCopyActive();
         options ??= new PgTransactionOptions();
         if (options.Deferrable &&
@@ -506,7 +526,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         string beginSql,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ThrowIfCopyActive();
         return await _scheduler.ExecuteAsync(
           async token =>
@@ -539,8 +559,20 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
            throw new TransactionException("Only an active ambient transaction can be enlisted.");
         }
 
+        var isolation = transaction.IsolationLevel switch
+        {
+            System.Transactions.IsolationLevel.Serializable => PgIsolationLevel.Serializable,
+            System.Transactions.IsolationLevel.RepeatableRead or
+            System.Transactions.IsolationLevel.Snapshot => PgIsolationLevel.RepeatableRead,
+            System.Transactions.IsolationLevel.ReadCommitted or
+            System.Transactions.IsolationLevel.ReadUncommitted or
+            System.Transactions.IsolationLevel.Unspecified => PgIsolationLevel.ReadCommitted,
+            _ => throw new NotSupportedException(
+                $"Ambient transaction isolation level '{transaction.IsolationLevel}' is not supported by PostgreSQL."),
+        };
+
         var pgTransaction = await BeginPgTransactionAsync(
-           new PgTransactionOptions(),
+           new PgTransactionOptions { IsolationLevel = isolation },
            cancellationToken).ConfigureAwait(false);
         try
         {
@@ -574,7 +606,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
     public async ValueTask CancelRequestAsync(CancellationToken cancellationToken = default)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         using CancellationTokenSource timeout =
           CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_options.ConnectTimeout);
@@ -615,12 +647,11 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
             return;
         }
 
-        _disposed = true;
         try
         {
             if (Volatile.Read(ref _copyActive) == 0)
@@ -675,13 +706,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                     switch (authenticationType)
                     {
                         case 0:
-                            if (_options.ChannelBinding == PgChannelBinding.Require &&
-                                !scramServerFinalVerified)
-                            {
-                                throw new AuthenticationException(
-                                  "PostgreSQL channel binding was required but authentication did not verify SCRAM-SHA-256-PLUS.");
-                            }
-
+                            ValidateAuthenticationCompletion(scram, scramServerFinalVerified);
                             break;
                         case 3:
                             RejectNonBindingAuthentication();
@@ -758,12 +783,29 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                 case (byte)'E':
                     throw ParseError(message.Payload.Span);
                 case (byte)'Z':
+                    ValidateAuthenticationCompletion(scram, scramServerFinalVerified);
                     UpdateTransactionStatus(message.Payload.Span);
                     return;
                 default:
                     throw new InvalidDataException(
                         $"Unexpected PostgreSQL startup message '{(char)message.Type}'.");
             }
+        }
+    }
+
+    private void ValidateAuthenticationCompletion(PgScramClient? scram, bool scramServerFinalVerified)
+    {
+        if (scram is not null && !scramServerFinalVerified)
+        {
+            throw new AuthenticationException(
+              "PostgreSQL SCRAM authentication completed without verifying the server signature.");
+        }
+
+        if (_options.ChannelBinding == PgChannelBinding.Require &&
+            !scramServerFinalVerified)
+        {
+            throw new AuthenticationException(
+              "PostgreSQL channel binding was required but authentication did not verify SCRAM-SHA-256-PLUS.");
         }
     }
 
@@ -790,7 +832,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ThrowIfCopyActive();
         var operation = GetOperation(sql);
         using var activity = SqlClientDiagnostics.StartQuery(
@@ -803,7 +845,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         Exception? error = null;
         try
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
             ValueTask<SqlRowSet> execution;
             var cachedExecution = false;
 
@@ -922,7 +964,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         PgParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         ThrowIfCopyActive();
         var operation = GetOperation(sql);
         using var activity = SqlClientDiagnostics.StartQuery(
@@ -1043,7 +1085,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         using var activity = SqlClientDiagnostics.StartQuery(
             "postgresql",
             _options.Database,
@@ -1096,7 +1138,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         SqlParameters parameters,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         using var activity = SqlClientDiagnostics.StartQuery(
             "postgresql",
             _options.Database,
@@ -1145,7 +1187,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         string sql,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         await _scheduler.ExecuteAsync(
           async token =>
           {
@@ -1176,15 +1218,31 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
     internal async ValueTask CompleteCopyAsync(CancellationToken cancellationToken)
     {
-        var completed = false;
+        var synchronized = false;
         try
         {
-            await _writer.WriteCopyDoneAsync(cancellationToken).ConfigureAwait(false);
-            await ReadCopyCompletionAsync(
-                CancellationToken.None,
-                throwServerError: true).ConfigureAwait(false);
-            completed = true;
+            await _scheduler.ExecuteAsync(
+                async token =>
+                {
+                    token.ThrowIfCancellationRequested();
+                    await _writer.WriteCopyDoneAsync(cancellationToken).ConfigureAwait(false);
+                },
+                async _ =>
+                {
+                    await ReadCopyCompletionAsync(
+                        CancellationToken.None,
+                        throwServerError: true).ConfigureAwait(false);
+                    return true;
+                },
+                barrier: true).ConfigureAwait(false);
+            synchronized = true;
             cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (PgException)
+        {
+            // ReadCopyCompletionAsync throws PgException only after ReadyForQuery.
+            synchronized = true;
+            throw;
         }
         catch
         {
@@ -1193,7 +1251,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         }
         finally
         {
-            if (completed || !_socket.Connected)
+            if (synchronized || !_socket.Connected)
             {
                 Volatile.Write(ref _copyActive, 0);
             }
@@ -1209,10 +1267,19 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
         try
         {
-            await _writer.WriteCopyFailAsync(message, CancellationToken.None).ConfigureAwait(false);
-            await ReadCopyCompletionAsync(
-                CancellationToken.None,
-                throwServerError: false).ConfigureAwait(false);
+            await _scheduler.ExecuteAsync(
+                async _ =>
+                {
+                    await _writer.WriteCopyFailAsync(message, CancellationToken.None).ConfigureAwait(false);
+                },
+                async _ =>
+                {
+                    await ReadCopyCompletionAsync(
+                        CancellationToken.None,
+                        throwServerError: false).ConfigureAwait(false);
+                    return true;
+                },
+                barrier: true).ConfigureAwait(false);
         }
         catch
         {
@@ -1227,7 +1294,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
     internal async ValueTask ClosePreparedAsync(string name)
     {
-        if (_disposed)
+        if (IsDisposed)
         {
             return;
         }
@@ -1253,7 +1320,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         int fetchSize,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (_transactionStatus != (byte)'T')
         {
             throw new InvalidOperationException(
@@ -1288,7 +1355,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         int fetchSize,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         return await _scheduler.ExecuteAsync(
           async token =>
           {
@@ -1318,7 +1385,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
     internal async ValueTask ClosePortalAsync(string portalName)
     {
-        if (_disposed)
+        if (IsDisposed)
         {
             return;
         }
@@ -1343,7 +1410,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
     internal async ValueTask<PgNotification> WaitForNotificationAsync(
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         return await _scheduler.ExecuteAsync(
           static _ => ValueTask.CompletedTask,
           ReadNotificationAsync,
@@ -1450,7 +1517,20 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
     {
         while (true)
         {
-            using var message = await _reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+            if (_stream is SslStream &&
+                !_reader.HasBufferedData &&
+                cancellationToken.CanBeCanceled)
+            {
+                // Cancelling an active SslStream.ReadAsync aborts the TLS stream; wait for socket
+                // readiness with a zero-byte receive first so interrupting WAIT leaves TLS intact.
+                _ = await _socket.ReceiveAsync(
+                    Memory<byte>.Empty,
+                    SocketFlags.None,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
+            var readToken = _stream is SslStream ? CancellationToken.None : cancellationToken;
+            using var message = await _reader.ReadAsync(readToken).ConfigureAwait(false);
             switch (message.Type)
             {
                 case (byte)'A':
@@ -1556,6 +1636,9 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                     break;
                 case (byte)'C':
                     commandTag = ParseCommandTag(message.Payload.Span);
+                    completed = true;
+                    break;
+                case (byte)'I':
                     completed = true;
                     break;
                 case (byte)'E':
@@ -1690,6 +1773,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
 
                     break;
                 case (byte)'C':
+                case (byte)'I':
                     completed = true;
                     break;
                 case (byte)'E':
@@ -1944,6 +2028,9 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                     break;
                 case (byte)'C':
                     commandTag = ParseCommandTag(message.Payload.Span);
+                    completed = true;
+                    break;
+                case (byte)'I':
                     completed = true;
                     break;
                 case (byte)'s':
@@ -2391,8 +2478,16 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
                 stream,
                 authenticationOptions,
                 cancellationToken).ConfigureAwait(false);
-            ValidateDirectTlsAlpn(tls.NegotiatedApplicationProtocol, options);
-            return tls;
+            try
+            {
+                ValidateDirectTlsAlpn(tls.NegotiatedApplicationProtocol, options);
+                return tls;
+            }
+            catch
+            {
+                await tls.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
 #else
             throw new PlatformNotSupportedException(
               "Experimental low-level TLS requires .NET 11 or later.");
@@ -2400,11 +2495,19 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
         }
 
         SslStream ssl = new(stream, leaveInnerStreamOpen: false);
-        await ssl.AuthenticateAsClientAsync(
-            authenticationOptions,
-            cancellationToken).ConfigureAwait(false);
-        ValidateDirectTlsAlpn(ssl.NegotiatedApplicationProtocol, options);
-        return ssl;
+        try
+        {
+            await ssl.AuthenticateAsClientAsync(
+                authenticationOptions,
+                cancellationToken).ConfigureAwait(false);
+            ValidateDirectTlsAlpn(ssl.NegotiatedApplicationProtocol, options);
+            return ssl;
+        }
+        catch
+        {
+            await ssl.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     private static void ValidateDirectTlsAlpn(
@@ -2439,7 +2542,7 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
            _ => null,
         } ?? throw new AuthenticationException(
             "The TLS server certificate is unavailable for PostgreSQL channel binding.");
-        var certificate2 =
+        using var certificate2 =
           X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
         var signatureAlgorithm = certificate2.SignatureAlgorithm.Value ?? string.Empty;
         return signatureAlgorithm switch
@@ -2878,10 +2981,31 @@ public sealed class PgConnection : ISqlConnection, ISqlResultReaderConnection
             Task<bool> wait,
             CancellationToken cancellationToken)
         {
-            using var registration = cancellationToken.CanBeCanceled
-                ? cancellationToken.Register(_cancelAction)
-                : default;
-            return await wait.ConfigureAwait(false);
+            if (!cancellationToken.CanBeCanceled)
+            {
+                return await wait.ConfigureAwait(false);
+            }
+
+            lock (_gate)
+            {
+                _readCancellationToken = cancellationToken;
+            }
+
+            try
+            {
+                using var registration = cancellationToken.Register(_cancelAction);
+                return await wait.ConfigureAwait(false);
+            }
+            finally
+            {
+                lock (_gate)
+                {
+                    if (_readCancellationToken == cancellationToken)
+                    {
+                        _readCancellationToken = default;
+                    }
+                }
+            }
         }
 
         public ValueTask<bool> ReadAsync(

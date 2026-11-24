@@ -114,7 +114,7 @@ public sealed class PgTextCodecTests
         Assert.AreEqual("hello", Format("hello".ToCharArray()));
         Assert.AreEqual("12:30:00", Format(TimeSpan.FromHours(12.5)));
         Assert.AreEqual("1 days 02:30:00", Format(TimeSpan.FromHours(26.5)));
-        Assert.AreEqual("-1 days 02:30:00", Format(TimeSpan.FromHours(-26.5)));
+        Assert.AreEqual("-1 days -02:30:00", Format(TimeSpan.FromHours(-26.5)));
         Assert.AreEqual("192.0.2.1", Format(IPAddress.Parse("192.0.2.1")));
         Assert.AreEqual(
             "08:00:2b:01:02:03",

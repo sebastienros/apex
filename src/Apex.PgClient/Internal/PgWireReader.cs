@@ -143,6 +143,8 @@ internal sealed class PgWireReader
         }
     }
 
+    public bool HasBufferedData => _end > _start;
+
     public ValueTask CompleteAsync(Exception? exception = null)
     {
         var buffer = Interlocked.Exchange(ref _buffer, null);
@@ -194,8 +196,14 @@ internal sealed class PgWireReader
         {
             var grown = ArrayPool<byte>.Shared.Rent(required);
             buffer.AsSpan(_start, available).CopyTo(grown);
+            if (Interlocked.CompareExchange(ref _buffer, grown, buffer) != buffer)
+            {
+                ArrayPool<byte>.Shared.Return(grown);
+                throw new ObjectDisposedException(nameof(PgWireReader));
+            }
+
             ArrayPool<byte>.Shared.Return(buffer);
-            _buffer = buffer = grown;
+            buffer = grown;
         }
         else if (_start > 0)
         {

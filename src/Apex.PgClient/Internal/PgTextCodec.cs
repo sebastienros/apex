@@ -66,15 +66,16 @@ internal static class PgTextCodec
         ? parsed
         : throw new FormatException("Invalid PostgreSQL INT8 value.");
 
+    private const NumberStyles FloatTextStyles =
+      NumberStyles.AllowLeadingSign | NumberStyles.AllowDecimalPoint | NumberStyles.AllowExponent;
+
     internal static float DecodeFloat(ReadOnlySpan<byte> value) =>
-      Utf8Parser.TryParse(value, out float parsed, out var consumed) &&
-      consumed == value.Length
+      float.TryParse(value, FloatTextStyles, CultureInfo.InvariantCulture, out var parsed)
         ? parsed
         : throw new FormatException("Invalid PostgreSQL FLOAT4 value.");
 
     internal static double DecodeDouble(ReadOnlySpan<byte> value) =>
-      Utf8Parser.TryParse(value, out double parsed, out var consumed) &&
-      consumed == value.Length
+      double.TryParse(value, FloatTextStyles, CultureInfo.InvariantCulture, out var parsed)
         ? parsed
         : throw new FormatException("Invalid PostgreSQL FLOAT8 value.");
 
@@ -334,6 +335,7 @@ internal static class PgTextCodec
           1005 => 21,
           1007 => 23,
           1009 => 25,
+          1014 => 1042,
           1015 => 1043,
           1016 => 20,
           1017 => 600,
@@ -372,7 +374,7 @@ internal static class PgTextCodec
       {
           16 => DecodeArray<bool?>(arrayTypeId, value),
           17 => DecodeArray<byte[]?>(arrayTypeId, value),
-          18 or 19 or 25 or 1043 => DecodeArray<string?>(arrayTypeId, value),
+          18 or 19 or 25 or 1042 or 1043 => DecodeArray<string?>(arrayTypeId, value),
           20 => DecodeArray<long?>(arrayTypeId, value),
           21 => DecodeArray<short?>(arrayTypeId, value),
           23 => DecodeArray<int?>(arrayTypeId, value),
@@ -409,7 +411,7 @@ internal static class PgTextCodec
       {
           16 => ConvertValue<TElement, bool>(text == "t", elementType),
           17 => ConvertReference<TElement, byte[]>(ParseBytea(text), elementType),
-          18 or 19 or 25 or 1043 => ConvertText<TElement>(text, elementType),
+          18 or 19 or 25 or 1042 or 1043 => ConvertText<TElement>(text, elementType),
           20 => ConvertValue<TElement, long>(
             long.Parse(text, NumberStyles.Integer, CultureInfo.InvariantCulture),
             elementType),
@@ -523,7 +525,12 @@ internal static class PgTextCodec
 
     private static TElement ConvertNumeric<TElement>(PgNumeric value, uint elementType)
     {
-      if (typeof(TElement) == typeof(BigInteger) || typeof(TElement) == typeof(BigInteger?) ||
+        if (typeof(TElement) == typeof(decimal) || typeof(TElement) == typeof(decimal?))
+        {
+            return ConvertValue<TElement, decimal>(value.ToDecimal(), elementType);
+        }
+
+        if (typeof(TElement) == typeof(BigInteger) || typeof(TElement) == typeof(BigInteger?) ||
         typeof(TElement) == typeof(Int128) || typeof(TElement) == typeof(Int128?) ||
         typeof(TElement) == typeof(UInt128) || typeof(TElement) == typeof(UInt128?))
         {
@@ -989,6 +996,8 @@ internal static class PgTextCodec
           FormatArray(addresses, FormatPhysicalAddress),
           SqlValueKind.Object when value.ToObject() is BitArray[] bitArrays =>
           FormatArray(bitArrays, FormatBitArray),
+          SqlValueKind.Object when value.ToObject() is Array array && array.Rank == 1 =>
+          FormatUntypedArray(array),
           _ => value.ToObject() is IFormattable formattable
           ? formattable.ToString(
             null,
@@ -1032,9 +1041,16 @@ internal static class PgTextCodec
           formattedOffset;
     }
 
-    private static string FormatInterval(PgInterval value) =>
-      FormattableString.Invariant(
-        $"{value.Years} years {value.Months} mons {value.Days} days {value.Hours} hours {value.Minutes} mins {value.Seconds}.{Math.Abs(value.Microseconds):D6} secs");
+    private static string FormatInterval(PgInterval value)
+    {
+        var totalMicros = ((long)value.Seconds * 1_000_000L) + value.Microseconds;
+        var sign = totalMicros < 0 ? "-" : string.Empty;
+        var absMicros = totalMicros < 0 ? (ulong)(-totalMicros) : (ulong)totalMicros;
+        var seconds = absMicros / 1_000_000UL;
+        var micros = absMicros % 1_000_000UL;
+        return FormattableString.Invariant(
+          $"{value.Years} years {value.Months} mons {value.Days} days {value.Hours} hours {value.Minutes} mins {sign}{seconds}.{micros:D6} secs");
+    }
 
     // A UTC DateTime carries an explicit zone so timestamptz comparisons don't depend on the
     // session TimeZone; PostgreSQL ignores the zone for timestamp without time zone.
@@ -1061,7 +1077,48 @@ internal static class PgTextCodec
         var prefix = negative ? "-" : string.Empty;
         return days == 0
           ? prefix + time
-          : FormattableString.Invariant($"{prefix}{days} days {time}");
+          : remainingTicks == 0
+            ? FormattableString.Invariant($"{prefix}{days} days")
+            : FormattableString.Invariant($"{prefix}{days} days {prefix}{time}");
+    }
+
+    private static string FormatUntypedArray(Array array)
+    {
+        var elementType = array.GetType().GetElementType();
+        var delimiter = elementType == typeof(PgBox) || elementType == typeof(PgBox?) ? ';' : ',';
+        StringBuilder builder = new();
+        builder.Append('{');
+        for (var i = 0; i < array.Length; i++)
+        {
+            if (i > 0)
+            {
+                builder.Append(delimiter);
+            }
+
+            var item = array.GetValue(i);
+            if (item is null)
+            {
+                builder.Append("NULL");
+                continue;
+            }
+
+            var formatted = FormatParameter(SqlValue.From(item));
+            builder.Append('"');
+            foreach (var c in formatted)
+            {
+                if (c is '"' or '\\')
+                {
+                    builder.Append('\\');
+                }
+
+                builder.Append(c);
+            }
+
+            builder.Append('"');
+        }
+
+        builder.Append('}');
+        return builder.ToString();
     }
 
     private static string FormatPhysicalAddress(PhysicalAddress value) =>

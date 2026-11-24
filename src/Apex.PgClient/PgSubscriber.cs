@@ -21,6 +21,8 @@ public sealed class PgSubscriber : IPgSubscriber
     private readonly CancellationToken _disposeToken;
     private readonly object _waitGate = new();
     private CancellationTokenSource? _waitCancellation;
+    private TaskCompletionSource? _resumeWait;
+    private int _pauseDepth;
     private PgConnection _connection;
     private readonly Task _listenLoop;
     private Exception? _listenError;
@@ -79,13 +81,20 @@ public sealed class PgSubscriber : IPgSubscriber
         try
         {
             ThrowIfStopped();
-            InterruptWait();
-            await _connection.ExecuteAsync(
-              "LISTEN " + QuoteIdentifier(channel),
-              cancellationToken).ConfigureAwait(false);
-            lock (_channels)
+            BeginPause();
+            try
             {
-                _channels.Add(channel);
+                await _connection.ExecuteAsync(
+                  "LISTEN " + QuoteIdentifier(channel),
+                  cancellationToken).ConfigureAwait(false);
+                lock (_channels)
+                {
+                    _channels.Add(channel);
+                }
+            }
+            finally
+            {
+                EndPause();
             }
         }
         finally
@@ -104,13 +113,20 @@ public sealed class PgSubscriber : IPgSubscriber
         try
         {
             ThrowIfStopped();
-            InterruptWait();
-            await _connection.ExecuteAsync(
-              "UNLISTEN " + QuoteIdentifier(channel),
-              cancellationToken).ConfigureAwait(false);
-            lock (_channels)
+            BeginPause();
+            try
             {
-                _channels.Remove(channel);
+                await _connection.ExecuteAsync(
+                  "UNLISTEN " + QuoteIdentifier(channel),
+                  cancellationToken).ConfigureAwait(false);
+                lock (_channels)
+                {
+                    _channels.Remove(channel);
+                }
+            }
+            finally
+            {
+                EndPause();
             }
         }
         finally
@@ -179,7 +195,19 @@ public sealed class PgSubscriber : IPgSubscriber
         var retry = 0;
         while (!_disposeCancellation.IsCancellationRequested)
         {
+            var pause = GetPauseTask();
+            if (pause is not null)
+            {
+                await pause.WaitAsync(_disposeCancellation.Token).ConfigureAwait(false);
+                continue;
+            }
+
             var wait = CreateWaitCancellation();
+            if (wait is null)
+            {
+                continue;
+            }
+
             var connection = _connection;
             try
             {
@@ -264,10 +292,52 @@ public sealed class PgSubscriber : IPgSubscriber
         }
     }
 
-    private CancellationTokenSource CreateWaitCancellation()
+    private Task? GetPauseTask()
     {
         lock (_waitGate)
         {
+            return _resumeWait?.Task;
+        }
+    }
+
+    private void BeginPause()
+    {
+        lock (_waitGate)
+        {
+            if (_pauseDepth++ == 0)
+            {
+                _resumeWait = new TaskCompletionSource(
+                  TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            _waitCancellation?.Cancel();
+        }
+    }
+
+    private void EndPause()
+    {
+        TaskCompletionSource? resume = null;
+        lock (_waitGate)
+        {
+            if (--_pauseDepth == 0)
+            {
+                resume = _resumeWait;
+                _resumeWait = null;
+            }
+        }
+
+        resume?.TrySetResult();
+    }
+
+    private CancellationTokenSource? CreateWaitCancellation()
+    {
+        lock (_waitGate)
+        {
+            if (_pauseDepth > 0)
+            {
+                return null;
+            }
+
             _waitCancellation = CancellationTokenSource.CreateLinkedTokenSource(
               _disposeCancellation.Token);
             return _waitCancellation;

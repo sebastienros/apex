@@ -38,37 +38,38 @@ public readonly record struct PgNumeric
     public static PgNumeric Parse(string value)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(value);
-        if (value.Equals("NaN", StringComparison.OrdinalIgnoreCase))
+        var text = value.AsSpan().Trim();
+        if (text.Equals("NaN", StringComparison.OrdinalIgnoreCase))
         {
             return NaN;
         }
 
-        if (value.Equals("Infinity", StringComparison.OrdinalIgnoreCase))
+        if (text.Equals("Infinity", StringComparison.OrdinalIgnoreCase) ||
+            text.Equals("+Infinity", StringComparison.OrdinalIgnoreCase))
         {
             return PositiveInfinity;
         }
 
-        if (value.Equals("-Infinity", StringComparison.OrdinalIgnoreCase))
+        if (text.Equals("-Infinity", StringComparison.OrdinalIgnoreCase))
         {
             return NegativeInfinity;
         }
 
-        var text = value.AsSpan();
         var exponentIndex = text.IndexOfAny('e', 'E');
         var exponent = exponentIndex < 0
           ? 0
-          : int.Parse(text[(exponentIndex + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture);
+          : int.Parse(text[(exponentIndex + 1)..], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
         var significand = exponentIndex < 0 ? text : text[..exponentIndex];
         var decimalIndex = significand.IndexOf('.');
         var fractionalDigits = decimalIndex < 0 ? 0 : significand.Length - decimalIndex - 1;
         var digits = decimalIndex < 0
           ? significand.ToString()
           : string.Concat(significand[..decimalIndex], significand[(decimalIndex + 1)..]);
-        BigInteger unscaled = BigInteger.Parse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture);
-        var scale = fractionalDigits - exponent;
+        BigInteger unscaled = BigInteger.Parse(digits, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture);
+        var scale = checked(fractionalDigits - exponent);
         if (scale < 0)
         {
-            unscaled *= BigInteger.Pow(10, -scale);
+            unscaled *= BigInteger.Pow(10, checked(-scale));
             scale = 0;
         }
 

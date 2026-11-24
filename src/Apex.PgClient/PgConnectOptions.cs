@@ -126,7 +126,7 @@ public sealed record PgConnectOptions : SqlConnectOptions
 
         PgConnectOptions options = new()
         {
-            Host = uri.Host,
+            Host = uri.DnsSafeHost,
             Port = uri.IsDefaultPort ? 5432 : uri.Port,
             Database = Uri.UnescapeDataString(uri.AbsolutePath.TrimStart('/')),
         };
