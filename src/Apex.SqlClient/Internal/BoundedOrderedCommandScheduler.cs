@@ -416,14 +416,19 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             {
                 // Disposal fails the unsent rest of the batch (FailBatch); sending it would only
                 // put commands on the wire that no caller will get a result for.
-                SignalRemaining(batch, index, pipelined);
+                ClearUnsignaledSentFlags(batch);
+                SignalRemaining(batch, 0, pipelined);
                 return false;
             }
 
             if (entry.Command.CancellationToken.IsCancellationRequested)
             {
                 entry.CanceledBeforeSend = true;
-                SignalReady(entry, pipelined);
+                if (!flushBatch)
+                {
+                    SignalReady(entry, pipelined);
+                }
+
                 continue;
             }
 
@@ -432,7 +437,7 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
                 await SendAsync(entry.Command).ConfigureAwait(false);
                 entry.WasSent = true;
                 flushBatch |= entry.Command.FlushBatch;
-                if (!entry.Command.FlushBatch)
+                if (!flushBatch)
                 {
                     SignalReady(entry, pipelined);
                 }
@@ -440,12 +445,17 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             catch (Exception exception)
             {
                 entry.SendError = exception;
-                SignalReady(entry, pipelined);
                 if (IsFatal(exception))
                 {
                     Stop(exception);
-                    SignalRemaining(batch, index + 1, pipelined);
+                    ClearUnsignaledSentFlags(batch);
+                    SignalRemaining(batch, 0, pipelined);
                     return false;
+                }
+
+                if (!flushBatch)
+                {
+                    SignalReady(entry, pipelined);
                 }
             }
         }
@@ -461,12 +471,18 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
             catch (Exception exception)
             {
                 Stop(exception);
+                ClearUnsignaledSentFlags(batch);
                 SignalRemaining(batch, 0, pipelined);
                 return false;
             }
         }
         else
         {
+            if (flushBatch && _shutdown.IsCancellationRequested)
+            {
+                ClearUnsignaledSentFlags(batch);
+            }
+
             SignalRemaining(batch, 0, pipelined);
         }
 
@@ -558,6 +574,18 @@ internal sealed class BoundedOrderedCommandScheduler : IAsyncDisposable
         for (var index = startIndex; index < batch.Count; index++)
         {
             SignalReady(batch[index], pipelined);
+        }
+    }
+
+    private static void ClearUnsignaledSentFlags(List<BatchEntry> batch)
+    {
+        for (var index = 0; index < batch.Count; index++)
+        {
+            var entry = batch[index];
+            if (!entry.IsReady)
+            {
+                entry.WasSent = false;
+            }
         }
     }
 

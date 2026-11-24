@@ -47,12 +47,28 @@ internal sealed class LowLevelTlsStream : Stream
     {
         _inner = inner;
         _authenticationOptions = authenticationOptions;
+        var contextOptions = authenticationOptions;
         if (authenticationOptions.RemoteCertificateValidationCallback is { } validation)
         {
-            authenticationOptions.RemoteCertificateValidationCallback =
-              (_, certificate, chain, errors) => validation(this, certificate, chain, errors);
+            contextOptions = new SslClientAuthenticationOptions
+            {
+                AllowRenegotiation = authenticationOptions.AllowRenegotiation,
+                AllowTlsResume = authenticationOptions.AllowTlsResume,
+                ApplicationProtocols = authenticationOptions.ApplicationProtocols,
+                CertificateChainPolicy = authenticationOptions.CertificateChainPolicy,
+                CertificateRevocationCheckMode = authenticationOptions.CertificateRevocationCheckMode,
+                CipherSuitesPolicy = authenticationOptions.CipherSuitesPolicy,
+                ClientCertificates = authenticationOptions.ClientCertificates,
+                ClientCertificateContext = authenticationOptions.ClientCertificateContext,
+                EnabledSslProtocols = authenticationOptions.EnabledSslProtocols,
+                EncryptionPolicy = authenticationOptions.EncryptionPolicy,
+                LocalCertificateSelectionCallback = authenticationOptions.LocalCertificateSelectionCallback,
+                RemoteCertificateValidationCallback = (_, certificate, chain, errors) =>
+                  validation(this, certificate, chain, errors),
+                TargetHost = authenticationOptions.TargetHost,
+            };
         }
-        _context = TlsContext.CreateClient(authenticationOptions);
+        _context = TlsContext.CreateClient(contextOptions);
         _session = new TlsBufferSession();
         _session.SetContext(_context);
         _cipherInput = ArrayPool<byte>.Shared.Rent(CipherBufferSize);
@@ -177,10 +193,26 @@ internal sealed class LowLevelTlsStream : Stream
                     case TlsOperationStatus.Closed:
                         return 0;
                     case TlsOperationStatus.NeedsCertificateValidation:
-                        ResolveCertificateValidation();
+                        _stateLock.Wait();
+                        try
+                        {
+                            ResolveCertificateValidation();
+                        }
+                        finally
+                        {
+                            _stateLock.Release();
+                        }
                         break;
                     case TlsOperationStatus.CertificateRequested:
-                        ResolveClientCertificate();
+                        _stateLock.Wait();
+                        try
+                        {
+                            ResolveClientCertificate();
+                        }
+                        finally
+                        {
+                            _stateLock.Release();
+                        }
                         break;
                     case TlsOperationStatus.Complete:
                         // TLS 1.3 post-handshake records can complete without plaintext.
@@ -258,10 +290,26 @@ internal sealed class LowLevelTlsStream : Stream
                     case TlsOperationStatus.Closed:
                         return 0;
                     case TlsOperationStatus.NeedsCertificateValidation:
-                        ResolveCertificateValidation();
+                        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        try
+                        {
+                            ResolveCertificateValidation();
+                        }
+                        finally
+                        {
+                            _stateLock.Release();
+                        }
                         break;
                     case TlsOperationStatus.CertificateRequested:
-                        ResolveClientCertificate();
+                        await _stateLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+                        try
+                        {
+                            ResolveClientCertificate();
+                        }
+                        finally
+                        {
+                            _stateLock.Release();
+                        }
                         break;
                     case TlsOperationStatus.Complete:
                         // TLS 1.3 post-handshake records can complete without plaintext.
@@ -446,6 +494,11 @@ internal sealed class LowLevelTlsStream : Stream
                     await ReadCiphertextAsync(cancellationToken).ConfigureAwait(false);
                     break;
                 case TlsOperationStatus.DestinationTooSmall:
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (consumed == 0 && written == 0 && !_session.HasPendingOutput)
+                    {
+                        GrowCipherOutput();
+                    }
                     break;
                 case TlsOperationStatus.NeedsCertificateValidation:
                     ResolveCertificateValidation();
@@ -680,6 +733,22 @@ internal sealed class LowLevelTlsStream : Stream
 
     private Span<byte> GetCipherOutput() =>
       _cipherOutput ?? throw new ObjectDisposedException(nameof(LowLevelTlsStream));
+
+    private void GrowCipherOutput()
+    {
+        var buffer = _cipherOutput ??
+          throw new ObjectDisposedException(nameof(LowLevelTlsStream));
+        if (buffer.Length >= MaximumCipherBufferSize)
+        {
+            throw new AuthenticationException(
+              $"TLS handshake output exceeded {MaximumCipherBufferSize} bytes without making progress.");
+        }
+
+        var grown = ArrayPool<byte>.Shared.Rent(
+          Math.Min(MaximumCipherBufferSize, buffer.Length * 2));
+        ArrayPool<byte>.Shared.Return(buffer);
+        _cipherOutput = grown;
+    }
 
     private Span<byte> GetPlainInput() =>
       _plainInput ?? throw new ObjectDisposedException(nameof(LowLevelTlsStream));

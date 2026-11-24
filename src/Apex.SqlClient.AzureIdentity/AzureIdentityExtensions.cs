@@ -85,6 +85,10 @@ public static class AzureIdentityExtensions
         if (inferUsername)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(options.ManagementScope);
+            if (options.Username is not null)
+            {
+                ArgumentException.ThrowIfNullOrWhiteSpace(options.Username);
+            }
         }
 
         AzureTokenAuthenticationProvider provider = new(
